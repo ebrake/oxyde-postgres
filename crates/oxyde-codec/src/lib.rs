@@ -296,9 +296,10 @@ pub struct QueryIR {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_types: Option<HashMap<String, ColumnTypeSpec>>,
 
-    /// Verbatim array `db_type` overrides, keyed like `column_types`.
-    /// Filters on PostgreSQL cast array values to them (`INTEGER[]` where
-    /// the spec alone would say `BIGINT[]`); other overrides are ignored.
+    /// Verbatim `db_type` overrides, keyed like `column_types`. Filters on
+    /// PostgreSQL cast array values and array-lookup operands to an array
+    /// override (`INTEGER[]` where the spec alone would say `BIGINT[]`), and
+    /// array lookups on a `JSON` column cast the column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_db_types: Option<HashMap<String, String>>,
 

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use oxyde_codec::{Aggregate, AggregateOp, ColumnTypeSpec, Filter, FilterNode};
 use sea_query::{Expr, Func, LikeExpr, SimpleExpr, Value};
 
+use super::array::{build_array_filter, ArrayOp};
 use super::pg_array::{out_of_range_element, pg_array_type};
 use super::render::render_col;
 use crate::aggregate::build_aggregate;
@@ -319,8 +320,29 @@ fn apply_filter(
     let agg_match =
         aggregates.and_then(|aggs| aggs.iter().find(|a| a.alias.as_deref() == Some(col_name)));
 
-    // An aggregate is typed by its result, not by the column of the same
-    // name.
+    if let Some(op) = ArrayOp::from_operator(&filter.operator) {
+        if agg_match.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "Array lookups cannot filter on aggregate aliases".into(),
+            ));
+        }
+        let spec = resolve_col_spec(col_name, col_types);
+        if matches!(spec, ColumnTypeSpec::Unknown) {
+            return Err(QueryError::InvalidQuery(format!(
+                "Array lookup on '{col_name}' needs its column type, which this query does not provide"
+            )));
+        }
+        return build_array_filter(
+            &make_col_expr(col_name, default_table).into(),
+            op,
+            &filter.value,
+            spec,
+            db_types.and_then(|dt| dt.get(col_name)).map(String::as_str),
+            dialect,
+        );
+    }
+
+    // An aggregate is typed by its result, not by the column of the same name.
     let agg_spec;
     let (col, spec, db_type) = if let Some(agg) = agg_match {
         let (agg_type, agg_db_type) = aggregate_type(agg, col_types, db_types);

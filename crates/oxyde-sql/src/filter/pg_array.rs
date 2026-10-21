@@ -2,9 +2,12 @@
 //! type a filter value is cast to (`INTEGER[]` where the spec alone would say
 //! `BIGINT[]`), and which values it can hold.
 
+use oxyde_codec::ColumnTypeSpec;
 use sea_query::Value;
 
 use crate::error::{QueryError, Result};
+use crate::spec_sql::canonical_type;
+use crate::Dialect;
 
 /// PostgreSQL array type of a column whose `db_type` is an array override,
 /// for casting values to it. Size and precision modifiers are dropped
@@ -31,6 +34,19 @@ pub(super) fn pg_array_type(db_type: &str) -> Result<String> {
         ));
     }
     Ok(format!("{base}[]"))
+}
+
+/// PostgreSQL array type of an array column: its array `db_type` override,
+/// or else the canonical type DDL renders for the element spec, likewise
+/// without modifiers.
+pub(super) fn pg_column_array_type(item: &ColumnTypeSpec, db_type: Option<&str>) -> Result<String> {
+    match db_type.map(str::trim) {
+        Some(db_type) if db_type.ends_with("[]") => pg_array_type(db_type),
+        _ => {
+            let canonical = canonical_type(item, Dialect::Postgres, false);
+            pg_array_type(&format!("{canonical}[]"))
+        }
+    }
 }
 
 /// Element type of an array DDL type (`VARCHAR(50)[]`) without modifiers.
@@ -174,28 +190,38 @@ fn pg_int_range(base: &str) -> Option<(i64, i64)> {
 /// of range: overflow"). NaN and ±Infinity fit `REAL`, as they do in
 /// PostgreSQL.
 pub(super) fn out_of_range_element(value: &Value, array_type: &str) -> Option<String> {
-    let base = array_type.strip_suffix("[]")?;
     let Value::Array(_, Some(elements)) = value else {
         return None;
     };
-    let int_range = pg_int_range(base);
-    let real = matches!(base.to_ascii_uppercase().as_str(), "REAL" | "FLOAT4");
     elements
         .iter()
-        .find_map(|element| match (element, int_range) {
-            (Value::BigInt(Some(n)), Some((min, max))) if !(min..=max).contains(n) => {
-                Some(n.to_string())
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            (Value::Double(Some(x)), _)
-                if real
-                    && x.is_finite()
-                    && (!(*x as f32).is_finite() || (*x as f32 == 0.0 && *x != 0.0)) =>
-            {
-                Some(x.to_string())
-            }
-            _ => None,
+        .find(|element| !fits_pg_array_type(element, array_type))
+        .map(|element| match element {
+            Value::BigInt(Some(n)) => n.to_string(),
+            Value::Double(Some(x)) => x.to_string(),
+            other => format!("{other:?}"),
         })
+}
+
+/// Whether one array element fits the column's array type (see
+/// `out_of_range_element`).
+pub(super) fn fits_pg_array_type(element: &Value, array_type: &str) -> bool {
+    let Some(base) = array_type.strip_suffix("[]") else {
+        return true;
+    };
+    match element {
+        Value::BigInt(Some(n)) => {
+            pg_int_range(base).is_none_or(|(min, max)| (min..=max).contains(n))
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        Value::Double(Some(x))
+            if matches!(base.to_ascii_uppercase().as_str(), "REAL" | "FLOAT4") =>
+        {
+            let narrowed = *x as f32;
+            !x.is_finite() || (narrowed.is_finite() && (narrowed != 0.0 || *x == 0.0))
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +302,61 @@ mod tests {
         }
         let err = pg_array_type("JSON[]").unwrap_err().to_string();
         assert!(err.contains("use jsonb[]"), "{err}");
+    }
+
+    #[test]
+    fn column_array_types_fall_back_to_the_canonical_type() {
+        use ColumnTypeSpec as S;
+        let item = S::BigInteger;
+        assert_eq!(
+            pg_column_array_type(&item, Some("INTEGER(4)[]")).unwrap(),
+            "INTEGER[]"
+        );
+        // Not an array override: the canonical type applies.
+        assert_eq!(
+            pg_column_array_type(&item, Some("JSONB")).unwrap(),
+            "BIGINT[]"
+        );
+        assert_eq!(pg_column_array_type(&item, None).unwrap(), "BIGINT[]");
+        assert!(pg_column_array_type(&item, Some("INT[][]")).is_err());
+
+        let cases = [
+            (S::BigInteger, "BIGINT[]"),
+            (S::Timedelta, "BIGINT[]"),
+            (S::Double, "DOUBLE PRECISION[]"),
+            (S::Boolean, "BOOLEAN[]"),
+            (S::String { length: Some(20) }, "VARCHAR[]"),
+            (S::Text, "TEXT[]"),
+            (S::Blob, "BYTEA[]"),
+            (S::DateTime, "TIMESTAMP[]"),
+            (S::DateTimeUtc, "TIMESTAMPTZ[]"),
+            (S::Date, "DATE[]"),
+            (S::Time, "TIME[]"),
+            (S::Uuid, "UUID[]"),
+            (
+                S::Decimal {
+                    precision: Some(10),
+                    scale: Some(2),
+                },
+                "NUMERIC[]",
+            ),
+            (S::Json, "JSONB[]"),
+            (S::JsonBinary, "JSONB[]"),
+            (
+                S::Enum {
+                    name: "app.status".into(),
+                    values: vec![],
+                },
+                r#""app"."status"[]"#,
+            ),
+        ];
+        for (item, expected) in cases {
+            assert_eq!(
+                pg_column_array_type(&item, None).unwrap(),
+                expected,
+                "{item:?}"
+            );
+        }
     }
 
     fn ints(ns: &[Option<i64>]) -> Value {

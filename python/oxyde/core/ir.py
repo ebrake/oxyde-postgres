@@ -154,8 +154,8 @@ def build_select_ir(
         column_types: Optional mapping of column name to ColumnTypeSpec dict
             ({"kind": ...}). Used by Rust for typed binding and decoding
         column_db_types: Optional mapping of column name (keyed like
-            column_types) to its array db_type override. PostgreSQL filters
-            cast array values to it.
+            column_types) to its db_type override. PostgreSQL filters cast
+            array values and array-lookup operands to an array override.
         pk_column: Primary key column name, used for deduplication in JOIN queries.
     """
     payload: dict[str, Any] = {

@@ -515,3 +515,6 @@ class TestStringLookupsOnJson:
             using=db.name
         )
         assert [row.name for row in rows] == ["a"]
+        # Array lookups on the same column do not fail on it either.
+        query = ConvertedValues.objects.filter(body__overlap=["x"])
+        assert await query.all(using=db.name) == []

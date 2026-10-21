@@ -13,6 +13,7 @@ All notable changes to Oxyde are documented here.
 ### Queries
 
 - UUID fields now support `gt`, `gte`, `lt`, `lte`, `between`, and `range` filters on PostgreSQL, SQLite, and MySQL. These use each database's UUID ordering and typed UUID parameters.
+- Array (`list[T]`) and JSON fields support `contains`, `contained_by`, and `overlap` lookups with a list or tuple on PostgreSQL, SQLite, and MySQL. Order and duplicates are ignored, and operands are validated against the element type; on PostgreSQL an element the column type cannot hold (`100000` for `SMALLINT[]`) equals no stored element. On PostgreSQL and MySQL elements can be objects or nested arrays, which compare as complete values. SQLite compares scalar elements with plain `json_each()` SQL, raises an error for objects and nested arrays in the list, compares `Decimal` arrays as floating point, and reads JSONB values. A key such as `window__overlap` still filters a related model's `overlap` field when `window` has no array lookups. See [Array Lookups](guide/filtering.md#array-lookups).
 - `having()` recognizes annotation keys by their alias rather than by lookup names: an alias ending in a lookup name (`tags__contains`) is that alias, and an unsupported lookup on an alias (`total__bogus`) raises `ValueError` naming the alias rather than `FieldError`.
 
 ### Bug Fixes

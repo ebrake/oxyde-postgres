@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 import pytest
 
-from oxyde import Field, Model
+from oxyde import Field, Model, Q
 from oxyde.exceptions import FieldError, FieldLookupError, FieldLookupValueError
 from oxyde.models.lookups import (
     _allowed_lookups_for_meta,
+    _build_lookup_conditions,
+    _field_spec,
     _lookup_category,
     _resolve_column_meta,
     _split_lookup_key,
@@ -137,7 +139,7 @@ class TestAllowedLookups:
         """Test allowed lookups for string fields."""
         registered_tables()
         meta = _resolve_column_meta(OxydeTestModel, "name")
-        allowed = _allowed_lookups_for_meta(meta)
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(OxydeTestModel, meta))
 
         assert "exact" in allowed
         assert "contains" in allowed
@@ -152,7 +154,7 @@ class TestAllowedLookups:
         """Test allowed lookups for numeric fields."""
         registered_tables()
         meta = _resolve_column_meta(OxydeTestModel, "age")
-        allowed = _allowed_lookups_for_meta(meta)
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(OxydeTestModel, meta))
 
         assert "exact" in allowed
         assert "gt" in allowed
@@ -167,7 +169,7 @@ class TestAllowedLookups:
         """Test allowed lookups for datetime fields."""
         registered_tables()
         meta = _resolve_column_meta(OxydeTestModel, "created_at")
-        allowed = _allowed_lookups_for_meta(meta)
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(OxydeTestModel, meta))
 
         assert "exact" in allowed
         assert "gt" in allowed
@@ -185,7 +187,7 @@ class TestAllowedLookups:
         """Test allowed lookups for boolean fields."""
         registered_tables()
         meta = _resolve_column_meta(OxydeTestModel, "is_active")
-        allowed = _allowed_lookups_for_meta(meta)
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(OxydeTestModel, meta))
 
         assert "exact" in allowed
         assert "in" in allowed
@@ -193,7 +195,7 @@ class TestAllowedLookups:
 
     def test_uuid_field_lookups(self):
         meta = _resolve_column_meta(OxydeTestModel, "uuid_val")
-        allowed = _allowed_lookups_for_meta(meta)
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(OxydeTestModel, meta))
         assert set(allowed) == {
             "exact",
             "gt",
@@ -244,13 +246,22 @@ class TestUuidLookups:
 
 
 class ArrayFieldModel(Model):
-    """Array fields with and without a db_type override."""
+    """Fields that do (and do not) support array lookups."""
 
     id: int | None = Field(default=None, db_pk=True)
     tags: list[str] | None = None
     scores: list[int] = Field(default_factory=list, db_type="INTEGER[]")
+    amounts: list[Annotated[Decimal, Field(max_digits=10, decimal_places=2)]] = Field(
+        default_factory=list
+    )
+    ids: list[UUID] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list, db_column="label_list")
+    payload: dict | list | None = None
     raw: list[Any] | dict | None = Field(default=None, db_type="JSON")
+    note: str = Field(default="", db_type="JSON")
     title: str = ""
+    grid: list[list[int]] | None = None
+    untyped: list | None = None
 
     class Meta:
         is_table = True
@@ -308,17 +319,139 @@ class TestQueryColumnTypes:
         assert ir["column_types"]["parent_id"] == {"kind": "big_integer"}
 
 
+@pytest.fixture
+def window_child() -> type[Model]:
+    """A child whose related model has fields named like lookups."""
+
+    class Window(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        overlap: bool = False
+        contained_by: str = ""
+        gt: int = 0
+        range: int = 0
+        year: int = 0
+
+        class Meta:
+            is_table = True
+
+    class WindowChild(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        window: Window | None = Field(default=None, db_nullable=True)
+        tags: list[str] = Field(default_factory=list)
+
+        class Meta:
+            is_table = True
+
+    return WindowChild
+
+
+class TestFieldsWinOverLookupNames:
+    def test_related_field_named_like_a_lookup(self, window_child):
+        condition = get_filter_condition(
+            window_child.objects.filter(window__overlap=True).to_ir()
+        )
+        assert condition["column"] == "window.overlap"
+        assert condition["operator"] == "="
+        assert condition["value"] is True
+
+    def test_lookup_on_a_related_field_named_like_a_lookup(self, window_child):
+        condition = get_filter_condition(
+            window_child.objects.filter(window__contained_by__startswith="a").to_ir()
+        )
+        assert condition["column"] == "window.contained_by"
+        assert condition["operator"] == "LIKE"
+
+    def test_array_lookup_on_own_field_is_still_a_lookup(self, window_child):
+        condition = get_filter_condition(
+            window_child.objects.filter(tags__overlap=["a"]).to_ir()
+        )
+        assert condition["operator"] == "ARRAY_OVERLAP"
+
+    def test_lookup_on_the_relation_itself(self, window_child):
+        condition = get_filter_condition(
+            window_child.objects.filter(window__in=[1, 2]).to_ir()
+        )
+        assert condition["operator"] == "IN"
+        assert condition["column"] == "window_id"
+
+    @pytest.mark.parametrize(
+        ("key", "value", "operator"),
+        [("window__gt", 5, ">"), ("window__range", (1, 10), "BETWEEN")],
+    )
+    def test_lookup_on_the_relation_wins_over_a_same_named_field(
+        self, window_child, key, value, operator
+    ):
+        # Window has `gt` and `range` fields, but on the FK itself these are
+        # valid lookups and keep the meaning they have always had.
+        ir = window_child.objects.filter(**{key: value}).to_ir()
+        condition = get_filter_condition(ir)
+        assert condition["column"] == "window_id"
+        assert condition["operator"] == operator
+        assert not ir.get("joins")
+
+    @pytest.mark.parametrize(
+        ("key", "value", "lookup"),
+        [("window__year", 2020, "year"), ("window__icontains", "x", "icontains")],
+    )
+    def test_other_lookups_the_relation_rejects_stay_errors(
+        self, window_child, key, value, lookup
+    ):
+        # Only the array lookup names that were plain names before
+        # (contained_by, overlap) fall back to a related field: Window has a
+        # `year` field, but "window__year" is still the year lookup.
+        with pytest.raises(
+            FieldLookupError,
+            match=f"Lookup '{lookup}' is not supported for field 'window'",
+        ):
+            window_child.objects.filter(**{key: value})
+
+    def test_explicit_exact_reaches_the_same_named_field(self, window_child):
+        condition = get_filter_condition(
+            window_child.objects.filter(window__gt__exact=5).to_ir()
+        )
+        assert condition["column"] == "window.gt"
+        assert condition["operator"] == "="
+
+    def test_unresolvable_paths_keep_their_errors(self, window_child):
+        with pytest.raises(FieldError):
+            window_child.objects.filter(nope__in=[1])
+        with pytest.raises(FieldLookupError, match="not a foreign key"):
+            window_child.objects.filter(tags__nope__in=[1])
+        with pytest.raises(
+            FieldLookupError, match="Lookup 'gt' is not supported for field 'tags'"
+        ):
+            window_child.objects.filter(tags__gt=["a"])
+        # A target the registry cannot resolve is not a field path either.
+        meta = window_child._db_meta.field_metadata["window"]
+        original = meta.foreign_key.target
+        meta.foreign_key.target = "NoSuchModel"
+        try:
+            with pytest.raises(
+                FieldLookupError,
+                match="Lookup 'overlap' is not supported for field 'window'",
+            ):
+                window_child.objects.filter(window__overlap=True)
+        finally:
+            meta.foreign_key.target = original
+
+
 class TestColumnDbTypes:
-    """Queries carry each column's array db_type override, keyed like
-    column_types, for PostgreSQL to cast array filter values to (integer[]
-    has no = with bigint[])."""
+    """Queries carry each column's db_type override, keyed like
+    column_types, for PostgreSQL to cast array filter values and array-lookup
+    operands to (integer[] has no = with bigint[])."""
+
+    OVERRIDES = {"scores": "INTEGER[]", "raw": "JSON", "note": "JSON"}
 
     def test_select_sends_the_overrides(self):
         ir = ArrayFieldModel.objects.filter(scores=[1, 2]).to_ir()
-        # `raw` (db_type="JSON") is not an array override, so it stays home.
-        assert ir["column_db_types"] == {"scores": "INTEGER[]"}
+        assert ir["column_db_types"] == self.OVERRIDES
         # Conditions themselves carry no type information.
         assert "db_type" not in get_filter_condition(ir)
+
+    def test_array_lookups_send_the_overrides(self):
+        ir = ArrayFieldModel.objects.filter(scores__overlap=[1], raw__contains=[1]).to_ir()
+        assert ir["column_db_types"] == self.OVERRIDES
+        assert all("db_type" not in c for c in ir["filter_tree"]["conditions"])
 
     def test_models_without_overrides_send_none(self):
         registered_tables()
@@ -337,7 +470,120 @@ class TestColumnDbTypes:
         await query.delete(client=stub)
         await query.increment("id", client=stub)
         for call in stub.calls:
-            assert call["column_db_types"] == {"scores": "INTEGER[]"}
+            assert call["column_db_types"] == self.OVERRIDES
+
+
+class TestArrayLookups:
+    ARRAY_FIELDS = ["tags", "scores", "amounts", "ids", "labels", "payload", "raw"]
+
+    @pytest.mark.parametrize("field", ARRAY_FIELDS)
+    def test_array_and_json_fields_allow_array_lookups(self, field):
+        meta = _resolve_column_meta(ArrayFieldModel, field)
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(ArrayFieldModel, meta))
+        assert {"contains", "contained_by", "overlap"} <= set(allowed)
+        assert not {"gt", "icontains", "year"} & set(allowed)
+
+    @pytest.mark.parametrize("field", ["title", "grid", "untyped"])
+    def test_other_fields_do_not(self, field):
+        meta = _resolve_column_meta(ArrayFieldModel, field)
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(ArrayFieldModel, meta))
+        assert not {"contained_by", "overlap"} & set(allowed)
+
+    def test_string_field_stored_as_json_keeps_string_lookups(self):
+        meta = _resolve_column_meta(ArrayFieldModel, "note")
+        allowed = _allowed_lookups_for_meta(meta, _field_spec(ArrayFieldModel, meta))
+        assert {"icontains", "startswith", "contained_by", "overlap"} <= set(allowed)
+
+    def test_none_spec_has_no_array_lookups(self):
+        # None is a real spec: a field without a column type.
+        meta = _resolve_column_meta(ArrayFieldModel, "tags")
+        assert "overlap" in _allowed_lookups_for_meta(
+            meta, _field_spec(ArrayFieldModel, meta)
+        )
+        assert "overlap" not in _allowed_lookups_for_meta(meta, None)
+
+    @pytest.mark.parametrize(
+        ("lookup", "operator"),
+        [
+            ("contains", "ARRAY_CONTAINS"),
+            ("contained_by", "ARRAY_CONTAINED_BY"),
+            ("overlap", "ARRAY_OVERLAP"),
+        ],
+    )
+    def test_condition_carries_the_operator(self, lookup, operator):
+        ir = ArrayFieldModel.objects.filter(**{f"tags__{lookup}": ["a", None]}).to_ir()
+        condition = get_filter_condition(ir)
+        assert condition["operator"] == operator
+        assert condition["value"] == ["a", None]
+        assert "db_type" not in condition
+        assert ir["column_types"]["tags"] == {"kind": "array", "item": {"kind": "string"}}
+
+    def test_renamed_column_is_forwarded(self):
+        condition = get_filter_condition(
+            ArrayFieldModel.objects.filter(labels__contains=["x"]).to_ir()
+        )
+        assert condition["column"] == "label_list"
+
+    def test_operands_are_serialized_and_tuples_become_lists(self):
+        uid = UUID("10000000-0000-4000-8000-000000000001")
+        condition = get_filter_condition(
+            ArrayFieldModel.objects.filter(
+                payload__contains=({"a": (1, uid)}, (Decimal("1.5"), None))
+            ).to_ir()
+        )
+        assert condition["value"] == [{"a": [1, str(uid)]}, ["1.5", None]]
+
+        condition = get_filter_condition(
+            ArrayFieldModel.objects.filter(ids__contains=(uid,)).to_ir()
+        )
+        assert condition["value"] == [str(uid)]
+
+    def test_string_contains_on_json_str_field_stays_like(self):
+        condition = get_filter_condition(
+            ArrayFieldModel.objects.filter(note__contains="x").to_ir()
+        )
+        assert condition["operator"] == "LIKE"
+        assert condition["value"] == "%x%"
+
+        condition = get_filter_condition(
+            ArrayFieldModel.objects.filter(note__contains=["x"]).to_ir()
+        )
+        assert condition["operator"] == "ARRAY_CONTAINS"
+
+    def test_plain_string_contains_is_unchanged(self):
+        condition = get_filter_condition(
+            ArrayFieldModel.objects.filter(title__contains="x").to_ir()
+        )
+        assert condition == {
+            "type": "condition",
+            "field": "title",
+            "operator": "LIKE",
+            "value": "%x%",
+        }
+
+    @pytest.mark.parametrize("value", ["rust", b"rust", {"a": 1}, {"rust"}, 5, None])
+    def test_non_sequence_operands_are_rejected(self, value):
+        with pytest.raises(FieldLookupValueError, match="list or tuple"):
+            ArrayFieldModel.objects.filter(tags__contains=value)
+
+    def test_array_lookups_on_other_fields_are_rejected(self):
+        with pytest.raises(FieldLookupError):
+            ArrayFieldModel.objects.filter(title__overlap=["a"])
+        with pytest.raises(FieldLookupError):
+            ArrayFieldModel.objects.filter(grid__contains=[[1]])
+        # Built directly, not through filter(), which rejects it first.
+        meta = _resolve_column_meta(ArrayFieldModel, "title")
+        with pytest.raises(FieldLookupError, match="requires an array or JSON field"):
+            _build_lookup_conditions(ArrayFieldModel, "title", "overlap", ["a"], meta)
+
+    def test_q_and_exclude_wrap_array_conditions(self):
+        ir = ArrayFieldModel.objects.exclude(
+            Q(tags__contains=["a"]) | Q(ids__overlap=[])
+        ).to_ir()
+        tree = ir["filter_tree"]
+        assert tree["type"] == "not"
+        operators = [c["operator"] for c in tree["condition"]["conditions"]]
+        assert operators == ["ARRAY_CONTAINS", "ARRAY_OVERLAP"]
 
 
 class TestStringLookups:

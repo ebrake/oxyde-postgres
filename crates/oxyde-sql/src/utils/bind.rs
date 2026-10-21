@@ -100,7 +100,7 @@ fn bind_element(value: &rmpv::Value, item: &ColumnTypeSpec) -> Value {
 /// - An aware/naive datetime takes the flavour of a `DateTime` /
 ///   `DateTimeUtc` spec (via UTC).
 /// - An integer becomes a float or decimal in a `Double` / `Decimal` spec.
-fn coerce_element(value: Value, spec: &ColumnTypeSpec) -> Value {
+pub(crate) fn coerce_element(value: Value, spec: &ColumnTypeSpec) -> Value {
     match (spec, value) {
         (ColumnTypeSpec::DateTime, Value::ChronoDateTimeUtc(Some(dt))) => {
             Value::ChronoDateTime(Some(Box::new(dt.naive_utc())))
@@ -131,7 +131,7 @@ fn parse_decimal(s: &str) -> Option<Decimal> {
 
 /// `parse_decimal` without rounding: `None` for a value a `Decimal` cannot
 /// hold exactly (more than 28 fractional digits once trailing zeros go).
-fn parse_decimal_exact(s: &str) -> Option<Decimal> {
+pub(crate) fn parse_decimal_exact(s: &str) -> Option<Decimal> {
     // Keep the scale of ordinary decimal strings when they already fit.
     if let Ok(decimal) = Decimal::from_str_exact(s) {
         return Some(decimal);
@@ -297,7 +297,7 @@ fn typed_null(spec: &ColumnTypeSpec) -> Value {
 
 /// sea_query element type for an array item spec.
 /// `None` for items that sea_query arrays cannot carry (Unknown, nested arrays).
-fn element_array_type(item: &ColumnTypeSpec) -> Option<ArrayType> {
+pub(crate) fn element_array_type(item: &ColumnTypeSpec) -> Option<ArrayType> {
     match item {
         ColumnTypeSpec::BigInteger | ColumnTypeSpec::Timedelta => Some(ArrayType::BigInt),
         ColumnTypeSpec::Double => Some(ArrayType::Double),
@@ -367,7 +367,7 @@ pub(crate) fn quote_pg_type_path(name: &str) -> String {
         .join(".")
 }
 
-fn string_value(s: &str) -> Value {
+pub(crate) fn string_value(s: &str) -> Value {
     Value::String(Some(Box::new(s.to_string())))
 }
 

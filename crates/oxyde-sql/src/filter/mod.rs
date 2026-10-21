@@ -1,5 +1,6 @@
 //! Filter building module
 
+mod array;
 pub mod expression;
 mod pg_array;
 mod render;

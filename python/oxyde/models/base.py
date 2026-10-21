@@ -330,9 +330,8 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             spec = column_type_for_meta(meta)
             if spec is not None:
                 column_types[meta.db_column] = spec
-            # Only array overrides change how filter values bind (PostgreSQL
-            # casts them to INTEGER[] etc.), so only they go with queries
-            if meta.db_type is not None and meta.db_type.strip().endswith("[]"):
+            # Preserve db_type overrides for array casts and JSON array lookups.
+            if meta.db_type is not None:
                 column_db_types[meta.db_column] = meta.db_type
             # Cache reverse mapping where db_column differs from field_name
             if meta.db_column != field_name:

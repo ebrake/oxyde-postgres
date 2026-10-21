@@ -20,6 +20,9 @@ Operators:
     "BETWEEN"  → Range (value is [low, high])
     "IS NULL"  → NULL check
     "IS NOT NULL" → NOT NULL check
+    "ARRAY_CONTAINS"     → Array holds every given element
+    "ARRAY_CONTAINED_BY" → Every stored element is among the given ones
+    "ARRAY_OVERLAP"      → At least one element in common
 
 Creation:
     Conditions are typically created via Field comparison operators:
