@@ -13,6 +13,7 @@ All notable changes to Oxyde are documented here.
 ### Queries
 
 - UUID fields now support `gt`, `gte`, `lt`, `lte`, `between`, and `range` filters on PostgreSQL, SQLite, and MySQL. These use each database's UUID ordering and typed UUID parameters.
+- `having()` recognizes annotation keys by their alias rather than by lookup names: an alias ending in a lookup name (`tags__contains`) is that alias, and an unsupported lookup on an alias (`total__bogus`) raises `ValueError` naming the alias rather than `FieldError`.
 
 ### Bug Fixes
 

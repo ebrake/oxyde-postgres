@@ -284,6 +284,23 @@ def _resolve_column_meta(model_class: type[Model], field_name: str) -> ColumnMet
     )
 
 
+def _resolve_lookup(model_class: type[Model], key: str) -> tuple[ResolvedPath, str]:
+    """Resolve a filter key to its field and its lookup.
+
+    The key is a field ("name"), or a path through FK relations
+    ("user__age"), optionally followed by a lookup ("user__age__gte"), as
+    ``_parse_lookup_path`` reads it. Raises ``FieldLookupError`` when the
+    lookup is not allowed on the field.
+    """
+    field_path, lookup = _parse_lookup_path(key)
+    resolved = _resolve_field_path(model_class, field_path)
+    if lookup not in _allowed_lookups_for_meta(resolved.column_meta):
+        raise FieldLookupError(
+            f"Lookup '{lookup}' is not supported for field '{resolved.final_field}'"
+        )
+    return resolved, lookup
+
+
 def _build_lookup_conditions(
     model_class: type[Model],
     field_name: str,
@@ -529,6 +546,7 @@ __all__ = [
     "_parse_lookup_path",
     "_resolve_field_path",
     "_resolve_column_meta",
+    "_resolve_lookup",
     "_build_lookup_conditions",
     "_ensure_date_inputs",
     "_build_year_conditions",
