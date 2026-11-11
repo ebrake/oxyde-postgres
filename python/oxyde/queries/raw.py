@@ -51,7 +51,7 @@ async def execute_raw(
     - Default connection
 
     Args:
-        sql: SQL with placeholders ($1/$2 for Postgres, ? for SQLite/MySQL)
+        sql: SQL with PostgreSQL placeholders ($1, $2, ...)
         params: Query parameters (use these to prevent SQL injection!)
         using: Connection alias (default: "default")
         client: Explicit client (AsyncDatabase or AsyncTransaction)

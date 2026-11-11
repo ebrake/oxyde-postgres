@@ -7,7 +7,7 @@ Oxyde is designed for high performance through its Rust core. This guide covers 
 ```mermaid
 graph LR
     Python["Python Layer<br/>Pydantic Models<br/>QuerySet"] -->|"msgpack"| Rust["Rust Core<br/>SQL Gen<br/>Connection Pool"]
-    Rust -->|"sqlx"| DB["Database<br/>PostgreSQL / SQLite / MySQL"]
+    Rust -->|"sqlx"| DB["Database<br/>PostgreSQL 18+"]
 ```
 
 Key performance characteristics:
@@ -95,10 +95,6 @@ settings = PoolSettings(
     min_connections=2,
 )
 
-# SQLite: limited concurrency
-settings = PoolSettings(
-    max_connections=5,  # SQLite handles this well with WAL
-)
 ```
 
 ### Connection Lifecycle
@@ -109,42 +105,6 @@ settings = PoolSettings(
     idle_timeout=300,       # Close idle after 5 min
     max_lifetime=3600,      # Refresh connections hourly
     test_before_acquire=True,  # Ping before use
-)
-```
-
-## SQLite Optimization
-
-Oxyde applies optimized defaults for SQLite:
-
-```python
-# Default settings (applied automatically)
-PoolSettings(
-    sqlite_journal_mode="WAL",    # 10-20x faster writes
-    sqlite_synchronous="NORMAL",  # Balance safety/speed
-    sqlite_cache_size=10000,      # ~10MB cache
-    sqlite_busy_timeout=5000,     # 5 sec lock timeout
-)
-```
-
-### WAL Mode Benefits
-
-- **Concurrent reads**: Multiple readers don't block
-- **Faster writes**: Sequential log instead of random I/O
-- **Crash recovery**: Better durability
-
-### When to Override
-
-```python
-# Maximum safety (slower)
-PoolSettings(
-    sqlite_journal_mode="DELETE",
-    sqlite_synchronous="FULL",
-)
-
-# Maximum speed (less safe for power failure)
-PoolSettings(
-    sqlite_synchronous="OFF",
-    sqlite_cache_size=50000,  # 50MB cache
 )
 ```
 
@@ -291,7 +251,6 @@ print(f"1000 queries in {elapsed:.2f}s ({1000/elapsed:.0f} qps)")
 - [ ] Use `bulk_create()` for batch inserts
 - [ ] Use `F()` expressions for atomic updates
 - [ ] Configure appropriate pool size
-- [ ] Use SQLite WAL mode (default)
 - [ ] Profile slow queries with `explain()`
 - [ ] Use `asyncio.gather()` for concurrent queries
 

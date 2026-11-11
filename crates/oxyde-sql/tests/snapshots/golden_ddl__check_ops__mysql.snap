@@ -1,7 +1,0 @@
----
-source: crates/oxyde-sql/tests/golden_ddl.rs
-expression: sql
----
-ALTER TABLE users ADD CONSTRAINT chk_users_age CHECK (age >= 18);
-
-ALTER TABLE users DROP CHECK chk_users_old

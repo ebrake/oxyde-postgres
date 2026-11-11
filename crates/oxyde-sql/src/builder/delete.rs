@@ -1,7 +1,7 @@
 //! DELETE query building
 
 use oxyde_codec::QueryIR;
-use sea_query::{MysqlQueryBuilder, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value};
+use sea_query::{PostgresQueryBuilder, Query, Value};
 
 use crate::error::Result;
 use crate::filter::build_filter_node;
@@ -27,15 +27,12 @@ pub fn build_delete(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
         query.and_where(expr);
     }
 
-    // Add RETURNING clause for Postgres/SQLite
     if crate::emits_returning(ir, dialect) {
         query.returning_all();
     }
 
     let (sql, values) = match dialect {
         Dialect::Postgres => query.build(PostgresQueryBuilder),
-        Dialect::Sqlite => query.build(SqliteQueryBuilder),
-        Dialect::Mysql => query.build(MysqlQueryBuilder),
     };
 
     Ok((sql, values.0))

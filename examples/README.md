@@ -8,8 +8,8 @@ This directory contains example scripts demonstrating Oxyde ORM features.
 # Activate virtual environment
 source .venv/bin/activate
 
-# Set database URL (optional, defaults to SQLite)
-export DATABASE_URL=sqlite://demo.db
+# Set database URL (optional, defaults to PostgreSQL on localhost)
+export DATABASE_URL=postgresql://localhost/app
 
 # Run an example
 python examples/quickstart.py
@@ -54,7 +54,7 @@ Transaction management:
 
 ## Database Support
 
-Examples work with SQLite by default. For PostgreSQL:
+Examples require PostgreSQL 18 or newer:
 
 ```bash
 export DATABASE_URL=postgresql://user:pass@localhost:5432/mydb

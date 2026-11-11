@@ -5,7 +5,6 @@
 //! conscious, documented decision.
 //!
 //! Dialect note: binding itself is dialect-independent; per-dialect value
-//! adaptation (e.g. arrays → JSON on MySQL/SQLite) happens in the driver's
 //! bind layer.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -76,7 +75,6 @@ pub fn bind_value(value: &rmpv::Value, spec: &ColumnTypeSpec) -> Value {
 
 /// Bind one array element as the value kind its item spec stores.
 /// PostgreSQL array binding drops elements of any other kind as NULL, and
-/// the JSON encoder (MySQL/SQLite) writes them in another format.
 ///
 /// Elements of a `Json` / `JsonBinary` item keep their own JSON type: a
 /// string is a JSON string, never parsed as JSON text, so `"123"` in a
@@ -197,8 +195,8 @@ pub(crate) fn parse_decimal_exact(s: &str) -> Option<Decimal> {
 }
 
 #[must_use]
-pub fn typed_value_expr(value: Value, spec: &ColumnTypeSpec, dialect: Dialect) -> SimpleExpr {
-    if dialect == Dialect::Postgres {
+pub fn typed_value_expr(value: Value, spec: &ColumnTypeSpec, _dialect: Dialect) -> SimpleExpr {
+    {
         if let Some(type_name) = postgres_enum_cast_type(spec) {
             return Expr::cust_with_values(format!("$1::{type_name}"), vec![value]);
         }

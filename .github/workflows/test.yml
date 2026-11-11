@@ -30,6 +30,7 @@ jobs:
               - 'vendor/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'pyproject.toml'
               - '.github/workflows/test.yml'
             python:
               - 'python/**'
@@ -61,7 +62,7 @@ jobs:
           uv pip install mypy==1.19.1 pydantic msgpack typing-extensions pre-commit typer
 
       - name: Run pre-commit
-        run: uv run pre-commit run --all-files
+        run: uv run --no-project pre-commit run --all-files
 
   # Run Rust tests
   test-rust:
@@ -82,6 +83,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      postgres-old:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: oxyde
+          POSTGRES_PASSWORD: oxyde
+          POSTGRES_DB: oxyde
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U oxyde"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -92,12 +106,13 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --no-default-features
 
-      - name: PostgreSQL unnamed statement regressions
+      - name: PostgreSQL driver regressions
         env:
           OXYDE_TEST_POSTGRES_URL: postgresql://oxyde:oxyde@localhost:5432/oxyde
-        run: cargo test -p oxyde-driver --test postgres_unnamed -- --ignored
+          OXYDE_TEST_OLD_POSTGRES_URL: postgresql://oxyde:oxyde@localhost:5433/oxyde
+        run: cargo test -p oxyde-driver --lib --tests -- --ignored
 
   # Run Python tests
   test-python:
@@ -126,8 +141,8 @@ jobs:
         run: |
           uv venv
           uv pip install maturin
-          uv run maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
+          uv run --no-project maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
           uv pip install -e "./python[dev]"
 
       - name: Run tests
-        run: uv run pytest python -v
+        run: uv run --no-project pytest python -v

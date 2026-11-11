@@ -25,20 +25,25 @@ fn decode_columnar(buf: &[u8]) -> (Vec<String>, Vec<Vec<rmpv::Value>>) {
 }
 
 #[tokio::test]
-async fn sqlite_end_to_end_pipeline() {
+#[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+async fn postgres_end_to_end_pipeline() {
     let pool_name = format!("pipeline_{}", Uuid::new_v4().simple());
     let settings = PoolSettings {
         max_connections: Some(1),
         min_connections: Some(1),
         ..Default::default()
     };
-    init_pool(&pool_name, "sqlite::memory:", settings)
-        .await
-        .expect("init pool");
+    init_pool(
+        &pool_name,
+        &std::env::var("OXYDE_TEST_POSTGRES_URL").expect("set OXYDE_TEST_POSTGRES_URL"),
+        settings,
+    )
+    .await
+    .expect("init pool");
 
     execute_statement(
         &pool_name,
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "CREATE TEMP TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
         &[],
     )
     .await
@@ -82,7 +87,7 @@ async fn sqlite_end_to_end_pipeline() {
         params: None,
         pk_column: None,
     };
-    let (insert_sql, insert_params) = build_sql(&insert_ir, Dialect::Sqlite).unwrap();
+    let (insert_sql, insert_params) = build_sql(&insert_ir, Dialect::Postgres).unwrap();
     execute_statement(&pool_name, &insert_sql, &insert_params)
         .await
         .unwrap();
@@ -125,7 +130,7 @@ async fn sqlite_end_to_end_pipeline() {
         params: None,
         pk_column: None,
     };
-    let (select_sql, select_params) = build_sql(&select_ir, Dialect::Sqlite).unwrap();
+    let (select_sql, select_params) = build_sql(&select_ir, Dialect::Postgres).unwrap();
     let (bytes, num_rows) = execute_query_columnar(&pool_name, &select_sql, &select_params, None)
         .await
         .unwrap();

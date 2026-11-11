@@ -94,8 +94,6 @@ pub(crate) fn execute<'py>(
                 result
             }
             oxyde_codec::Operation::Insert => {
-                // Single insert with RETURNING * returns full rows (Postgres/SQLite).
-                // MySQL doesn't support RETURNING — the builder omits it, so we
                 // fall through to execute_insert_returning (last_insert_id()).
                 // Routing is decided by IR intent + dialect, never by SQL text.
                 if emits_returning(&ir, dialect) {
@@ -120,7 +118,6 @@ pub(crate) fn execute<'py>(
                 };
 
                 // Use mutation returning only when the builder emitted RETURNING
-                // (Postgres/SQLite). MySQL never gets RETURNING in SQL, so fall
                 // through to execute_statement to preserve affected-row count.
                 if emits_returning(&ir, dialect) {
                     let exec_start = Instant::now();
@@ -321,12 +318,10 @@ pub(crate) fn render_sql_debug<'py>(
     // Parse dialect name (default to Postgres)
     let dialect = match dialect_name {
         Some("postgres" | "postgresql") => Dialect::Postgres,
-        Some("sqlite") => Dialect::Sqlite,
-        Some("mysql") => Dialect::Mysql,
         None => Dialect::Postgres, // Default
         Some(other) => {
             return Err(PyErr::new::<PyValueError, _>(format!(
-                "Unknown dialect '{other}'. Use 'postgres', 'sqlite', or 'mysql'"
+                "Unknown dialect '{other}'. Use 'postgres'"
             )))
         }
     };

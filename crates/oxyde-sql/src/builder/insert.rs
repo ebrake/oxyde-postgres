@@ -1,9 +1,7 @@
 //! INSERT query building
 
 use oxyde_codec::{ColumnTypeSpec, ConflictAction, QueryIR};
-use sea_query::{
-    Expr, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder, Value,
-};
+use sea_query::{PostgresQueryBuilder, Query, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};
 use crate::utils::{bind_value, rmpv_to_simple_expr, typed_value_expr, ColumnIdent, TableIdent};
@@ -81,8 +79,7 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
     // Add ON CONFLICT clause (UPSERT)
     if let Some(on_conflict) = &ir.on_conflict {
         match dialect {
-            Dialect::Postgres | Dialect::Sqlite => {
-                // Postgres & SQLite: ON CONFLICT (columns) DO NOTHING/UPDATE
+            Dialect::Postgres => {
                 let target_cols: Vec<ColumnIdent> = on_conflict
                     .columns
                     .iter()
@@ -128,83 +125,21 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
                     }
                 }
             }
-            Dialect::Mysql => {
-                // MySQL uses ON DUPLICATE KEY UPDATE instead of ON CONFLICT
-                // Note: MySQL doesn't support specifying conflict columns - it uses
-                // PRIMARY KEY and UNIQUE indexes automatically
-                match on_conflict.action {
-                    ConflictAction::Nothing => {
-                        // MySQL: ON DUPLICATE KEY UPDATE generates "do nothing" behavior
-                        // by updating a column to itself (e.g., id = id)
-                        // This is cleaner than INSERT IGNORE which suppresses all errors
-                        if let Some(first_col) = ir
-                            .values
-                            .as_ref()
-                            .and_then(|v| v.keys().next())
-                            .or_else(|| {
-                                ir.bulk_values
-                                    .as_ref()
-                                    .and_then(|bv| bv.first())
-                                    .and_then(|row| row.keys().next())
-                            })
-                        {
-                            let mut conflict = sea_query::OnConflict::new();
-                            // Update column to itself = no-op
-                            conflict.value(
-                                ColumnIdent(first_col.clone()),
-                                Expr::col(ColumnIdent(first_col.clone())),
-                            );
-                            query.on_conflict(conflict.clone());
-                        }
-                    }
-                    ConflictAction::Update => {
-                        // MySQL: ON DUPLICATE KEY UPDATE col1 = VALUES(col1), ...
-                        let update_vals = on_conflict.update_values.as_ref().ok_or_else(|| {
-                            QueryError::InvalidQuery(
-                                "ON CONFLICT UPDATE requires update_values".into(),
-                            )
-                        })?;
-
-                        if update_vals.is_empty() {
-                            return Err(QueryError::InvalidQuery(
-                                "ON CONFLICT UPDATE requires at least one value to update".into(),
-                            ));
-                        }
-
-                        let mut conflict = sea_query::OnConflict::new();
-                        for (col, val) in update_vals {
-                            if let Some(expr) = rmpv_to_simple_expr(val)? {
-                                conflict.value(ColumnIdent(col.clone()), expr);
-                            } else {
-                                let spec = get_spec(col);
-                                conflict.value(
-                                    ColumnIdent(col.clone()),
-                                    typed_value_expr(bind_value(val, spec), spec, dialect),
-                                );
-                            }
-                        }
-                        query.on_conflict(conflict.clone());
-                    }
-                }
-            }
         }
     }
 
-    // RETURNING for Postgres/SQLite: full rows when the caller asked for
     // them, otherwise pk-only so the driver reads generated PKs from rows
     // instead of appending to SQL text. Routing (emits_returning) stays
     // false for the pk-only form by design.
     if crate::emits_returning(ir, dialect) {
         query.returning_all();
-    } else if matches!(dialect, Dialect::Postgres | Dialect::Sqlite) {
+    } else {
         let pk = ir.pk_column.as_deref().unwrap_or("id");
         query.returning_col(ColumnIdent(pk.to_string()));
     }
 
     let (sql, values) = match dialect {
         Dialect::Postgres => query.build(PostgresQueryBuilder),
-        Dialect::Sqlite => query.build(SqliteQueryBuilder),
-        Dialect::Mysql => query.build(MysqlQueryBuilder),
     };
 
     Ok((sql, values.0))

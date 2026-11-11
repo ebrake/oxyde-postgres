@@ -1,4 +1,4 @@
-name: Release oxyde-core
+name: Release oxyde-postgres-core
 
 on:
   push:
@@ -61,11 +61,11 @@ jobs:
             target: aarch64-unknown-linux-musl
             manylinux: musllinux_1_2
           # macOS x86_64 (Intel) - runs on ARM with Rosetta
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
             manylinux: auto
           # macOS ARM64 (Apple Silicon)
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             manylinux: auto
           # Windows x86_64
@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/oxyde-core/
+      url: https://pypi.org/project/oxyde-postgres-core/
 
     steps:
       - name: Install uv
@@ -166,5 +166,5 @@ jobs:
         uses: softprops/action-gh-release@v3.0.0
         with:
           files: dist/*
-          generate_release_notes: true
-          tag_name: ${{ github.ref_name }}
+          body_path: docs/changelog.md
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('core-v{0}', inputs.version) || github.ref_name }}

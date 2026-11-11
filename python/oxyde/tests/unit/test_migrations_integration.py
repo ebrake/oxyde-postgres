@@ -14,9 +14,16 @@ from pathlib import Path
 import pytest
 
 from oxyde.migrations.context import MigrationContext
-from oxyde.migrations.executor import _check_migration_dependency, _check_rollback_dependency
+from oxyde.migrations.executor import (
+    _check_migration_dependency,
+    _check_rollback_dependency,
+)
 from oxyde.migrations.generator import generate_migration_file
-from oxyde.migrations.replay import SchemaState, _topological_sort_migrations, replay_migrations
+from oxyde.migrations.replay import (
+    SchemaState,
+    _topological_sort_migrations,
+    replay_migrations,
+)
 from oxyde.migrations.tracker import get_migration_files, get_pending_migrations
 
 # =============================================================================
@@ -623,10 +630,10 @@ class TestMigrationContext:
     def test_dialect_property(self):
         """Test dialect property."""
 
-        ctx_sqlite = MigrationContext(mode="collect", dialect="sqlite")
+        ctx_postgres = MigrationContext(mode="collect", dialect="postgres")
         ctx_postgres = MigrationContext(mode="collect", dialect="postgres")
 
-        assert ctx_sqlite.dialect == "sqlite"
+        assert ctx_postgres.dialect == "postgres"
         assert ctx_postgres.dialect == "postgres"
 
 

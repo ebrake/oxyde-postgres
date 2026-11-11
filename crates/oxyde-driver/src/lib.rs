@@ -55,10 +55,7 @@
 //! # Database Support
 //!
 //! - **PostgreSQL**: Full support (pools, transactions, RETURNING, FOR UPDATE)
-//! - **SQLite**: Full support (WAL mode, PRAGMAs, RETURNING 3.35+)
-//! - **MySQL**: Full support (pools, transactions, no RETURNING)
 //!
-//! # SQLite PRAGMAs
 //!
 //! Applied via `after_connect` hook:
 //! - `journal_mode=WAL` (10-20x faster concurrent writes)
@@ -180,7 +177,12 @@ mod tests {
 
     static TEST_MUTEX: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
-    fn sqlite_settings() -> PoolSettings {
+    fn test_url() -> String {
+        std::env::var("OXYDE_TEST_POSTGRES_URL")
+            .expect("set OXYDE_TEST_POSTGRES_URL to a disposable PostgreSQL 18+ database")
+    }
+
+    fn pg_settings() -> PoolSettings {
         PoolSettings {
             max_connections: Some(1),
             min_connections: Some(1),
@@ -210,26 +212,27 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
     async fn init_and_close_multiple_pools() {
         let _guard = TEST_MUTEX.lock().await;
         close_all_pools().await.unwrap();
 
-        init_pool("default", "sqlite::memory:", sqlite_settings())
+        init_pool("default", &test_url(), pg_settings())
             .await
             .unwrap();
-        init_pool("analytics", "sqlite::memory:", sqlite_settings())
+        init_pool("analytics", &test_url(), pg_settings())
             .await
             .unwrap();
 
-        execute_statement("default", "CREATE TABLE foo (id INTEGER)", &[])
+        execute_statement("default", "CREATE TEMP TABLE foo (id INTEGER)", &[])
             .await
             .unwrap();
-        execute_statement("analytics", "CREATE TABLE bar (id INTEGER)", &[])
+        execute_statement("analytics", "CREATE TEMP TABLE bar (id INTEGER)", &[])
             .await
             .unwrap();
 
         assert!(matches!(
-            init_pool("default", "sqlite::memory:", sqlite_settings()).await,
+            init_pool("default", &test_url(), pg_settings()).await,
             Err(DriverError::PoolAlreadyExists(_))
         ));
 
@@ -243,17 +246,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_with_parameters_sqlite() {
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn execute_with_parameters_postgres() {
         let _guard = TEST_MUTEX.lock().await;
         close_all_pools().await.unwrap();
 
-        init_pool("default", "sqlite::memory:", sqlite_settings())
+        init_pool("default", &test_url(), pg_settings())
             .await
             .unwrap();
 
         execute_statement(
             "default",
-            "CREATE TABLE foo (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TEMP TABLE foo (id BIGSERIAL PRIMARY KEY, name TEXT)",
             &[],
         )
         .await
@@ -261,7 +265,7 @@ mod tests {
 
         execute_statement(
             "default",
-            "INSERT INTO foo (id, name) VALUES (?, ?)",
+            "INSERT INTO foo (id, name) VALUES ($1, $2)",
             &[Value::from(1_i64), Value::from(String::from("Ada"))],
         )
         .await
@@ -269,7 +273,7 @@ mod tests {
 
         let (bytes, num_rows) = execute_query_columnar(
             "default",
-            "SELECT name FROM foo WHERE id = ?",
+            "SELECT name FROM foo WHERE id = $1",
             &[Value::from(1_i64)],
             None,
         )
@@ -285,17 +289,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transaction_commit_sqlite() {
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn transaction_commit_postgres() {
         let _guard = TEST_MUTEX.lock().await;
         close_all_pools().await.unwrap();
 
-        init_pool("default", "sqlite::memory:", sqlite_settings())
+        init_pool("default", &test_url(), pg_settings())
             .await
             .unwrap();
 
         execute_statement(
             "default",
-            "CREATE TABLE foo (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TEMP TABLE foo (id BIGSERIAL PRIMARY KEY, name TEXT)",
             &[],
         )
         .await
@@ -304,7 +309,7 @@ mod tests {
         let tx_id = begin_transaction("default").await.unwrap();
         execute_statement_in_transaction(
             tx_id,
-            "INSERT INTO foo (id, name) VALUES (?, ?)",
+            "INSERT INTO foo (id, name) VALUES ($1, $2)",
             &[Value::from(10_i64), Value::from(String::from("Commit"))],
         )
         .await
@@ -313,7 +318,7 @@ mod tests {
 
         let (bytes, num_rows) = execute_query_columnar(
             "default",
-            "SELECT name FROM foo WHERE id = ?",
+            "SELECT name FROM foo WHERE id = $1",
             &[Value::from(10_i64)],
             None,
         )
@@ -327,17 +332,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transaction_rollback_sqlite() {
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn transaction_rollback_postgres() {
         let _guard = TEST_MUTEX.lock().await;
         close_all_pools().await.unwrap();
 
-        init_pool("default", "sqlite::memory:", sqlite_settings())
+        init_pool("default", &test_url(), pg_settings())
             .await
             .unwrap();
 
         execute_statement(
             "default",
-            "CREATE TABLE foo (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TEMP TABLE foo (id BIGSERIAL PRIMARY KEY, name TEXT)",
             &[],
         )
         .await
@@ -346,7 +352,7 @@ mod tests {
         let tx_id = begin_transaction("default").await.unwrap();
         execute_statement_in_transaction(
             tx_id,
-            "INSERT INTO foo (id, name) VALUES (?, ?)",
+            "INSERT INTO foo (id, name) VALUES ($1, $2)",
             &[Value::from(11_i64), Value::from(String::from("Rollback"))],
         )
         .await
@@ -355,7 +361,7 @@ mod tests {
 
         let (_bytes, num_rows) = execute_query_columnar(
             "default",
-            "SELECT name FROM foo WHERE id = ?",
+            "SELECT name FROM foo WHERE id = $1",
             &[Value::from(11_i64)],
             None,
         )
@@ -369,17 +375,18 @@ mod tests {
     /// Constraint violations classify via sqlx ErrorKind — never via
     /// message-text matching.
     #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
     async fn unique_violation_is_classified() {
         let _guard = TEST_MUTEX.lock().await;
         close_all_pools().await.unwrap();
 
-        init_pool("default", "sqlite::memory:", sqlite_settings())
+        init_pool("default", &test_url(), pg_settings())
             .await
             .unwrap();
 
         execute_statement(
             "default",
-            "CREATE TABLE foo (id INTEGER PRIMARY KEY, email TEXT UNIQUE)",
+            "CREATE TEMP TABLE foo (id BIGSERIAL PRIMARY KEY, email TEXT UNIQUE)",
             &[],
         )
         .await
@@ -387,7 +394,7 @@ mod tests {
 
         execute_statement(
             "default",
-            "INSERT INTO foo (email) VALUES (?)",
+            "INSERT INTO foo (email) VALUES ($1)",
             &[Value::from(String::from("a@b.c"))],
         )
         .await
@@ -395,7 +402,7 @@ mod tests {
 
         let err = execute_statement(
             "default",
-            "INSERT INTO foo (email) VALUES (?)",
+            "INSERT INTO foo (email) VALUES ($1)",
             &[Value::from(String::from("a@b.c"))],
         )
         .await
@@ -412,17 +419,18 @@ mod tests {
     /// connection: sqlx rolls it back on drop. With max_connections=1 the
     /// next query is guaranteed to reuse that same connection.
     #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
     async fn abandoned_transaction_rolls_back_on_drop() {
         let _guard = TEST_MUTEX.lock().await;
         close_all_pools().await.unwrap();
 
-        init_pool("default", "sqlite::memory:", sqlite_settings())
+        init_pool("default", &test_url(), pg_settings())
             .await
             .unwrap();
 
         execute_statement(
             "default",
-            "CREATE TABLE foo (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TEMP TABLE foo (id BIGSERIAL PRIMARY KEY, name TEXT)",
             &[],
         )
         .await
@@ -431,7 +439,7 @@ mod tests {
         let tx_id = begin_transaction("default").await.unwrap();
         execute_statement_in_transaction(
             tx_id,
-            "INSERT INTO foo (id, name) VALUES (?, ?)",
+            "INSERT INTO foo (id, name) VALUES ($1, $2)",
             &[Value::from(1_i64), Value::from(String::from("Ghost"))],
         )
         .await
@@ -443,7 +451,7 @@ mod tests {
         // Uncommitted insert must be gone and the connection usable.
         let (_bytes, num_rows) = execute_query_columnar(
             "default",
-            "SELECT name FROM foo WHERE id = ?",
+            "SELECT name FROM foo WHERE id = $1",
             &[Value::from(1_i64)],
             None,
         )
@@ -453,7 +461,7 @@ mod tests {
 
         execute_statement(
             "default",
-            "INSERT INTO foo (id, name) VALUES (?, ?)",
+            "INSERT INTO foo (id, name) VALUES ($1, $2)",
             &[Value::from(2_i64), Value::from(String::from("Alive"))],
         )
         .await

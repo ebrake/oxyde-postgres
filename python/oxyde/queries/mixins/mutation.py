@@ -21,7 +21,6 @@ from pydantic import TypeAdapter
 
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
-from oxyde.db.registry import get_connection
 from oxyde.exceptions import ManagerError
 from oxyde.models.serializers import (
     _dump_insert_data,
@@ -32,7 +31,6 @@ from oxyde.queries.base import (
     SupportsExecute,
     _build_column_db_types,
     _build_column_types,
-    _collect_model_columns,
     _map_values_to_columns,
     _model_key,
     _resolve_execution_client,
@@ -46,17 +44,6 @@ if TYPE_CHECKING:
 
 
 TModel = TypeVar("TModel", bound="Model")
-
-
-async def _is_mysql(using: str | None, client: SupportsExecute | None) -> bool:
-    """Check if the target database is MySQL via cached backend from Rust."""
-    if client is not None:
-        # AsyncTransaction → ._database, AsyncDatabase → direct
-        db = getattr(client, "_database", client)
-        return getattr(db, "backend", None) == "mysql"
-    alias = using or "default"
-    db = await get_connection(alias, ensure_connected=False)
-    return db.backend == "mysql"
 
 
 def _hydrate_models(
@@ -231,11 +218,6 @@ class MutationMixin(Generic[TModel]):
             key: _serialize_value_for_ir(value) for key, value in mapped_values.items()
         }
 
-        if returning and await _is_mysql(using, client):
-            return await self._mysql_update_returning(
-                using, client, exec_client, serialized_values, column_types
-            )
-
         update_ir = ir.build_update_ir(
             table=self.model_class.get_table_name(),
             values=serialized_values,
@@ -251,87 +233,6 @@ class MutationMixin(Generic[TModel]):
             return _decode_returning_models(self.model_class, result)
         affected: int = result.get("affected", 0)
         return affected
-
-    async def _mysql_update_returning(
-        self,
-        using: str | None,
-        client: SupportsExecute | None,
-        exec_client: SupportsExecute,
-        serialized_values: dict[str, Any],
-        column_types: dict[str, dict] | None,
-    ) -> list[TModel]:
-        """MySQL fallback: SELECT PKs FOR UPDATE → UPDATE → re-fetch by PKs."""
-        from oxyde.db.transaction import atomic, get_active_transaction
-
-        pk_field = self.model_class._db_meta.pk_field
-        if pk_field is None:
-            raise ManagerError("update(returning=True) requires a primary key")
-        meta = self.model_class._db_meta.field_metadata[pk_field]
-        pk_db_col: str = meta.db_column or pk_field
-        table = self.model_class.get_table_name()
-        filter_tree = self._build_filter_tree()
-        column_db_types = _build_column_db_types(self.model_class)
-        alias = using or "default"
-
-        async def _do(tx_client: SupportsExecute) -> list[TModel]:
-            # 1. Collect PKs with FOR UPDATE lock
-            select_pks_ir = ir.build_select_ir(
-                table=table,
-                columns=[pk_db_col],
-                filter_tree=filter_tree,
-                column_types=column_types,
-                column_db_types=column_db_types,
-                lock="update",
-            )
-            pk_bytes = await tx_client.execute(select_pks_ir)
-            # Columnar format: [columns_list, rows_list]
-            pk_result = msgpack.unpackb(pk_bytes, raw=False)
-            pk_rows = pk_result[1] if len(pk_result) >= 2 else []
-            pk_values = [row[0] for row in pk_rows]
-
-            if not pk_values:
-                return []
-
-            # 2. Execute UPDATE (no returning)
-            update_ir = ir.build_update_ir(
-                table=table,
-                values=serialized_values,
-                filter_tree=filter_tree,
-                column_types=column_types,
-                column_db_types=column_db_types,
-                model=_model_key(self.model_class),
-                returning=False,
-            )
-            await tx_client.execute(update_ir)
-
-            # 3. Re-fetch updated rows by PKs
-            pk_in_filter: ir.FilterNode = {
-                "type": "condition",
-                "field": pk_db_col,
-                "operator": "IN",
-                "value": pk_values,
-            }
-            all_db_cols = [
-                db_col for _, db_col in _collect_model_columns(self.model_class)
-            ]
-            refetch_ir = ir.build_select_ir(
-                table=table,
-                columns=all_db_cols,
-                filter_tree=pk_in_filter,
-                column_types=column_types,
-            )
-            refetch_bytes = await tx_client.execute(refetch_ir)
-            # Columnar format: [columns_list, rows_list]
-            refetch_result = msgpack.unpackb(refetch_bytes, raw=False)
-            return _decode_columnar_models(self.model_class, refetch_result)
-
-        # Use existing transaction or create an implicit one
-        already_in_tx = client is not None or get_active_transaction(alias) is not None
-        if already_in_tx:
-            return await _do(exec_client)
-
-        async with atomic(using=alias) as tx:
-            return await _do(tx)
 
     async def delete(
         self,
@@ -471,7 +372,7 @@ class MutationMixin(Generic[TModel]):
             using: Database alias
             client: Optional database client
             batch_size: Optional batch size. If None, inserts all in one query.
-                Use if hitting DB param limits (SQLite: 999, Postgres: 65535).
+                Use if hitting PostgreSQL parameter limits (65535).
 
         Returns:
             List of created model instances
@@ -508,11 +409,10 @@ class MutationMixin(Generic[TModel]):
             inserted_ids = result.get("inserted_ids", [])
             pk_field = self._primary_key_field()
 
-            # Warn if ID count doesn't match (MySQL limitation)
             if inserted_ids and len(inserted_ids) != len(batch):
                 warnings.warn(
                     f"bulk_create: received {len(inserted_ids)} IDs for {len(batch)} rows. "
-                    "This may occur with MySQL when using ON DUPLICATE KEY, "
+                    "Check conflict handling and the returned primary keys. "
                     "non-sequential auto_increment, or non-integer primary keys. "
                     "Assigned IDs may be incorrect.",
                     RuntimeWarning,

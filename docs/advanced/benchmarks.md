@@ -1,5 +1,7 @@
 # Benchmarks
 
+These are historical upstream Oxyde measurements, retained for reference. They are not measurements of this fork or PostgreSQL 18. New fork benchmarks have not yet been published.
+
 !!! info "Benchmark Date"
     These benchmarks were run on **March 11, 2026** with Oxyde 0.5.0.
     Results may vary depending on hardware and database configuration.
@@ -17,31 +19,6 @@
 | 5 | SQLAlchemy | 445 |
 | 6 | SQLModel | 431 |
 | 7 | Peewee | 80 |
-
-### MySQL
-
-| Rank | ORM | Avg ops/sec |
-|------|-----|-------------|
-| 1 | Oxyde | 1,239 |
-| 2 | Tortoise | 794 |
-| 3 | Django | 714 |
-| 4 | SQLAlchemy | 536 |
-| 5 | SQLModel | 505 |
-| 6 | Peewee | 461 |
-
-### SQLite
-
-| Rank | ORM | Avg ops/sec |
-|------|-----|-------------|
-| 1 | Oxyde | 2,525 |
-| 2 | Tortoise | 1,882 |
-| 3 | Django | 1,294 |
-| 4 | SQLAlchemy | 588 |
-| 5 | SQLModel | 567 |
-| 6 | Peewee | 548 |
-| 7 | Piccolo | 469 |
-
----
 
 ## PostgreSQL Results
 
@@ -96,118 +73,6 @@
 ### Scalability
 
 ![PostgreSQL Scalability](../img/benchmarks/postgresql_scalability.png)
-
----
-
-## MySQL Results
-
-### CRUD Operations
-
-![MySQL CRUD](../img/benchmarks/mysql_crud.png)
-
-| Test | aiomysql | Oxyde | Django | SQLAlchemy | Tortoise | Peewee | SQLModel |
-|------|----------|-------|--------|------------|----------|--------|----------|
-| insert_single | 712 | 736 | 665 | 596 | 703 | 529 | 561 |
-| insert_bulk_100 | 409 | 324 | 219 | 156 | 245 | 197 | 112 |
-| select_pk | 6,662 | 6,315 | 3,597 | 1,938 | 3,766 | 1,435 | 1,778 |
-| select_filter | 133 | 346 | 173 | 88 | 77 | 88 | 79 |
-| update_single | 719 | 704 | 634 | 596 | 736 | 539 | 566 |
-| update_bulk | 2,290 | 2,057 | 1,449 | 1,332 | 1,740 | 1,312 | 1,218 |
-| delete_single | 700 | 624 | 352 | 586 | 632 | 503 | 554 |
-
-### Query Operations
-
-![MySQL Queries](../img/benchmarks/mysql_queries.png)
-
-| Test | aiomysql | Oxyde | Django | SQLAlchemy | Tortoise | Peewee | SQLModel |
-|------|----------|-------|--------|------------|----------|--------|----------|
-| filter_simple | 2,921 | 2,978 | 1,912 | 1,546 | 1,622 | 1,317 | 1,486 |
-| filter_complex | 270 | 632 | 289 | 172 | 160 | 177 | 157 |
-| filter_in | 718 | 1,242 | 620 | 501 | 470 | 429 | 480 |
-| order_limit | 2,405 | 3,003 | 2,033 | 1,323 | 1,399 | 1,163 | 1,288 |
-| aggregate_count | 4,638 | 5,122 | 2,849 | 2,016 | 4,180 | 1,630 | 1,946 |
-| aggregate_mixed | 3,312 | 3,318 | 1,637 | 1,564 | 2,302 | 1,416 | 1,465 |
-
-### Relations
-
-![MySQL Relations](../img/benchmarks/mysql_relations.png)
-
-| Test | aiomysql | Oxyde | Django | SQLAlchemy | Tortoise | Peewee | SQLModel |
-|------|----------|-------|--------|------------|----------|--------|----------|
-| join_simple | 4 | 11 | 4 | 3 | 2 | 2 | 2 |
-| join_filter | 4 | 11 | 4 | 3 | 3 | 2 | 2 |
-| prefetch_related | 6 | 12 | 5 | 3 | 3 | 3 | 2 |
-| nested_prefetch | 5 | 8 | 1 | 2 | 2 | 3 | 1 |
-
-### Concurrent Operations
-
-![MySQL Concurrent](../img/benchmarks/mysql_concurrent.png)
-
-| Concurrency | aiomysql | Oxyde | Django | SQLAlchemy | Tortoise | Peewee | SQLModel |
-|-------------|----------|-------|--------|------------|----------|--------|----------|
-| 10 | 1,018 | 1,201 | 352 | 250 | 530 | 160 | 232 |
-| 50 | 206 | 227 | 73 | 40 | 105 | 32 | 39 |
-| 100 | 103 | 119 | 36 | 22 | 53 | 16 | 20 |
-
-### Scalability
-
-![MySQL Scalability](../img/benchmarks/mysql_scalability.png)
-
----
-
-## SQLite Results
-
-### CRUD Operations
-
-![SQLite CRUD](../img/benchmarks/sqlite_crud.png)
-
-| Test | aiosqlite | Oxyde | Django | SQLAlchemy | Tortoise | Piccolo | Peewee | SQLModel |
-|------|-----------|-------|--------|------------|----------|---------|--------|----------|
-| insert_single | 748 | 4,585 | 647 | 568 | 715 | 153 | 164 | 561 |
-| insert_bulk_100 | 635 | 817 | 288 | 75 | 318 | 100 | 120 | 63 |
-| select_pk | 42,752 | 7,528 | 4,822 | 1,958 | 6,004 | 1,638 | 1,969 | 1,896 |
-| select_filter | 1,060 | 183 | 193 | 187 | 77 | 115 | 73 | 156 |
-| update_single | 823 | 7,628 | 710 | 546 | 798 | 158 | 165 | 567 |
-| update_bulk | 14,571 | 7,681 | 5,776 | 1,684 | 8,441 | 1,708 | 2,223 | 1,660 |
-| delete_single | 183 | 242 | 128 | 175 | 181 | 86 | 93 | 170 |
-
-### Query Operations
-
-![SQLite Queries](../img/benchmarks/sqlite_queries.png)
-
-| Test | aiosqlite | Oxyde | Django | SQLAlchemy | Tortoise | Piccolo | Peewee | SQLModel |
-|------|-----------|-------|--------|------------|----------|---------|--------|----------|
-| filter_simple | 18,577 | 5,294 | 4,411 | 1,903 | 5,241 | 1,512 | 1,758 | 1,822 |
-| filter_complex | 1,869 | 314 | 311 | 318 | 142 | 189 | 127 | 261 |
-| filter_in | 7,179 | 1,153 | 1,008 | 872 | 559 | 564 | 428 | 754 |
-| order_limit | 12,284 | 4,235 | 3,295 | 1,673 | 2,937 | 1,346 | 1,342 | 1,601 |
-| aggregate_count | 45,096 | 11,807 | 6,360 | 2,077 | 13,825 | 1,838 | 2,245 | 2,042 |
-| aggregate_mixed | 12,929 | 6,438 | 2,407 | 1,689 | 4,475 | 1,491 | 1,863 | 1,672 |
-
-### Relations
-
-![SQLite Relations](../img/benchmarks/sqlite_relations.png)
-
-| Test | aiosqlite | Oxyde | Django | SQLAlchemy | Tortoise | Piccolo | Peewee | SQLModel |
-|------|-----------|-------|--------|------------|----------|---------|--------|----------|
-| join_simple | 26 | 5 | 4 | 5 | 3 | 2 | 2 | 4 |
-| join_filter | 27 | 5 | 4 | 5 | 3 | 2 | 2 | 5 |
-| prefetch_related | 40 | 7 | 5 | 4 | 3 | 4 | 3 | 3 |
-| nested_prefetch | 32 | 6 | 1 | 2 | 3 | 3 | 2 | 2 |
-
-### Concurrent Operations
-
-![SQLite Concurrent](../img/benchmarks/sqlite_concurrent.png)
-
-| Concurrency | aiosqlite | Oxyde | Django | SQLAlchemy | Tortoise | Piccolo | Peewee | SQLModel |
-|-------------|-----------|-------|--------|------------|----------|---------|--------|----------|
-| 10 | 3,397 | 1,346 | 343 | 204 | 738 | 221 | 297 | 197 |
-| 50 | 703 | 289 | 71 | 38 | 145 | 28 | 60 | 35 |
-| 100 | 350 | 143 | 36 | 20 | 77 | 12 | 30 | 18 |
-
-### Scalability
-
-![SQLite Scalability](../img/benchmarks/sqlite_scalability.png)
 
 ---
 
@@ -286,7 +151,7 @@ Benchmarks are available in a separate repository: [oxyde-benchmarks](https://gi
 - Connection pool warmed up before measurements
 - Each ORM tested in isolated subprocess for accurate memory measurement
 - Each ORM tested with recommended async drivers
-- Raw driver baselines (asyncpg, aiomysql, aiosqlite) included for reference
+- Raw driver baselines (asyncpg) included for reference
 
 ## Next Steps
 

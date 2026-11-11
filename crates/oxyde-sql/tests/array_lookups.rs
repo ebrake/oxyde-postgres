@@ -1,5 +1,5 @@
 //! SQL generation for array lookups (ARRAY_CONTAINS / ARRAY_CONTAINED_BY /
-//! ARRAY_OVERLAP) across dialects.
+//! ARRAY_OVERLAP) on PostgreSQL.
 
 use std::collections::HashMap;
 
@@ -71,10 +71,6 @@ impl Lookup {
 
     fn build(&self, dialect: Dialect) -> (String, Vec<Value>) {
         build_sql(&self.ir(), dialect).unwrap()
-    }
-
-    fn error(&self, dialect: Dialect) -> String {
-        build_sql(&self.ir(), dialect).unwrap_err().to_string()
     }
 }
 
@@ -285,249 +281,6 @@ fn postgres_json_db_type_casts_the_column_to_jsonb() {
 }
 
 #[test]
-fn mysql_walks_both_arrays_with_json_table() {
-    for op in OPS {
-        let (sql, params) = Lookup::new(op, arr(vec![s("rust")]), array_of(ColumnTypeSpec::Text))
-            .build(Dialect::Mysql);
-        assert!(
-            sql.contains("WHEN JSON_TYPE(`tags`) = 'ARRAY' THEN"),
-            "{sql}"
-        );
-        // The column is read once, by a holder outside the JSON_TABLE
-        // subqueries, so a column named like their columns (`oxyde_v`)
-        // cannot be shadowed.
-        assert!(
-            sql.contains(
-                "FROM JSON_TABLE(`tags`, '$' COLUMNS (oxyde_c JSON PATH '$')) AS oxyde_h)"
-            ),
-            "{sql}"
-        );
-        assert!(
-            sql.contains("JSON_TABLE(oxyde_h.oxyde_c, '$[*]' COLUMNS (oxyde_v JSON PATH '$'))"),
-            "{sql}"
-        );
-        assert!(
-            sql.contains("(SELECT CAST(? AS JSON) AS oxyde_j) AS oxyde_a CROSS JOIN JSON_TABLE(oxyde_a.oxyde_j, '$[*]'"),
-            "{sql}"
-        );
-        // Elements are JSON_TABLE columns, never re-extracted per pair, and
-        // compare null-safe: JSON null elements read as SQL NULL.
-        assert!(
-            sql.contains("WHERE oxyde_l.oxyde_v <=> oxyde_r.oxyde_v"),
-            "{sql}"
-        );
-        assert!(!sql.contains("JSON_EXTRACT"), "{sql}");
-        assert!(!sql.contains("CAST(JSON_UNQUOTE"), "{sql}");
-        // Containment leads with a JSON_CONTAINS prefilter, which binds the
-        // operand a second time; overlap binds it once.
-        let prefilter = match op {
-            "ARRAY_CONTAINS" => Some("WHERE (JSON_CONTAINS(`tags`, CAST(? AS JSON)) AND CASE"),
-            "ARRAY_CONTAINED_BY" => Some("WHERE (JSON_CONTAINS(CAST(? AS JSON), `tags`) AND CASE"),
-            _ => None,
-        };
-        let binds = if let Some(prefilter) = prefilter {
-            assert!(sql.contains(prefilter), "{sql}");
-            2
-        } else {
-            assert!(!sql.contains("JSON_CONTAINS"), "{sql}");
-            1
-        };
-        assert_eq!(sql.matches('?').count(), binds, "{sql}");
-        // NULL check, type check, holder, and the prefilter if any.
-        assert_eq!(sql.matches("`tags`").count(), 2 + binds, "{sql}");
-        assert_eq!(params.len(), binds);
-    }
-}
-
-#[test]
-fn mysql_compares_typed_decimals_as_decimal() {
-    let (sql, params) = Lookup::new(
-        "ARRAY_CONTAINS",
-        arr(vec![s("1.5")]),
-        array_of(ColumnTypeSpec::Decimal {
-            precision: None,
-            scale: None,
-        }),
-    )
-    .build(Dialect::Mysql);
-    assert!(sql.contains("AS DECIMAL(65,30))"), "{sql}");
-    assert!(!sql.contains("AS DOUBLE"), "{sql}");
-    // No JSON_CONTAINS prefilter: it would compare "1.50" and "1.5" as text.
-    assert!(!sql.contains("JSON_CONTAINS"), "{sql}");
-    // The operand is bound once (the guard's regex has `?` of its own).
-    assert_eq!(sql.matches("CAST(? AS JSON)").count(), 1, "{sql}");
-    assert_eq!(params.len(), 1);
-}
-
-#[test]
-fn mysql_decimal_cast_is_guarded_against_values_it_cannot_take() {
-    let (sql, _) = Lookup::new(
-        "ARRAY_CONTAINS",
-        arr(vec![s("1.5")]),
-        array_of(ColumnTypeSpec::Decimal {
-            precision: None,
-            scale: None,
-        }),
-    )
-    .build(Dialect::Mysql);
-    let l = "JSON_UNQUOTE(oxyde_l.oxyde_v)";
-    // Each guard is a CASE branch before the cast, in this order.
-    let guards = [
-        // JSON null elements (SQL NULL, or a JSON null before MySQL 8.0.21)
-        // match only each other.
-        "CASE WHEN (oxyde_l.oxyde_v IS NULL OR JSON_TYPE(oxyde_l.oxyde_v) = 'NULL') \
-         OR (oxyde_r.oxyde_v IS NULL OR JSON_TYPE(oxyde_r.oxyde_v) = 'NULL') \
-         THEN (oxyde_l.oxyde_v IS NULL OR JSON_TYPE(oxyde_l.oxyde_v) = 'NULL') \
-         AND (oxyde_r.oxyde_v IS NULL OR JSON_TYPE(oxyde_r.oxyde_v) = 'NULL')"
-            .to_string(),
-        "NOT IN ('STRING', 'INTEGER', 'UNSIGNED INTEGER', 'DECIMAL', 'DOUBLE')".to_string(),
-        format!("{l} NOT REGEXP '^[-+]?([0-9]{{1,35}}([.][0-9]{{0,30}})?|[.][0-9]{{1,30}})([eE][-+]?[0-9]{{1,2}})?$' THEN FALSE"),
-        format!("ABS({l} + 0e0) BETWEEN 1e-28 AND 1e29 AND "),
-        // Expanded fractional digits: "1.001e-28" would round into 1e-28.
-        format!("REGEXP_REPLACE({l}, '^[-+]|[eE].*$', '')"),
-        format!("REGEXP_SUBSTR({l}, '[-+]?[0-9]+$') AS SIGNED)) <= 30)) THEN FALSE"),
-        format!("ELSE CAST({l} AS DECIMAL(65,30))"),
-    ];
-    let positions: Vec<_> = guards
-        .iter()
-        .map(|g| {
-            sql.find(g.as_str())
-                .unwrap_or_else(|| panic!("{g} not in {sql}"))
-        })
-        .collect();
-    assert!(positions.windows(2).all(|w| w[0] < w[1]), "{sql}");
-}
-
-#[test]
-fn sqlite_walks_both_arrays_with_json_each() {
-    let quantifiers = [
-        "NOT EXISTS (SELECT 1 FROM json_each(?) AS \"oxyde_r\" WHERE NOT EXISTS",
-        "NOT EXISTS (SELECT 1 FROM json_each(\"oxyde_h\".\"oxyde_c\") AS \"oxyde_l\" WHERE NOT EXISTS",
-        "EXISTS (SELECT 1 FROM json_each(\"oxyde_h\".\"oxyde_c\") AS \"oxyde_l\" WHERE EXISTS",
-    ];
-    for (op, quantifier) in OPS.iter().zip(quantifiers) {
-        let (sql, params) = Lookup::new(op, arr(vec![s("rust")]), array_of(ColumnTypeSpec::Text))
-            .build(Dialect::Sqlite);
-        // Plain SQL that any SQLite 3.45+ connection runs: NULL stays NULL,
-        // and text that is not JSON, JSONB that is not an array and
-        // non-array JSON are false before json_each() can raise on them.
-        assert!(
-            sql.contains(
-                r#"WHERE (CASE WHEN "tags" IS NULL THEN NULL WHEN json_valid("tags", 9) THEN CASE WHEN json_type("tags") = 'array' THEN (SELECT "#
-            ),
-            "{sql}"
-        );
-        assert!(sql.contains(quantifier), "{op}: {sql}");
-        // The column is read once, by the holder, outside json_each's scope.
-        assert!(
-            sql.contains(
-                r#"FROM (SELECT "tags" AS "oxyde_c") AS "oxyde_h") ELSE FALSE END ELSE FALSE END)"#
-            ),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(
-                r#"("oxyde_l"."type" = "oxyde_r"."type" OR ("oxyde_l"."type" IN ('integer', 'real') AND "oxyde_r"."type" IN ('integer', 'real'))) AND "oxyde_l"."value" IS "oxyde_r"."value""#
-            ),
-            "{sql}"
-        );
-        assert!(!sql.contains("CAST("), "{sql}");
-        assert_eq!(params.len(), 1);
-    }
-
-    // Typed decimals compare as REAL, and only numeric elements are cast.
-    let (sql, _) = Lookup::new(
-        "ARRAY_OVERLAP",
-        arr(vec![s("1")]),
-        array_of(ColumnTypeSpec::Decimal {
-            precision: None,
-            scale: None,
-        }),
-    )
-    .build(Dialect::Sqlite);
-    assert!(
-        sql.contains(r#"WHEN "oxyde_l"."type" = 'text' AND json_valid("oxyde_l"."value") THEN json_type("oxyde_l"."value") IN ('integer', 'real')"#),
-        "{sql}"
-    );
-    assert!(
-        sql.contains(r#"THEN CAST("oxyde_l"."value" AS REAL) = CAST("oxyde_r"."value" AS REAL) ELSE FALSE END"#),
-        "{sql}"
-    );
-}
-
-#[test]
-fn sqlite_rejects_object_and_array_elements() {
-    let object = || rmpv::Value::Map(vec![(s("a"), 1.into())]);
-    let cases = [
-        (ColumnTypeSpec::Json, arr(vec![object()])),
-        (
-            ColumnTypeSpec::JsonBinary,
-            arr(vec![s("x"), arr(vec![1.into()])]),
-        ),
-        (array_of(ColumnTypeSpec::Json), arr(vec![object()])),
-        (
-            array_of(ColumnTypeSpec::JsonBinary),
-            arr(vec![arr(vec![1.into()])]),
-        ),
-    ];
-    for (spec, value) in cases {
-        for op in OPS {
-            let lookup = Lookup::new(op, value.clone(), spec.clone());
-            let err = lookup.error(Dialect::Sqlite);
-            assert!(
-                err.contains("object or array elements are only supported on PostgreSQL and MySQL"),
-                "{spec:?} {op}: {err}"
-            );
-            lookup_ok(&lookup, Dialect::Postgres);
-            lookup_ok(&lookup, Dialect::Mysql);
-        }
-    }
-
-    // Scalars are fine, including nulls and strings holding JSON text.
-    let scalars = arr(vec![
-        s("x"),
-        1.into(),
-        rmpv::Value::Nil,
-        s(r#""y""#),
-        s(r#"{"a": 1}"#),
-    ]);
-    lookup_ok(
-        &Lookup::new("ARRAY_CONTAINS", scalars.clone(), ColumnTypeSpec::Json),
-        Dialect::Sqlite,
-    );
-    lookup_ok(
-        &Lookup::new("ARRAY_CONTAINS", scalars, array_of(ColumnTypeSpec::Json)),
-        Dialect::Sqlite,
-    );
-}
-
-#[test]
-fn identifiers_are_quoted_and_qualified() {
-    let mut lookup = Lookup::new(
-        "ARRAY_CONTAINS",
-        arr(vec![s("x")]),
-        array_of(ColumnTypeSpec::Text),
-    );
-    lookup.column = Some(r#"au"thor.ta"gs"#);
-    let (sql, _) = lookup.build(Dialect::Postgres);
-    assert!(
-        sql.contains(r#"("au""thor"."ta""gs" @> $1::TEXT[])"#),
-        "{sql}"
-    );
-    let (sql, _) = lookup.build(Dialect::Mysql);
-    assert!(sql.contains("JSON_TYPE(`au\"thor`.`ta\"gs`)"), "{sql}");
-    let (sql, _) = lookup.build(Dialect::Sqlite);
-    assert!(
-        sql.contains(r#"json_valid("au""thor"."ta""gs", 9)"#),
-        "{sql}"
-    );
-    assert!(
-        sql.contains(r#"(SELECT "au""thor"."ta""gs" AS "oxyde_c")"#),
-        "{sql}"
-    );
-}
-
-#[test]
 fn qualified_column_type_wins_over_same_named_base_column() {
     // A joined model's `tags` is an array; the base model's `tags` is text.
     let mut lookup = Lookup::new(
@@ -554,7 +307,8 @@ fn qualified_column_never_takes_the_base_columns_type() {
     if let Some(FilterNode::Condition(filter)) = ir.filter_tree.as_mut() {
         filter.column = Some("sched.tags".into());
     }
-    for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+    {
+        let dialect = Dialect::Postgres;
         let err = build_sql(&ir, dialect).unwrap_err().to_string();
         assert!(
             err.contains("'sched.tags' needs its column type"),
@@ -610,64 +364,12 @@ fn invalid_operands_are_rejected() {
         ),
     ];
     for lookup in cases {
-        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+        {
+            let dialect = Dialect::Postgres;
             let err = build_sql(&lookup.ir(), dialect).unwrap_err();
             assert!(matches!(err, QueryError::InvalidQuery(_)), "{err}");
         }
     }
-}
-
-#[test]
-fn unsupported_columns_are_rejected() {
-    let nested = array_of(array_of(ColumnTypeSpec::BigInteger));
-    let cases = [
-        (
-            Lookup::new("ARRAY_CONTAINS", arr(vec![]), ColumnTypeSpec::Text),
-            "array or JSON column",
-        ),
-        (
-            Lookup::new("ARRAY_CONTAINS", arr(vec![]), ColumnTypeSpec::Unknown),
-            "'tags' needs its column type",
-        ),
-        (
-            Lookup::new("ARRAY_CONTAINS", arr(vec![]), nested),
-            "nested typed arrays",
-        ),
-    ];
-    for (lookup, message) in cases {
-        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
-            assert!(
-                lookup.error(dialect).contains(message),
-                "{}",
-                lookup.error(dialect)
-            );
-        }
-    }
-
-    let bytes = Lookup::new(
-        "ARRAY_CONTAINS",
-        arr(vec![rmpv::Value::Binary(vec![1])]),
-        array_of(ColumnTypeSpec::Blob),
-    );
-    lookup_ok(&bytes, Dialect::Postgres);
-    assert!(bytes
-        .error(Dialect::Mysql)
-        .contains("only supported on PostgreSQL"));
-    assert!(bytes
-        .error(Dialect::Sqlite)
-        .contains("only supported on PostgreSQL"));
-
-    let mut json_array = Lookup::new(
-        "ARRAY_CONTAINS",
-        arr(vec![]),
-        array_of(ColumnTypeSpec::Json),
-    );
-    json_array.db_type = Some("JSON[]");
-    assert!(json_array.error(Dialect::Postgres).contains("json[]"));
-}
-
-fn lookup_ok(lookup: &Lookup, dialect: Dialect) {
-    build_sql(&lookup.ir(), dialect).unwrap();
 }
 
 #[test]

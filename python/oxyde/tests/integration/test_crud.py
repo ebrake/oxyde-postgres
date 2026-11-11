@@ -35,7 +35,7 @@ class TestCreate:
         assert post.title == "Default Test"
         assert post.body == ""
         assert post.views == 0
-        assert post.published == False  # noqa: E712 — SQLite returns int
+        assert post.published == False
 
     @pytest.mark.asyncio
     async def test_create_sends_default_factory_pk(self, db):

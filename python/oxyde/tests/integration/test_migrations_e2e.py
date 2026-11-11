@@ -2,11 +2,11 @@
 
 Each test:
     1. Builds one or two migration files in tmp_path.
-    2. Applies them against a fresh DB (SQLite file / PG-container / MySQL-container).
-    3. Inspects the resulting schema via information_schema / pg_catalog / sqlite_master.
+    2. Applies them against a fresh DB (PostgreSQL 18).
+    3. Inspects the resulting schema via information_schema and pg_catalog.
 
 Table names are suffixed with a per-test UUID so parallel test runs against the
-shared PG/MySQL containers do not collide.
+PostgreSQL server do not collide.
 """
 
 from __future__ import annotations
@@ -24,16 +24,14 @@ from oxyde.migrations import (
     generate_migration_file,
     rollback_migrations,
 )
-from oxyde.migrations.utils import detect_dialect
 from oxyde.models.registry import clear_registry, register_table
 from oxyde.queries.raw import execute_raw
-from oxyde.tests.integration.conftest import _get_url
 
 
-@pytest_asyncio.fixture(params=["sqlite", "postgres", "mysql"])
-async def empty_db(request, tmp_path, _pg_container, _mysql_container):
+@pytest_asyncio.fixture(params=["postgres"])
+async def empty_db(request, postgres_database_url):
     """Fresh DB with no tables — unlike `db` fixture that seeds ALL_MODELS."""
-    url = _get_url(request.param, tmp_path, _pg_container, _mysql_container)
+    url = postgres_database_url
     db_name = f"mig_{request.param}_{uuid.uuid4().hex[:8]}"
     database = AsyncDatabase(url, name=db_name, overwrite=True)
     await database.connect()
@@ -45,94 +43,42 @@ async def empty_db(request, tmp_path, _pg_container, _mysql_container):
 
 
 async def _table_exists(db_name: str, table: str, dialect: str) -> bool:
-    if dialect == "postgres":
-        rows = await execute_raw(
-            "SELECT 1 FROM information_schema.tables WHERE table_name = $1",
-            [table],
-            using=db_name,
-        )
-    elif dialect == "mysql":
-        rows = await execute_raw(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = DATABASE() AND table_name = ?",
-            [table],
-            using=db_name,
-        )
-    else:  # sqlite
-        rows = await execute_raw(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            [table],
-            using=db_name,
-        )
+    rows = await execute_raw(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = $1",
+        [table],
+        using=db_name,
+    )
     return bool(rows)
 
 
 async def _column_exists(
     db_name: str, table: str, column: str, dialect: str
 ) -> bool:
-    if dialect == "postgres":
-        rows = await execute_raw(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = $1 AND column_name = $2",
-            [table, column],
-            using=db_name,
-        )
-    elif dialect == "mysql":
-        rows = await execute_raw(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
-            [table, column],
-            using=db_name,
-        )
-    else:  # sqlite
-        rows = await execute_raw(
-            f"SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?",
-            [column],
-            using=db_name,
-        )
+    rows = await execute_raw(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = $1 AND column_name = $2",
+        [table, column],
+        using=db_name,
+    )
     return bool(rows)
 
 
 async def _fk_exists(db_name: str, fk_name: str, dialect: str) -> bool:
-    """Check if a named FK constraint exists. Postgres/MySQL only."""
-    if dialect == "postgres":
-        rows = await execute_raw(
-            "SELECT 1 FROM pg_constraint WHERE conname = $1",
-            [fk_name],
-            using=db_name,
-        )
-    elif dialect == "mysql":
-        rows = await execute_raw(
-            "SELECT 1 FROM information_schema.table_constraints "
-            "WHERE constraint_schema = DATABASE() AND constraint_name = ?",
-            [fk_name],
-            using=db_name,
-        )
-    else:
-        pytest.skip("FK introspection not implemented for sqlite")
+    """Check if a named FK constraint exists. PostgreSQL."""
+    rows = await execute_raw(
+        "SELECT 1 FROM pg_constraint WHERE conname = $1",
+        [fk_name],
+        using=db_name,
+    )
     return bool(rows)
 
 
 async def _index_exists(db_name: str, index_name: str, dialect: str) -> bool:
-    if dialect == "postgres":
-        rows = await execute_raw(
-            "SELECT 1 FROM pg_indexes WHERE indexname = $1",
-            [index_name],
-            using=db_name,
-        )
-    elif dialect == "mysql":
-        rows = await execute_raw(
-            "SELECT 1 FROM information_schema.statistics "
-            "WHERE table_schema = DATABASE() AND index_name = ?",
-            [index_name],
-            using=db_name,
-        )
-    else:  # sqlite
-        rows = await execute_raw(
-            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
-            [index_name],
-            using=db_name,
-        )
+    rows = await execute_raw(
+        "SELECT 1 FROM pg_indexes WHERE indexname = $1",
+        [index_name],
+        using=db_name,
+    )
     return bool(rows)
 
 
@@ -248,10 +194,7 @@ class TestAddDropColumnE2E:
             tmp_path, [UserV1], [UserV2], dialect, f"drop_deprecated_{suffix}"
         )
 
-        if dialect == "sqlite":
-            # SQLite needs rebuild for ALTER COLUMN / DROP COLUMN combined —
-            # for plain drop_column on a simple table it does support it since 3.35.
-            pass
+        pass
 
         await apply_migrations(migrations_dir=str(tmp_path), db_alias=database.name)
         assert not await _column_exists(
@@ -305,24 +248,13 @@ class TestIndexE2E:
 class TestDropForeignKeyBugRegressionE2E:
     """The exact scenario from the bug report, driven end-to-end against a real DB.
 
-    Postgres/MySQL only — SQLite doesn't support ALTER TABLE DROP FK.
+    PostgreSQL supports ALTER TABLE DROP CONSTRAINT.
     """
 
-    @pytest_asyncio.fixture(params=["postgres", "mysql"])
-    async def pg_or_mysql_db(
-        self, request, tmp_path, _pg_container, _mysql_container
-    ):
-        url = _get_url(request.param, tmp_path, _pg_container, _mysql_container)
-        db_name = f"fk_{request.param}_{uuid.uuid4().hex[:8]}"
-        database = AsyncDatabase(url, name=db_name, overwrite=True)
-        await database.connect()
-        clear_registry()
-        yield database, request.param
-        await disconnect_all()
 
     @pytest.mark.asyncio
-    async def test_remove_fk_keep_column(self, pg_or_mysql_db, tmp_path):
-        database, dialect = pg_or_mysql_db
+    async def test_remove_fk_keep_column(self, empty_db, tmp_path):
+        database, dialect = empty_db
         suffix = uuid.uuid4().hex[:8]
         authors = f"authors_{suffix}"
         books = f"books_{suffix}"

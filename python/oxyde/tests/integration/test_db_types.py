@@ -1,8 +1,8 @@
-"""Integration tests for explicit db_type fields across all dialects.
+"""Integration tests for explicit db_type fields on PostgreSQL.
 
 Tests create -> get -> assert for fields with explicit db_type,
 covering dialect-specific SQL types (BYTEA vs BLOB, UUID, arrays, etc.).
-One model per dialect, fixture selects by backend.
+Explicit PostgreSQL type overrides round-trip through the native driver.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from oxyde.db.schema import create_tables
 from oxyde.models.registry import clear_registry, register_table
 from oxyde.queries.raw import execute_raw
 
-from .conftest import _DIALECTS, _get_url
+from .conftest import _DIALECTS
 
 
 def _has(model: type, field: str) -> bool:
@@ -80,40 +80,12 @@ class PgDbTypes(Model):
         table_name = "db_types_test"
 
 
-class MysqlDbTypes(Model):
-    id: int | None = Field(default=None, db_pk=True)
-    json_val: dict | None = Field(default=None, db_nullable=True, db_type="JSON")
-    varchar_val: str = Field(default="", db_type="VARCHAR(100)")
-    decimal_val: Decimal | None = Field(
-        default=None, db_nullable=True, db_type="DECIMAL(10,2)"
-    )
-    blob_val: bytes | None = Field(default=None, db_nullable=True, db_type="BLOB")
-    ts_val: datetime | None = Field(
-        default=None, db_nullable=True, db_type="DATETIME(6)"
-    )
-    char_val: str = Field(default="", db_type="CHAR(36)")
-
-    class Meta:
-        is_table = True
-        table_name = "db_types_test"
 
 
-class SqliteDbTypes(Model):
-    id: int | None = Field(default=None, db_pk=True)
-    text_val: str = Field(default="", db_type="TEXT")
-    int_val: int = Field(default=0, db_type="INTEGER")
-    real_val: float = Field(default=0.0, db_type="REAL")
-    blob_val: bytes | None = Field(default=None, db_nullable=True, db_type="BLOB")
-
-    class Meta:
-        is_table = True
-        table_name = "db_types_test"
 
 
 DIALECT_MODELS = {
     "postgres": PgDbTypes,
-    "mysql": MysqlDbTypes,
-    "sqlite": SqliteDbTypes,
 }
 
 
@@ -121,8 +93,8 @@ DIALECT_MODELS = {
 
 
 @pytest_asyncio.fixture(params=_DIALECTS)
-async def typed_db(request, tmp_path, _pg_container, _mysql_container):
-    url = _get_url(request.param, tmp_path, _pg_container, _mysql_container)
+async def typed_db(request, postgres_database_url):
+    url = postgres_database_url
     model = DIALECT_MODELS[request.param]
 
     clear_registry()

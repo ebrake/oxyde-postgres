@@ -1,4 +1,7 @@
-# Oxyde ORM
+# Oxyde for PostgreSQL
+
+PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and Python 3.10+. See the [first-release notes](changelog.md) for all fork additions.
+
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/mr-fatalyst/oxyde/master/logo.png" alt="Logo" width="200">
@@ -65,7 +68,7 @@
 - **Pydantic v2 models** — Full validation, type hints, serialization
 - **Async-first** — Built for modern async Python with `asyncio`
 - **Rust performance** — SQL generation and execution in native Rust
-- **Multi-database** — PostgreSQL, SQLite, MySQL support
+- **Multi-database** — PostgreSQL 18+ support
 - **Transactions** — `transaction.atomic()` context manager with savepoints
 - **Migrations** — Django-style `makemigrations` and `migrate` CLI
 
@@ -80,8 +83,6 @@ Oxyde's Rust core handles SQL generation and query execution, releasing Python's
 | Database   | Oxyde | Tortoise | Piccolo | Django | SQLAlchemy | SQLModel | Peewee |
 |------------|-------|----------|---------|--------|------------|----------|--------|
 | PostgreSQL | 1,475 | 888      | 932     | 736    | 445        | 431      | 80     |
-| MySQL      | 1,239 | 794      | —       | 714    | 536        | 505      | 461    |
-| SQLite     | 2,525 | 1,882    | 469     | 1,294  | 588        | 567      | 548    |
 
 [:octicons-arrow-right-24: Full benchmark report](advanced/benchmarks.md)
 
@@ -118,10 +119,7 @@ async with transaction.atomic():
 | Database   | Min Version | Status | Notes |
 |------------|-------------|--------|-------|
 | PostgreSQL | 12+ | Full | RETURNING, UPSERT, FOR UPDATE/SHARE, JSON, Arrays |
-| SQLite     | 3.35+ | Full | RETURNING, UPSERT, WAL mode by default |
-| MySQL      | 8.0+ | Full | UPSERT via ON DUPLICATE KEY, FOR UPDATE/SHARE |
 
-> **MySQL**: No RETURNING clause — uses `last_insert_id()`. Bulk INSERT returns calculated ID range which may be incorrect with concurrent inserts.
 
 ## Ecosystem
 
@@ -134,7 +132,7 @@ Auto-generated admin panel for Oxyde ORM with zero boilerplate.
 - Theming, authentication, bulk operations
 
 ```bash
-pip install oxyde-admin
+pip install oxyde-postgres-admin
 ```
 
 [:octicons-arrow-right-24: GitHub](https://github.com/mr-fatalyst/oxyde-admin)

@@ -55,7 +55,7 @@ class StubCore:
         return b"{}"
 
     async def pool_backend(self, pool_name: str) -> str:
-        return "sqlite"
+        return "postgres"
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_register_and_retrieve_connection(
     monkeypatch.setattr(_tx_module, "_rollback_transaction", stub.rollback_transaction)
 
     db = AsyncDatabase(
-        "sqlite::memory:",
+        "postgresql://localhost/test",
         name="analytics",
         settings=PoolSettings(max_connections=1, min_connections=1),
         auto_register=False,
@@ -93,16 +93,12 @@ async def test_register_and_retrieve_connection(
     assert stub.init_calls == [
         (
             "analytics",
-            "sqlite::memory:",
+            "postgresql://localhost/test",
             {
                 "max_connections": 1,
                 "min_connections": 1,
                 "transaction_timeout": 300.0,
                 "transaction_cleanup_interval": 60.0,
-                "sqlite_journal_mode": "WAL",
-                "sqlite_synchronous": "NORMAL",
-                "sqlite_cache_size": 10000,
-                "sqlite_busy_timeout": 5000,
             },
         )
     ]
@@ -136,7 +132,7 @@ async def test_transaction_context(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_reg_module, "_CONNECTIONS", {})
 
     db = AsyncDatabase(
-        "sqlite::memory:",
+        "postgresql://localhost/test",
         name="default",
         settings=PoolSettings(max_connections=1, min_connections=1),
         auto_register=True,  # Register so atomic() can find it
@@ -193,7 +189,7 @@ async def test_transaction_timeout_rolls_back(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(_reg_module, "_CONNECTIONS", {})
 
     db = AsyncDatabase(
-        "sqlite::memory:",
+        "postgresql://localhost/test",
         name="default",
         settings=PoolSettings(max_connections=1, min_connections=1),
         auto_register=True,  # Register so atomic() can find it
@@ -210,8 +206,9 @@ async def test_transaction_timeout_rolls_back(monkeypatch: pytest.MonkeyPatch) -
 
 def test_validate_url_scheme() -> None:
     _validate_url_scheme("postgresql://user:pass@localhost/db")
-    _validate_url_scheme("mysql://user:pass@localhost/db")
-    _validate_url_scheme("sqlite::memory:")
+    with pytest.raises(ValueError):
+        _validate_url_scheme("mysql://user:pass@localhost/db")
+    _validate_url_scheme("postgresql://localhost/test")
 
     with pytest.raises(ValueError):
         _validate_url_scheme("mongodb://localhost")

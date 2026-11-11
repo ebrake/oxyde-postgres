@@ -4,22 +4,18 @@
 //! results are returned as `Vec<HashMap<String, serde_json::Value>>` for the
 //! extract functions. This is a cold debug path — no hot-path allocation concern.
 
-pub mod mysql;
 pub mod postgres;
-pub mod sqlite;
 
-pub use mysql::{build_mysql_explain_sql, extract_mysql_json_plan};
 pub use postgres::{
     build_postgres_explain_sql, extract_postgres_json_plan, extract_text_plan, ExplainFormat,
     ExplainOptions,
 };
-pub use sqlite::build_sqlite_explain_sql;
 
 use std::collections::HashMap;
 
 use sqlx::{Column, Row};
 
-use crate::bind::{bind_mysql, bind_postgres, bind_sqlite};
+use crate::bind::bind_postgres;
 use crate::error::{DriverError, Result};
 use crate::pool::{DatabaseBackend, DbPool};
 use crate::registry;
@@ -75,35 +71,7 @@ async fn fetch_explain_rows(
                 .map_err(|e| DriverError::ExecutionError(format!("EXPLAIN failed: {e}")))?;
             Ok(rows.iter().map(row_to_map).collect())
         }
-        DbPool::MySql(pool) => {
-            let query = bind_mysql(sqlx::query(sql), params)?;
-            let rows = query
-                .fetch_all(&pool)
-                .await
-                .map_err(|e| DriverError::ExecutionError(format!("EXPLAIN failed: {e}")))?;
-            Ok(rows.iter().map(row_to_map).collect())
-        }
-        DbPool::Sqlite(pool) => {
-            let query = bind_sqlite(sqlx::query(sql), params)?;
-            let rows = query
-                .fetch_all(&pool)
-                .await
-                .map_err(|e| DriverError::ExecutionError(format!("EXPLAIN failed: {e}")))?;
-            Ok(rows.iter().map(row_to_map).collect())
-        }
     }
-}
-
-pub fn rows_to_objects(rows: Vec<HashMap<String, serde_json::Value>>) -> serde_json::Value {
-    let mut array = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut obj = serde_json::Map::new();
-        for (key, value) in row {
-            obj.insert(key, value);
-        }
-        array.push(serde_json::Value::Object(obj));
-    }
-    serde_json::Value::Array(array)
 }
 
 pub async fn explain_query(
@@ -115,8 +83,6 @@ pub async fn explain_query(
     let backend = crate::pool::api::pool_backend(pool_name).await?;
     let explain_sql = match backend {
         DatabaseBackend::Postgres => build_postgres_explain_sql(sql, options),
-        DatabaseBackend::MySql => build_mysql_explain_sql(sql, options),
-        DatabaseBackend::Sqlite => build_sqlite_explain_sql(sql, options)?,
     };
 
     let rows = fetch_explain_rows(pool_name, &explain_sql, params).await?;
@@ -126,11 +92,6 @@ pub async fn explain_query(
             ExplainFormat::Json => extract_postgres_json_plan(rows),
             ExplainFormat::Text => extract_text_plan(rows, "QUERY PLAN"),
         },
-        DatabaseBackend::MySql => match options.format {
-            ExplainFormat::Json => extract_mysql_json_plan(rows),
-            ExplainFormat::Text => rows_to_objects(rows),
-        },
-        DatabaseBackend::Sqlite => rows_to_objects(rows),
     };
 
     Ok(payload)

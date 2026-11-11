@@ -409,18 +409,6 @@ oxyde migrate
 - Concurrent index creation
 - Type changes emit a `USING "col"::text::<type>` clause, so conversions such as text ↔ enum work
 
-### SQLite
-
-- Limited ALTER TABLE (add column only)
-- Table recreation for complex changes
-- No transactional DDL
-
-### MySQL
-
-- ALTER TABLE with some limitations
-- No transactional DDL
-- Column changes may require data copy
-
 ## Migration Dependencies
 
 Dependencies are specified via `depends_on` at the top of the file:
@@ -496,7 +484,7 @@ Enum fields (see [Fields — Enum Fields](fields.md#enum-fields)) are tracked by
 
 ### Creating an Enum Type
 
-A new enum type produces `ctx.create_enum_type(...)`, which emits `CREATE TYPE ... AS ENUM (...)` on PostgreSQL and nothing on MySQL/SQLite (the values live in the column definition there):
+A new enum type produces `ctx.create_enum_type(...)`, which emits `CREATE TYPE ... AS ENUM (...)` on PostgreSQL:
 
 ```python
 def upgrade(ctx):
@@ -514,15 +502,13 @@ def upgrade(ctx):
     ctx.add_enum_value(
         "post_status_enum",
         "archived",
-        fields=[...],   # columns using the type, for the MySQL path
+        fields=[...],   # columns using the type
     )
 ```
 
 | Dialect | Generated SQL |
 |---------|---------------|
 | PostgreSQL | `ALTER TYPE "post_status_enum" ADD VALUE IF NOT EXISTS 'archived'` |
-| MySQL | `ALTER TABLE ... MODIFY COLUMN ...` with the widened `ENUM(...)` for every column using the type |
-| SQLite | nothing — the column is plain `TEXT` |
 
 !!! warning "PostgreSQL runs this migration without a transaction"
     PostgreSQL forbids `ALTER TYPE ... ADD VALUE` inside a transaction block. When a migration contains such an operation, Oxyde executes the **entire** migration without a transaction, so a failure halfway through leaves the already-executed statements applied.
@@ -619,7 +605,7 @@ For tests and scripts where migration files are not needed, use `create_tables()
 ```python
 from oxyde import AsyncDatabase, create_tables, drop_tables
 
-database = AsyncDatabase("sqlite:///:memory:", name="default")
+database = AsyncDatabase("postgresql://localhost/app", name="default")
 async with database:
     await create_tables(database)
     # ... run tests ...

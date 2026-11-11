@@ -66,22 +66,22 @@ class Example(Model):
 
 ### Type Mapping
 
-| Python Type | PostgreSQL | SQLite | MySQL |
-|-------------|------------|--------|-------|
-| `int` | BIGINT | INTEGER | BIGINT |
-| `int` (PK) | BIGSERIAL | INTEGER AUTOINCREMENT | BIGINT AUTO_INCREMENT |
-| `str` | VARCHAR(255) | VARCHAR(255) | VARCHAR(255) |
-| `float` | DOUBLE PRECISION | REAL | DOUBLE |
-| `bool` | BOOLEAN | INTEGER | TINYINT |
-| `datetime` | TIMESTAMP | TEXT | DATETIME(6) |
-| `date` | DATE | TEXT | DATE |
-| `time` | TIME | TEXT | TIME(6) |
-| `UUID` | UUID | TEXT | CHAR(36) |
-| `Decimal` | NUMERIC | TEXT | DECIMAL |
-| `bytes` | BYTEA | BLOB | LONGBLOB |
-| `dict` | JSONB | TEXT | JSON |
-| `list[T]` | T[] | TEXT | JSON |
-| `Enum` (str values) | native enum type | TEXT | ENUM(...) |
+| Python Type | PostgreSQL |
+|-------------|------------|
+| `int` | BIGINT |
+| `int` (PK) | BIGSERIAL |
+| `str` | VARCHAR(255) |
+| `float` | DOUBLE PRECISION |
+| `bool` | BOOLEAN |
+| `datetime` | TIMESTAMP |
+| `date` | DATE |
+| `time` | TIME |
+| `UUID` | UUID |
+| `Decimal` | NUMERIC |
+| `bytes` | BYTEA |
+| `dict` | JSONB |
+| `list[T]` | T[] |
+| `Enum` (str values) | native enum type |
 
 !!! tip "Custom string length"
     `str` fields default to `VARCHAR(255)`. Use `max_length` to change: `Field(max_length=500)` → `VARCHAR(500)`.
@@ -90,7 +90,7 @@ class Example(Model):
     Use `max_digits` and `decimal_places` for precise numeric columns: `Field(max_digits=10, decimal_places=2)` → `NUMERIC(10,2)` / `DECIMAL(10,2)`.
 
 !!! tip "Enums"
-    A string-valued `Enum` annotation maps to a native enum type on PostgreSQL/MySQL. See [Fields — Enum Fields](fields.md#enum-fields).
+    A string-valued `Enum` annotation maps to a native enum type on PostgreSQL. See [Fields — Enum Fields](fields.md#enum-fields).
 
 ## Primary Keys
 
@@ -148,7 +148,7 @@ class Event(Model):
 
 ### Partial Index
 
-Partial indexes are supported by PostgreSQL and SQLite migrations.
+Partial indexes are supported by PostgreSQL migrations.
 
 ```python
 class User(Model):

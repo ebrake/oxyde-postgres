@@ -45,18 +45,7 @@ def init() -> None:
 
     typer.echo()
 
-    # Ask for dialect
-    typer.echo("🗄️  Database dialect")
-    dialect = typer.prompt(
-        "   Dialect (postgres/sqlite/mysql)",
-        default="postgres",
-    )
-    if dialect not in ("postgres", "sqlite", "mysql"):
-        typer.secho(
-            f"   ⚠️  Unknown dialect '{dialect}', using anyway", fg=typer.colors.YELLOW
-        )
-
-    typer.echo()
+    dialect = "postgres"
 
     # Ask for database URL
     typer.echo("🔗 Database connection")

@@ -8,7 +8,7 @@ Demonstrates transaction handling:
 - Timeout handling
 
 Usage:
-    export DATABASE_URL=sqlite://demo.db
+    export DATABASE_URL=postgresql://localhost/app
     python examples/transactions.py
 """
 
@@ -210,7 +210,7 @@ async def demo_nested_transactions(db: AsyncDatabase, accounts: list[Account]) -
 
 
 async def main() -> None:
-    url = os.getenv("DATABASE_URL", "sqlite://demo.db")
+    url = os.getenv("DATABASE_URL", "postgresql://localhost/app")
     db = AsyncDatabase(url, name="default")
     await db.connect()
 

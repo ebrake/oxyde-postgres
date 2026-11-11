@@ -126,9 +126,6 @@ async with transaction.atomic():
     users = await User.objects.filter(status="active").for_share().all()
 ```
 
-!!! note "SQLite"
-    SQLite uses database-level locking. `for_update()` and `for_share()` are no-ops on SQLite.
-
 ## Common Patterns
 
 ### Transfer Money
@@ -353,7 +350,7 @@ async def transfer(from_id: int, to_id: int, amount: float) -> bool:
         return False
 
 async def main():
-    async with db.connect("sqlite:///bank.db"):
+    async with db.connect("postgresql://localhost/app"):
         # Create accounts
         alice = await Account.objects.create(name="Alice", balance=1000)
         bob = await Account.objects.create(name="Bob", balance=500)

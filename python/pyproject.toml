@@ -1,14 +1,14 @@
 [project]
-name = "oxyde"
-version = "0.8.0"
-description = "High-performance async Python ORM with Rust core"
+name = "oxyde-postgres"
+version = "0.1.0"
+description = "Type-safe asynchronous ORM for PostgreSQL 18+ with a Rust core"
 readme = "README.md"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 requires-python = ">=3.10"
 authors = [
     {name = "Nikita Ryzhenkov", email = "nikita.ryzhenkoff@gmail.com"}
 ]
-keywords = ["orm", "async", "database", "postgresql", "sqlite", "mysql", "pydantic"]
+keywords = ["orm", "async", "database", "postgresql", "pydantic"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Programming Language :: Rust",
     "Framework :: AsyncIO",
     "Topic :: Database",
@@ -28,7 +29,7 @@ dependencies = [
     "pydantic>=2.0",
     "msgpack>=1.0",
     "typer>=0.24",
-    "oxyde-core>=0.7.1,<0.8.0",
+    "oxyde-postgres-core>=0.1.0,<0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -41,7 +42,8 @@ dev = [
     "mypy==1.19.1",
     "pyright[nodejs]==1.1.411",
     "ty==0.0.59",
-    "testcontainers[postgres,mysql]>=4.0",
+    "testcontainers[postgres]>=4.0",
+    "psycopg2-binary>=2.9",
 ]
 docs = [
     "mkdocs>=1.6,<2",
@@ -52,10 +54,10 @@ docs = [
 oxyde = "oxyde.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/mr-fatalyst/oxyde"
-Documentation = "https://oxyde.fatalyst.dev/"
-Repository = "https://github.com/mr-fatalyst/oxyde"
-Issues = "https://github.com/mr-fatalyst/oxyde/issues"
+Homepage = "https://github.com/ebrake/oxyde-postgres"
+Documentation = "https://github.com/ebrake/oxyde-postgres/tree/main/docs"
+Repository = "https://github.com/ebrake/oxyde-postgres"
+Issues = "https://github.com/ebrake/oxyde-postgres/issues"
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -104,6 +106,7 @@ line-ending = "auto"
 # pytest configuration
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["oxyde/tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -130,3 +133,6 @@ warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
 exclude = ["tests/", "build/"]
+
+[tool.uv.sources]
+oxyde-postgres-core = { path = ".." }

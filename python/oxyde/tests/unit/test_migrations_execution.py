@@ -311,14 +311,6 @@ class TestMigrationSQLGeneration:
         assert "CREATE TABLE" in expected_sql
         assert "PRIMARY KEY" in expected_sql
 
-    def test_create_table_sql_sqlite(self):
-        """Test CREATE TABLE SQL for SQLite."""
-        expected_sql = """CREATE TABLE "user" (
-    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "name" TEXT NOT NULL,
-    "email" TEXT NOT NULL UNIQUE
-)"""
-        assert "INTEGER PRIMARY KEY AUTOINCREMENT" in expected_sql
 
     def test_add_column_sql(self):
         """Test ALTER TABLE ADD COLUMN SQL."""
@@ -511,12 +503,6 @@ class TestDropOpsMinimalPayloadRegression:
 
         assert any("DROP" in s and "fk_books_author_id" in s for s in sqls)
 
-    def test_drop_foreign_key_mysql(self):
-        ctx = MigrationContext(mode="collect", dialect="mysql")
-        ctx.drop_foreign_key("books", "fk_books_author_id")
-
-        sqls = migration_to_sql(json.dumps(ctx.get_collected_operations()), "mysql")
-        assert any("DROP" in s and "fk_books_author_id" in s for s in sqls)
 
     def test_drop_check_postgres(self):
         ctx = MigrationContext(mode="collect", dialect="postgres")
@@ -525,14 +511,8 @@ class TestDropOpsMinimalPayloadRegression:
         sqls = migration_to_sql(json.dumps(ctx.get_collected_operations()), "postgres")
         assert any("DROP CONSTRAINT" in s and "chk_users_age" in s for s in sqls)
 
-    def test_drop_check_mysql(self):
-        ctx = MigrationContext(mode="collect", dialect="mysql")
-        ctx.drop_check("users", "chk_users_age")
 
-        sqls = migration_to_sql(json.dumps(ctx.get_collected_operations()), "mysql")
-        assert any("DROP CHECK" in s and "chk_users_age" in s for s in sqls)
-
-    @pytest.mark.parametrize("dialect", ["postgres", "mysql", "sqlite"])
+    @pytest.mark.parametrize("dialect", ["postgres"])
     def test_drop_index(self, dialect):
         ctx = MigrationContext(mode="collect", dialect=dialect)
         ctx.drop_index("users", "idx_users_email")
@@ -619,16 +599,11 @@ class TestMigrationTransactionMode:
 
         assert ctx._should_use_transaction() is False
 
-    def test_sqlite_add_enum_value_keeps_transaction(self):
-        ctx = MigrationContext(mode="execute", dialect="sqlite")
-        ctx.add_enum_value("post_status_enum", "archived")
-
-        assert ctx._should_use_transaction() is True
 
 
-ALL_DIALECTS = ["postgres", "mysql", "sqlite"]
-NON_SQLITE = ["postgres", "mysql"]
-PARTIAL_INDEX_DIALECTS = ["postgres", "sqlite"]
+ALL_DIALECTS = ["postgres"]
+POSTGRES_DIALECTS = ["postgres"]
+PARTIAL_INDEX_DIALECTS = ["postgres"]
 
 
 def _field(name: str, **overrides) -> dict:
@@ -745,20 +720,6 @@ class TestOpMatrix:
         sqls = _render(ctx, dialect)
         assert any("WHERE deleted_at IS NULL" in s for s in sqls)
 
-    def test_create_partial_index_mysql_rejected(self):
-        ctx = MigrationContext(mode="collect", dialect="mysql")
-        ctx.create_index(
-            "users",
-            {
-                "name": "idx_users_active_email",
-                "fields": ["email"],
-                "unique": True,
-                "method": None,
-                "where": "deleted_at IS NULL",
-            },
-        )
-        with pytest.raises(Exception, match="partial indexes"):
-            _render(ctx, "mysql")
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_drop_index(self, dialect):
@@ -767,7 +728,7 @@ class TestOpMatrix:
         sqls = _render(ctx, dialect)
         assert any("DROP" in s.upper() and "idx_users_email" in s for s in sqls)
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_add_foreign_key(self, dialect):
         ctx = MigrationContext(mode="collect", dialect=dialect)
         ctx.add_foreign_key(
@@ -781,50 +742,30 @@ class TestOpMatrix:
         sqls = _render(ctx, dialect)
         assert any("fk_posts_author" in s and "users" in s for s in sqls)
 
-    def test_add_foreign_key_sqlite_rejected(self):
-        ctx = MigrationContext(mode="collect", dialect="sqlite")
-        ctx.add_foreign_key("posts", "fk_posts_author", ["author_id"], "users", ["id"])
-        with pytest.raises(Exception, match="SQLite"):
-            _render(ctx, "sqlite")
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_drop_foreign_key(self, dialect):
         ctx = MigrationContext(mode="collect", dialect=dialect)
         ctx.drop_foreign_key("posts", "fk_posts_author")
         sqls = _render(ctx, dialect)
         assert any("DROP" in s.upper() and "fk_posts_author" in s for s in sqls)
 
-    def test_drop_foreign_key_sqlite_rejected(self):
-        ctx = MigrationContext(mode="collect", dialect="sqlite")
-        ctx.drop_foreign_key("posts", "fk_posts_author")
-        with pytest.raises(Exception, match="SQLite"):
-            _render(ctx, "sqlite")
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_add_check(self, dialect):
         ctx = MigrationContext(mode="collect", dialect=dialect)
         ctx.add_check("users", "chk_users_age", "age >= 0")
         sqls = _render(ctx, dialect)
         assert any("chk_users_age" in s and "CHECK" in s.upper() for s in sqls)
 
-    def test_add_check_sqlite_rejected(self):
-        ctx = MigrationContext(mode="collect", dialect="sqlite")
-        ctx.add_check("users", "chk_users_age", "age >= 0")
-        with pytest.raises(Exception, match="SQLite"):
-            _render(ctx, "sqlite")
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_drop_check(self, dialect):
         ctx = MigrationContext(mode="collect", dialect=dialect)
         ctx.drop_check("users", "chk_users_age")
         sqls = _render(ctx, dialect)
         assert any("DROP" in s.upper() and "chk_users_age" in s for s in sqls)
 
-    def test_drop_check_sqlite_rejected(self):
-        ctx = MigrationContext(mode="collect", dialect="sqlite")
-        ctx.drop_check("users", "chk_users_age")
-        with pytest.raises(Exception, match="SQLite"):
-            _render(ctx, "sqlite")
 
 
 def _base_snapshot() -> dict:
@@ -852,7 +793,7 @@ class TestMigrationInvariants:
 
     # ── Rust-diff round-trip: emit → migration_to_sql must not fail ─────
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_roundtrip_add_column(self, dialect):
         old = _base_snapshot()
         new = _base_snapshot()
@@ -906,7 +847,7 @@ class TestMigrationInvariants:
         assert any(op["type"] == "drop_index" for op in json.loads(ops_json))
         migration_to_sql(ops_json, dialect)
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_roundtrip_add_foreign_key(self, dialect):
         old = _base_snapshot()
         old["tables"]["posts"] = {
@@ -936,7 +877,7 @@ class TestMigrationInvariants:
         assert any(op["type"] == "add_foreign_key" for op in json.loads(ops_json))
         migration_to_sql(ops_json, dialect)
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_roundtrip_drop_foreign_key(self, dialect):
         old = _base_snapshot()
         old["tables"]["posts"] = {
@@ -966,7 +907,7 @@ class TestMigrationInvariants:
         assert any(op["type"] == "drop_foreign_key" for op in json.loads(ops_json))
         migration_to_sql(ops_json, dialect)
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_roundtrip_add_check(self, dialect):
         old = _base_snapshot()
         new = _base_snapshot()
@@ -978,7 +919,7 @@ class TestMigrationInvariants:
         assert any(op["type"] == "add_check" for op in json.loads(ops_json))
         migration_to_sql(ops_json, dialect)
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_roundtrip_change_check_expression(self, dialect):
         old = _base_snapshot()
         old["tables"]["users"]["checks"].append(
@@ -999,7 +940,7 @@ class TestMigrationInvariants:
         assert ops[1]["check"]["expression"] == "age > 0"
         migration_to_sql(ops_json, dialect)
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_roundtrip_drop_check(self, dialect):
         old = _base_snapshot()
         old["tables"]["users"]["checks"].append(

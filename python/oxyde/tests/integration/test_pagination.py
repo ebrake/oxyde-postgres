@@ -16,7 +16,6 @@ class TestLimitOffset:
 
     @pytest.mark.asyncio
     async def test_offset(self, db):
-        # SQLite requires LIMIT with OFFSET, use large limit
         posts = await Post.objects.order_by("id").limit(100).offset(4).all(using=db.name)
         assert len(posts) == 2  # posts 5 and 6
 

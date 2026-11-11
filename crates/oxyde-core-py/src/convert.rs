@@ -15,8 +15,6 @@ use serde_json::Value as JsonValue;
 pub(crate) fn backend_to_dialect(backend: DatabaseBackend) -> Dialect {
     match backend {
         DatabaseBackend::Postgres => Dialect::Postgres,
-        DatabaseBackend::MySql => Dialect::Mysql,
-        DatabaseBackend::Sqlite => Dialect::Sqlite,
     }
 }
 
@@ -319,20 +317,6 @@ fn parse_pool_dict(dict: &Bound<'_, PyDict>, parsed: &mut DriverPoolSettings) ->
         parsed.transaction_cleanup_interval = extract_optional_duration(&value)?;
     }
 
-    // Extract SQLite PRAGMA settings
-    if let Some(value) = dict.get_item("sqlite_journal_mode")? {
-        parsed.sqlite_journal_mode = extract_optional_string(&value)?;
-    }
-    if let Some(value) = dict.get_item("sqlite_synchronous")? {
-        parsed.sqlite_synchronous = extract_optional_string(&value)?;
-    }
-    if let Some(value) = dict.get_item("sqlite_cache_size")? {
-        parsed.sqlite_cache_size = extract_optional_i32(&value)?;
-    }
-    if let Some(value) = dict.get_item("sqlite_busy_timeout")? {
-        parsed.sqlite_busy_timeout = extract_optional_i32(&value)?;
-    }
-
     // TLS settings
     if let Some(value) = dict.get_item("ssl_mode")? {
         parsed.ssl_mode = extract_optional_string(&value)?;
@@ -355,14 +339,6 @@ fn parse_pool_dict(dict: &Bound<'_, PyDict>, parsed: &mut DriverPoolSettings) ->
         parsed.pg_statement_cache_capacity = extract_optional_u32(&value)?;
     }
 
-    // MySQL-specific
-    if let Some(value) = dict.get_item("mysql_charset")? {
-        parsed.mysql_charset = extract_optional_string(&value)?;
-    }
-    if let Some(value) = dict.get_item("mysql_collation")? {
-        parsed.mysql_collation = extract_optional_string(&value)?;
-    }
-
     Ok(())
 }
 
@@ -372,17 +348,6 @@ fn extract_optional_u32(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
     } else {
         value
             .extract::<u32>()
-            .map(Some)
-            .map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))
-    }
-}
-
-fn extract_optional_i32(value: &Bound<'_, PyAny>) -> PyResult<Option<i32>> {
-    if value.is_none() {
-        Ok(None)
-    } else {
-        value
-            .extract::<i32>()
             .map(Some)
             .map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))
     }

@@ -5,7 +5,7 @@ This guide will get you up and running with Oxyde from scratch.
 ## 1. Install Oxyde
 
 ```bash
-pip install oxyde
+pip install oxyde-postgres
 ```
 
 ## 2. Project Structure
@@ -29,8 +29,8 @@ oxyde init
 You'll be prompted for:
 
 - **Models module(s)** — Python modules with your models (e.g., `models`)
-- **Dialect** — Database type: `postgres`, `sqlite`, or `mysql`
-- **Database URL** — Connection string (e.g., `sqlite:///app.db`)
+- **Dialect** — Always `postgres` (PostgreSQL 18+).
+- **Database URL** — Connection string (e.g., `postgresql://localhost/app`)
 - **Migrations directory** — Where to store migrations (default: `migrations`)
 
 This creates `oxyde_config.py`:
@@ -39,15 +39,12 @@ This creates `oxyde_config.py`:
 """Oxyde ORM configuration."""
 
 MODELS = ["models"]
-DIALECT = "sqlite"
+DIALECT = "postgres"
 MIGRATIONS_DIR = "migrations"
 DATABASES = {
-    "default": "sqlite:///app.db",
+    "default": "postgresql://localhost/app",
 }
 ```
-
-!!! tip "SQLite paths"
-    SQLite relative paths are resolved from the current working directory. For portable projects, see [SQLite File Paths](../guide/connections.md#connection-urls).
 
 ## 4. Define Models
 
@@ -112,7 +109,7 @@ from models import User
 
 async def main():
     # Connect using config from oxyde_config.py
-    await db.init(default="sqlite:///app.db")
+    await db.init(default="postgresql://localhost/app")
 
     # Create
     alice = await User.objects.create(

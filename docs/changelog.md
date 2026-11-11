@@ -1,532 +1,88 @@
 # Changelog
 
-All notable changes to Oxyde are documented here.
+## 0.1.0 — first fork release (unreleased)
 
----
+Based on upstream [Oxyde](https://github.com/mr-fatalyst/oxyde) at `26f3e9d470134d218ca70051fb48627e90fd6d6e` (upstream Python 0.8.0 / core 0.7.1). This release combines the following additions; overlapping fixes are included once.
 
-## Unreleased
+### PostgreSQL-focused fork
 
-### Packaging
+- Require **PostgreSQL 18 or newer**, checked before a newly connected pool is registered. Accept only `postgres://` and `postgresql://` URLs.
+- Remove the SQLite and MySQL drivers, binders, decoders, EXPLAIN implementations, SQL dialects, migration fallbacks, pool settings, and backend dependencies.
+- Use PostgreSQL SQL and native `RETURNING` throughout; remove MySQL's emulated update-returning path and SQLite table rebuilds.
+- Package the fork as **oxyde-postgres 0.1.0** and **oxyde-postgres-core 0.1.0**, retaining the `oxyde` imports, `_oxyde_core` native module, and `oxyde` CLI.
+- Move smoke, integration, migration, lifecycle, and driver tests to disposable PostgreSQL 18 databases/schemas. CI targets PostgreSQL 18 and Python 3.10/3.15.
+- Update documentation, examples, metadata, and release workflows for this fork, preserving upstream authorship and licenses.
+- Put native package metadata at the workspace root and explicitly include the patched SQLx sources and licenses in source releases, so source installs preserve the driver fixes.
 
-- `oxyde-core` release builds now include CPython 3.15 wheels. The PyO3 bridge has been upgraded to 0.30 for Python 3.15 support.
+### Transaction nesting depth
 
-### Queries
+Source: [upstream PR #52](https://github.com/mr-fatalyst/oxyde/pull/52).
 
-- UUID fields now support `gt`, `gte`, `lt`, `lte`, `between`, and `range` filters on PostgreSQL, SQLite, and MySQL. These use each database's UUID ordering and typed UUID parameters.
-- Array (`list[T]`) and JSON fields support `contains`, `contained_by`, and `overlap` lookups with a list or tuple on PostgreSQL, SQLite, and MySQL. Order and duplicates are ignored, and operands are validated against the element type; on PostgreSQL an element the column type cannot hold (`100000` for `SMALLINT[]`) equals no stored element. On PostgreSQL and MySQL elements can be objects or nested arrays, which compare as complete values. SQLite compares scalar elements with plain `json_each()` SQL, raises an error for objects and nested arrays in the list, compares `Decimal` arrays as floating point, and reads JSONB values. A key such as `window__overlap` still filters a related model's `overlap` field when `window` has no array lookups. See [Array Lookups](guide/filtering.md#array-lookups).
-- `having()` recognizes annotation keys by their alias rather than by lookup names: an alias ending in a lookup name (`tags__contains`) is that alias, and an unsupported lookup on an alias (`total__bogus`) raises `ValueError` naming the alias rather than `FieldError`.
+- Expose `get_transaction_depth(using="default")` through `oxyde.db` and `oxyde.db.transaction`: 0 outside `atomic()`, 1 in the outer block, and 2+ for nested savepoints.
+- Keep depth independent per database alias and owning task; child tasks and worker threads do not inherit their parent's reported depth. Standalone `AsyncTransaction` usage is excluded.
+- Cover rollback, failed operations, nesting, aliases, child tasks, threads, and calls without a running event loop.
 
-### Bug Fixes
+### Array, JSON, decimal, and typed-filter fixes
 
-- **PostgreSQL `SMALLINT` and `SMALLINT[]` decoding** — model fields and raw scalar queries now return Python integers instead of `None`, including negative values and the 16-bit boundaries. Null values are preserved.
-- **Joins to a model with renamed columns** — `join()` and FK-traversal filters (`filter(author__name=...)`) failed with `no column found for name` when the related model's primary key set `db_column`, and on SQLite returned undecoded JSON for a related list/JSON field with `db_column`. Joined result columns are named by field, but the primary-key lookup and the column types used for decoding were keyed by column name.
-- **Array fields with a `db_type` override on PostgreSQL** — `filter(small=[1, 2])` and `small__in=[...]` on a field declared with `db_type="INTEGER[]"` (or another array type narrower than the default) failed with `operator does not exist: integer[] = bigint[]`. Values are now cast to the column's type. An element that the column's type cannot hold (`100000` for `SMALLINT[]`) equals no row, so `exclude()` keeps every non-null row, and an array override Oxyde cannot read (`JSON[]`) raises an error naming it.
-- **`list[bytes]` fields on PostgreSQL** — saving one failed with `Unsupported parameter type for Postgres: Array(Bytes, None)`. They are now stored and loaded as `BYTEA[]`.
-- **Mixed timezone elements in `list[datetime]`** — an aware element of a naive `list[datetime]` field (or a naive element of a `TIMESTAMPTZ[]` one) was stored as NULL on PostgreSQL and in the other flavour's format on SQLite and MySQL. Elements are now converted to the field's flavour via UTC. Rows written before this fix keep the old values until they are saved again.
-- **`Decimal` values written with an exponent** — `Decimal("1E+2")` was bound as a string: saving it failed on PostgreSQL (`column is of type numeric but expression is of type text`), and in a `list[Decimal]` it was stored as NULL. It is now bound as a decimal. SQLite stores `Decimal` as text, and `list[Decimal]` elements are JSON strings on SQLite and MySQL, so values saved there before in exponent form keep it (`1E+2`) and match filters, which now bind `100`, only once saved again.
-- **Strings in JSON array fields** — in a `list[dict | str]` field, or a `list[str]` with `db_type="JSONB[]"`, a string that is not JSON text (`"hello"`) was stored as NULL on PostgreSQL, and a string that is JSON text (`"123"`, `"null"`, `'{"a": 1}'`) was parsed into a number, null or object on every backend, so it read back as another type. String elements are now always stored as JSON strings, in filter values as on insert. Rows written before this fix keep the old values until they are saved again.
-- **Numbers and booleans in JSON array fields on PostgreSQL** — in a `list[dict | int]` field, numbers and booleans were stored as NULL. They are now stored as JSON values. In a `list[float]` or `list[Decimal]` filter, integer elements (`filter(ratios=[1, 2.5])`) were bound as NULL on PostgreSQL and as JSON integers on SQLite, so the filter never matched; they are now converted to the element type.
-- **List filter elements of another type on PostgreSQL** — an element of another type than the column's (`filter(amounts=[1.5])` on a `list[Decimal]`, `filter(scores=[1.5])` on a `list[int]`, or an integer beyond 64 bits) was bound as NULL, and NULL elements compare equal, so the filter matched rows holding `[None]`. Such a filter now raises an error. MySQL and SQLite store list fields as JSON and compare each element as given, as before, so union element types such as `list[str | int]` still match there.
-- **String lookups on a `str` field stored as JSON** — `startswith`, `endswith`, `iexact`, `contains` and their case-insensitive forms compared against the quoted JSON text (`"hello"`) on MySQL and SQLite, so anchored lookups never matched a JSON string, and raised an error on PostgreSQL. They now match the string the field reads back as on all three backends, including JSONB values on SQLite, and a JSON null matches nothing. `exact` still compares the stored JSON document, so `iexact`, which matched the quoted JSON text (`'"hello"'`) on MySQL and SQLite, now takes the plain string.
-- **Filters on joined columns without a column type** — a filter on a related model's column that has no column type of its own (`filter(author__name=...)` where `name` has `db_type="CITEXT"`) was typed by the base model's column of the same name, so a base JSON or array column could change how the value was bound or compared. Joined columns now use only their own type.
-- **`having()` on aggregates of typed fields** — comparing `Max`/`Min` of a `Decimal`, `date`, `datetime`, `UUID` or enum field, or `Sum`/`Avg` against a `Decimal` (`annotate(top=Max("price")).having(top__gt=Decimal("5"))`), bound the value as text, which failed on PostgreSQL with `operator does not exist: numeric > text`. Values are now bound by the aggregate's result type, never by a column that shares the alias.
-- Tuples in filter values are serialized like lists, so `UUID`, `Decimal` and `datetime` elements inside a tuple are converted as well.
+Source: [upstream PR #53 / array-field-fixes](https://github.com/mr-fatalyst/oxyde/pull/53). The smallint fix also incorporates the behavior and regression coverage from [oxyde-core PR #1](https://github.com/rclayer/oxyde-core/pull/1).
 
-### Migrations
+- Decode `SMALLINT` and `SMALLINT[]` as Python integers, including negative values, 16-bit boundaries, nulls, empty arrays, and raw scalar queries.
+- Carry column `db_type` overrides through selects, joins, updates, and deletes so array comparisons use the actual column type, such as `INTEGER[]` instead of `BIGINT[]`.
+- Strip size/precision modifiers from filter casts to prevent truncation or rounding into a match. Validate type identifiers and reject unreadable overrides; preserve `FLOAT(24)`/`REAL` range semantics and non-finite floats.
+- Treat out-of-range array equality operands as nonmatches, preserve NULL semantics, omit impossible `IN` operands, and reject unsupported ordering operands.
+- Bind and decode `list[bytes]` as `BYTEA[]`.
+- Normalize mixed aware/naive datetime array elements through UTC to the field's timezone flavor.
+- Bind exponent-form decimals numerically, including decimal arrays.
+- Preserve each JSON array element's own JSON type: strings remain strings even when they contain JSON-looking text, and numeric/boolean elements remain numeric/boolean.
+- Coerce integer elements in float and decimal array filters to the declared element type. Reject incompatible filter elements instead of silently binding them as NULL.
+- Apply string lookups to the decoded string inside JSON fields, preserving document equality behavior for `exact`.
+- Resolve joined-column types only from their own qualified metadata; aggregate aliases do not inherit unrelated same-named column types.
+- Bind `HAVING` values by aggregate result type, including decimals, dates, datetimes, UUIDs, and enums; preserve column casts for `Min`/`Max`.
+- Serialize tuple filter operands recursively, including UUID, Decimal, and datetime values.
 
-- **Phantom `alter_column` after upgrading with a hand-written `db_type`** — legacy migration files (`python_type` format) and `oxyde migrations squash` derived the column kind from `python_type` whenever `db_type` was not a recognized type name (e.g. `bigint GENERATED ALWAYS AS IDENTITY`), while `makemigrations` reports such a column as `unknown`. The next `makemigrations` then emitted an `alter_column` with no effect (a table rebuild on SQLite). An explicit `db_type` now owns the column kind on both sides. (#47)
+### Lookup parsing
 
----
+Source: [lookup-parsing](https://github.com/ebrake/oxyde/tree/lookup-parsing).
 
-## 0.8.0 - 2026-08-26
+- Resolve direct and related filter keys in one place and validate lookups consistently.
+- Match `having()` keys against annotation aliases before splitting lookup suffixes, including aliases that end in lookup names.
+- Report unsupported aggregate lookups against the correct alias.
 
-**Rust core: 0.7.0+** (`core-v0.7.0+`)
+### Array and JSON containment lookups
 
-### Upgrade Notes
+Source: [array-lookups-v2](https://github.com/ebrake/oxyde/commit/be855e8b6c693c67c1a408614a1564029ff4f3c4).
 
-#### SQLite 3.35+ is now required
+- Add `contains`, `contained_by`, and `overlap` for typed arrays and top-level JSON arrays.
+- Use native PostgreSQL `@>`, `<@`, and `&&` with operands cast to the column's array type. Compare NULL elements explicitly; ignore order and duplicates in the outer array.
+- Compare JSON elements as complete JSONB values, supporting objects and nested JSON arrays. Cast plain JSON columns when necessary and preserve SQL NULL/non-array behavior.
+- Validate operands by element type, including exact decimal representability and array range constraints.
+- Keep string `contains` as a string lookup and preserve related fields named `overlap` or `contained_by` when those names are not valid lookups on the preceding field.
+- Generate typed filter stubs with the new lookups' operand types.
 
-`INSERT` on SQLite always carries a `RETURNING` clause, generated by the SQL builder. The fallback for SQLite < 3.35 (retry the `INSERT` without `RETURNING` and read `last_insert_rowid()`) has been removed — an insert error is now reported as an insert error instead of triggering a second attempt. SQLite 3.35 was released in March 2021.
+### Python 3.15 wheels
 
-#### `int` columns on PostgreSQL are created as `BIGINT`
+Source: [upstream PR #54](https://github.com/mr-fatalyst/oxyde/pull/54).
 
-Non-PK `int` fields now render as `BIGINT` (PKs were already `BIGSERIAL`), matching the binding contract — a Python `int` is always bound as `i64`.
+- Upgrade PyO3 and pyo3-async-runtimes to 0.30 and adapt the renamed bridge APIs.
+- Add CPython 3.15 to wheel builds, package classifiers, and CI while retaining Python 3.10 as the minimum. Use macOS 15 runners for macOS wheel builds.
 
-This affects **newly created columns only**. The migration diff compares semantic column specs, so existing `INTEGER` columns are *not* altered automatically:
+### Cache-disabled PostgreSQL execution and custom types
 
-```sql
--- If you need the 8-byte range on an existing column:
-ALTER TABLE users ALTER COLUMN counter TYPE BIGINT;
-```
+Source: [oxyde-core PR #2](https://github.com/rclayer/oxyde-core/pull/2), including its final custom-result correction at `58e7ae4efb2b28c9dfa31516b1d93d4bd0581399`.
 
-```python
-# If you want to keep 4-byte storage:
-counter: int = Field(db_type="INTEGER")
-```
+- Vendor SQLx PostgreSQL 0.8.6 and retain its license files and source-preservation hygiene exclusions.
+- When `pg_statement_cache_capacity=0`, send unnamed Parse → Bind → Describe portal → Execute → Close → Sync in one round trip, avoiding stale named plans across DDL and PgBouncer transaction pooling.
+- Resolve cold custom result OIDs after the original `ReadyForQuery`, using the same checked-out connection and recursive type cache. Native enum arrays, composites, NULL/empty arrays, and uncommitted types remain decodable.
+- Stage only results with unresolved custom OIDs; built-in and cache-warm results continue streaming. Cached queries, explicit preparation, and simple-query behavior retain their existing execution paths.
+- Never replay the original statement during metadata resolution, including after an autocommit write. A metadata failure can therefore be reported after a write has committed; callers must not blindly retry writes.
+- Add regressions for wire message ordering, DDL, custom types, transaction visibility, cancellation, and catalog failure after `INSERT RETURNING` without duplicate writes.
 
-#### Existing `Enum`-annotated fields become native enum columns
+Cold custom-type results buffer until execution completes, which can increase latency and memory use for large result sets. See [connection settings](guide/connections.md).
 
-Fields annotated with a string-valued `Enum` were previously stored as `TEXT`. After upgrading, the first `makemigrations` generates a conversion migration to the native enum type. On PostgreSQL the conversion works thanks to the new `USING` clause (see below).
+### Initial validation
 
-To keep text storage instead, set `db_type` on the field — any `db_type` disables the enum machinery:
-
-```python
-status: PostStatus = Field(default=PostStatus.DRAFT, db_type="TEXT")
-```
-
-#### `IntEnum` fields now raise at definition time
-
-An enum whose members are not strings raises `TypeError` when the model class is defined:
-
-```
-Enum field 'Priority' must define string values. Use a str-valued Enum for
-database enum columns, or annotate the field as int for integer storage.
-```
-
-Either give the enum string values, or annotate the field as `int`.
-
-#### `db_index` on fields now reaches migrations
-
-`Field(db_index=True)` used to be silently ignored by `makemigrations` — only table-level `Meta.indexes` produced index definitions — and on FK fields `db_unique` was lost as well. Both now work, so the first `makemigrations` after upgrading generates the indexes and UNIQUE constraints your models always declared. Review that migration before applying: index creation on large tables can be slow.
-
-### New Features
-
-- **Native enum columns** — a field annotated with a string-valued `Enum` maps to a real database enum type.
-
-    ```python
-    class PostStatus(str, Enum):
-        DRAFT = "draft"
-        PUBLISHED = "published"
-
-    class Post(Model):
-        status: PostStatus = Field(default=PostStatus.DRAFT)
-    ```
-
-    | | PostgreSQL | MySQL | SQLite |
-    |---|---|---|---|
-    | Column type | `CREATE TYPE "post_status_enum" AS ENUM (...)` | inline `ENUM('draft','published')` | `TEXT` |
-    | Query parameters | cast: `$1::"post_status_enum"` | plain string | plain string |
-    | `list[PostStatus]` | `"post_status_enum"[]` | `JSON` | `TEXT` (JSON) |
-    | Enforcement | database | database | Pydantic only |
-
-    The type name is always derived from the class name (`PostStatus` → `post_status_enum`); `db_type` never names an enum type. Two enum classes producing the same name share the type when their values match exactly, and fail `makemigrations` with a conflicting-value-set error when they don't. See [Fields — Enum Fields](guide/fields.md#enum-fields).
-
-- **Typed constraint errors** — `IntegrityError` gained four subclasses: `UniqueViolationError`, `ForeignKeyViolationError`, `NotNullViolationError`, `CheckViolationError`. The kind is classified in the Rust driver via sqlx's cross-dialect error kinds — no error-message text is matched anywhere. Existing `except IntegrityError` code is unaffected.
-
-    ```python
-    from oxyde import UniqueViolationError
-
-    try:
-        await User.objects.create(email=email)
-    except UniqueViolationError:
-        raise HTTPException(409, "Email already registered")
-    ```
-
-- **`oxyde migrations squash`** — replays the whole migration history and replaces it with a single `0001` file in the current format. Raw `ctx.execute()` SQL is not carried over (affected files are reported). On already-deployed databases record the new initial migration with `oxyde migrate --fake`. The legacy migration file format (`python_type` fields) now emits a `FutureWarning` pointing to this command and is removed in 1.0. See [Migrations — Squashing Migration History](guide/migrations.md#squashing-migration-history).
-
-### Migrations
-
-- **Migration SQL preserves caller ordering** — `migration_to_sql()` renders operations in the supplied order and keeps each operation's statements contiguous. Callers are responsible for supplying dependency-safe operation ordering; operations returned by `migration_compute_diff()` are already dependency-ordered.
-
-- **`ALTER COLUMN` on PostgreSQL emits a `USING` clause** — type changes now generate `ALTER TABLE "t" ALTER COLUMN "c" TYPE <new> USING "c"::text::<new>`. PostgreSQL has no implicit text → enum cast, so text ↔ enum conversions previously failed; other conversions such as `int` → `varchar` work now too.
-
-- **Enum lifecycle** — appending values is fully automatic: `ALTER TYPE ... ADD VALUE IF NOT EXISTS` on PostgreSQL, progressive `MODIFY COLUMN` on MySQL, nothing on SQLite. Removing or reordering values cannot be automated — the generated migration pairs `ctx.alter_enum_type(...)` (updates replay state, emits no SQL) with `ctx.require_manual(...)`, which fails execution until you replace it with hand-written `ctx.execute(...)` statements. `oxyde sqlmigrate` prints a `-- manual migration required` marker for these operations.
-
-    !!! warning "Non-transactional migrations on PostgreSQL"
-        PostgreSQL forbids `ALTER TYPE ... ADD VALUE` inside a transaction block, so a migration containing one runs **entirely without a transaction**. Keep enum value additions in their own migration to limit partial-application risk.
-
-- **`db_index` / `db_unique` on FK fields; field-level indexes everywhere** — the synthetic FK column (`author_id`) now inherits `db_unique`, `db_index`, `db_index_name` and `db_index_method` from the relation field, and `Field(db_index=True)` on any column produces an index definition (previously only `Meta.indexes` did). A unique column does not get a redundant plain index on top of its constraint, and a field-level index duplicating a `Meta.indexes` entry on the same column is skipped with a warning. (#34)
-
-### Bug Fixes
-
-- **Non-deterministic migration operation order** — the diff iterated modified tables in `HashMap` order, so repeated `makemigrations` runs could emit the same operations in a different order. Changed tables are now processed through a sorted list of names.
-- **Panic in the JOIN result encoder** — when a relation's primary key column was missing from the result set, the encoder indexed past the column list and panicked. It now validates relation groups after column matching and returns a proper `ColumnNotFound` error.
-- **Values from `default=` / `default_factory` were dropped on INSERT** — `create()` and `bulk_create()` serialized instances with `exclude_unset=True`, so a field filled by its default never reached the database: a NOT NULL column failed with `IntegrityError` (e.g. a `default_factory=uuid4` pk), a nullable one silently stored NULL. A column is now omitted only when its value is `None` **and** the field was not set explicitly — an untouched `Field(default=None, db_pk=True)` pk still leaves the value to the database sequence, and an explicit `field=None` still inserts NULL (e.g. to override a server-side default). (#35)
-- **Generated stubs broke when the model module defined its own classes** — the `.pyi` referenced classes defined in the model file (most commonly an enum used as a column type) without defining or importing them, so type checkers failed on every generated signature and `from models import MyEnum` stopped resolving (the stub shadows the module's exports). Top-level classes referenced by the stub are now copied into it: enum members verbatim, method bodies replaced with `...`.
-
-### Internal
-
-- **Transactions moved to `sqlx::Transaction`** — the driver no longer holds a bare pooled connection with hand-written `BEGIN`/`COMMIT` text. An abandoned or failed transaction is now always rolled back before its connection returns to the pool.
-- **`INSERT` carries `RETURNING "<pk>"`** — the pk-only `RETURNING` for PostgreSQL/SQLite is generated by the SQL builder instead of being appended to the SQL text by the driver, and is visible in `.sql()` output.
-- **Crate restructure** — all SQL generation (DML and migration DDL) is consolidated in `oxyde-sql`, all serialized contracts in `oxyde-codec`; `oxyde-migrate` is reduced to diff computation.
-- **Workspace clippy lints** — `pedantic` is now actually enabled across all crates (lint inheritance requires an explicit opt-in per crate), and the resulting warnings were resolved.
-- **Rust toolchain pinned** via `rust-toolchain.toml`.
-
----
-
-## 0.7.1 - 2026-05-17
-
-**Rust core: 0.6.2** (`core-v0.6.2`)
-
-### Bug Fixes
-
-- **`Decimal` mis-bound in `F()` arithmetic** — expressions like `F("price") + Decimal("1.5")` produced a parameter type mismatch in the generated SQL. `Decimal` literals inside `F()` expressions are now bound as `rust_decimal::Decimal` directly in the `oxyde-query` codec, with no intermediate string serialization. (#32)
-- **mypy errors on user models** — in several scenarios mypy complained about `Model.objects` and field attributes on subclasses of `Model`. Annotations in `models/base.py` and `models/field.py` have been corrected; an e2e typecheck test was added (including an `xfail` case for `mixed_module` to track the remaining edge case). (#13)
-
-### Migrations
-
-- **Partial index predicates were lost during migrations** — `Index(..., condition=...)` (partial indexes on PostgreSQL/SQLite) was not preserved through diff and replay: migrations recreated the index without its `WHERE` clause. The `condition` is now propagated through `extract` → IR → diff → SQL and is correctly compared during change detection. (#30, #31)
-- **FK cycles in `compute_diff`** — topological sorting either crashed or produced an incorrect order for self-referencing and mutually-referencing tables. The cycle detection has been reworked: genuine cycles (without a nullable break) are now rejected with a clear error, while resolvable cases are sorted correctly. Integration tests were added for typical schemas (self-FK, A↔B, triangle). (#28)
-
-### Internal
-
-- Added an e2e test suite that runs mypy against generated stubs and user-side code (`tests/typecheck/test_typecheck_e2e.py`).
-- Migration test coverage extended with FK-cycle and partial-index cases.
-- **Rust core bumped to 0.6.2** (`core-v0.6.2`).
-
----
-
-## 0.7.0 - 2026-04-21
-
-**Rust core: 0.6.1** (`core-v0.6.1`)
-
-### Breaking Changes
-
-#### `update(returning=True)` returns model instances
-
-`update(returning=True)` now returns `list[Model]` instead of `list[dict]`. Returned rows are validated through Pydantic and hydrated as full model instances.
-
-```python
-# Before (0.6.x)
-rows = await Post.objects.filter(id=42).update(status="published", returning=True)
-# rows was list[dict]
-
-# After (0.7.0)
-posts = await Post.objects.filter(id=42).update(status="published", returning=True)
-# posts is list[Model]
-```
-
-#### Default type mapping changes
-
-Several default type mappings have changed:
-
-| Python Type | Dialect | Before | After |
-|-------------|---------|--------|-------|
-| `int` (non-PK) | PostgreSQL | `BIGINT` | `INTEGER` |
-| `str` | All | `TEXT` | `VARCHAR(255)` |
-| `Decimal` | SQLite | `NUMERIC` | `TEXT` |
-| `datetime` | MySQL | `DATETIME` | `DATETIME(6)` |
-| `time` | MySQL | `TIME` | `TIME(6)` |
-| `bytes` | MySQL | `BLOB` | `LONGBLOB` |
-
-!!! note "Existing databases"
-    These changes affect **new migrations only**. Existing columns are not altered automatically. If you need the old types, use `db_type` override: `Field(db_type="BIGINT")`.
-
-### New Features
-
-- **`create_tables()` / `drop_tables()`** — programmatic schema management without migration files. Generates dialect-aware DDL from registered models and executes it directly. Useful for tests and scripts.
-
-    ```python
-    from oxyde import create_tables, drop_tables
-
-    await create_tables(database)   # CREATE all registered model tables
-    await drop_tables(database)     # DROP all registered model tables
-    ```
-
-- **`update_or_create()`** — get an existing record by filters and update it with `defaults`, or create a new one if not found. Race-condition safe (catches `IntegrityError`, retries `get`).
-
-    ```python
-    user, created = await User.objects.update_or_create(
-        email="alice@example.com",
-        defaults={"name": "Alice", "age": 31},
-    )
-    ```
-
-- **Random ordering** — `order_by("?")` generates `RANDOM()` (PostgreSQL/SQLite) or `RAND()` (MySQL).
-
-    ```python
-    random_users = await User.objects.order_by("?").limit(5).all()
-    ```
-
-- **SQL wildcard escaping in LIKE lookups** — `contains`, `startswith`, `endswith` and their case-insensitive variants now escape literal `%`, `_` and `\` characters with an `ESCAPE` clause. Previously `filter(name__contains="50%")` would treat `%` as a wildcard.
-
-- **TLS/SSL for connections** — new `PoolSettings` fields for encrypted connections:
-
-    ```python
-    PoolSettings(
-        ssl_mode="require",                       # PG / MySQL mode
-        ssl_root_cert="/path/to/ca.pem",          # CA certificate
-        ssl_client_cert="/path/to/client.crt",    # mTLS client cert
-        ssl_client_key="/path/to/client.key",     # mTLS client key
-    )
-    ```
-
-- **PostgreSQL pool settings** — `pg_application_name` (visible in `pg_stat_activity`) and `pg_statement_cache_capacity` (prepared statement cache size).
-
-- **MySQL pool settings** — `mysql_charset` and `mysql_collation`.
-
-- **Decimal field constraints** — `max_digits` and `decimal_places` in `Field()` now generate `DECIMAL(M,D)` / `NUMERIC(M,D)` in migrations. Changes to these constraints are detected and produce `ALTER COLUMN`.
-
-    ```python
-    price: Decimal = Field(max_digits=10, decimal_places=2)
-    # PostgreSQL: NUMERIC(10,2)  MySQL: DECIMAL(10,2)
-    ```
-
-- **Array inner type constraints** — array fields preserve inner type constraints in DDL: `list[Annotated[str, Field(max_length=50)]]` generates `VARCHAR(50)[]` on PostgreSQL.
-
-### Bug Fixes
-
-- **`update(returning=True)` on MySQL** — MySQL doesn't support `RETURNING`. Now uses an atomic `SELECT ... FOR UPDATE` → `UPDATE` → re-fetch pattern within a transaction, transparent to the caller.
-- **`iexact` lookup didn't escape wildcards** — `_` and `%` in `iexact` values were treated as SQL wildcards. Now escaped with `ESCAPE` clause, matching `contains`/`startswith`/`endswith` behavior.
-- **`@computed_field` included in INSERT/UPDATE** — Pydantic computed fields were serialized into mutation queries, causing validation errors. Now excluded.
-- **Aggregate return types** — PostgreSQL returns `NUMERIC` as string via msgpack. Aggregates now coerce results to the field's Python type (`int`, `float`, `Decimal`).
-- **Insert guard ignored RETURNING in transactions** — the code checked `ir.returning` flag but not whether the generated SQL actually contained `RETURNING`, causing incorrect execution path on MySQL within transactions.
-- **MySQL transactions** — transaction SQL (`COMMIT`, `ROLLBACK`, `SAVEPOINT`) refactored from `sqlx::query().execute()` to `conn.execute()` for MySQL compatibility.
-- **MySQL decimal** — decimal values were extracted as `String` instead of `rust_decimal::Decimal`, causing type mismatches.
-- **MySQL DATETIME/TIME precision** — now generates `DATETIME(6)` and `TIME(6)` for microsecond precision.
-- **`db_type` array handling** — array type constraints (e.g. `varchar(100)`) were not stripped before type lookup, causing encoding failures.
-- **INSERT RETURNING on MySQL** — targeted Rust driver fix so `create()` / `bulk_create(..., returning=True)` take the correct execution path on MySQL (which has no native `RETURNING`).
-- **Stub generator emitted invalid syntax for bare types** — unparameterized `dict`, `list`, `tuple`, `set` and similar produced stubs that failed to parse. Now emitted correctly.
-- **Stub generator crashed on parameterized generics on older Python** — `isinstance()` against a subscripted generic raises `TypeError` on Python 3.10/3.11. The generator now checks `__origin__` first.
-
-### Migrations
-
-- **Tables are topologically sorted by FK dependencies** — `compute_diff` now orders `CREATE TABLE` statements so referenced tables are created before referencing ones; cyclic FK graphs are rejected with a clear error.
-- **Minimal payload for drop operations** — `drop_foreign_key`, `drop_index` and `drop_check` ops no longer require the full column/constraint definition, only the name. (#24)
-- **`alter_column` replay preserves constraints** — `max_length`, `max_digits` and `decimal_places` survive migration replay; previously they were dropped when a column was rewritten by replay. (#25)
-
-### Internal
-
-- **mypy compliance** — fixed mypy errors across the codebase; mypy added to pre-commit hooks.
-- **Type overloads** for `update()`: `returning: Literal[True] → list[Model]`, `returning: Literal[False] → int`.
-- **Stub generator** updated with `update_or_create()` signature.
-- **Migration operation ordering** — `CREATE`/`DROP`/`INDEX` statements execute before `ALTER TABLE` (fixes FK constraints on PostgreSQL/MySQL).
-- **Constraint change detection** — migration diff detects changes in `max_length`, `max_digits`, `decimal_places`.
-- **Pool backend detection** — new Rust function `pool_backend()` exposed to Python for runtime database type detection.
-- **Stub generator rewritten on top of `ast`** — the generator previously relied on regex-based parsing; it now walks the AST, producing more reliable output and eliminating several classes of malformed stubs.
-- **Rust core bumped to 0.6.1** (`core-v0.6.1`).
-
----
-
-## 0.6.1 - 2026-03-24
-
-### Bug Fixes
-
-- **`count()` and `exists()` bypassed `to_ir()`** — both methods built their IR directly via `ir.build_select_ir()`, skipping the full `to_ir()` pipeline. This meant `col_types` and other query state were not included, which could produce incorrect SQL when type-sensitive filters were involved. Both now go through `to_ir()` like all other query methods.
-- **`save(update_fields)` silently ignored FK field names** — passing a virtual FK name like `update_fields=["author"]` was silently accepted but the field was not included in the UPDATE because it didn't match any database column. Now correctly resolves FK names to their synthetic columns (e.g. `"author"` → `"author_id"`). Virtual relation fields (`reverse_fk`, `m2m`) now raise `FieldError`.
-
-### Internal
-
-- **`TQuery` TypeVar replaced with `Self`** — all query mixins (`FilteringMixin`, `PaginationMixin`, `AggregationMixin`, `ExecutionMixin`, `JoiningMixin`, `DebugMixin`) and `Query` now use `typing_extensions.Self` for return-type annotations instead of the custom `TQuery` TypeVar. Fixes mypy errors with the previous approach.
-
----
-
-## 0.6.0 - 2026-03-20
-
-### Bug Fixes
-
-- **`bulk_update()` used field names instead of `db_column` as filter keys** — when a model had a custom `db_column`, the generated SQL referenced the Python field name, which doesn't exist in the database. Now correctly maps field names to `db_column` via model metadata.
-- **Result columns not remapped to field names** — Rust returns `db_column` names (e.g. `author_id`), but Python expects field names (`author`). Added `reverse_column_map` to `ModelMeta` and `_remap_columns()` in the execution layer. Affects all result formats: dedup, columnar, and row dicts.
-- **`Decimal` bound as string on PostgreSQL** — `Decimal` values were serialized as strings, causing type mismatches in comparisons. Now bound natively via `rust_decimal::Decimal`.
-- **`TIMESTAMPTZ` not decoded correctly** — timezone-aware datetime columns lost timezone info during encoding. Now preserves timezone in RFC3339 format.
-- **`datetime` strings falsely parsed as datetime** — ISO 8601 strings stored in `VARCHAR`/`TEXT` columns (e.g. `"2024-01-15T12:30:00Z"`) were auto-parsed into datetime values. Type hints now prevent this: if `col_type` is `"str"` or `"TEXT"`, the value stays as a string.
-- **`timedelta` encoded as integer microseconds** — timedelta values were exposed as raw `i64` microseconds. Now correctly converted to `f64` seconds at the driver layer, matching Python's `timedelta` representation.
-- **Type-unsafe filter binding** — filter values were converted without consulting column type hints, leading to implicit string coercion (e.g. `age = '18'` instead of `age = 18`). Filter builder now receives `col_types` and binds values with correct SQL types.
-- **`DELETE` path ignored type hints** — value conversion for DELETE queries did not pass `col_types`, causing the same coercion issues as filters. Fixed.
-
-### New Features
-
-- **PostgreSQL array support** — native support for `int[]`, `str[]`, `uuid[]`, `bool[]`, `float[]`, `decimal[]`, `datetime[]` columns. Arrays are correctly bound as parameters, decoded from results (including NULL elements), and mapped in migrations (`BIGINT[]` on Postgres, `JSON` on MySQL, `TEXT` on SQLite).
-- **JSON column support** — `dict` fields are now mapped to `JSONB` (Postgres), `JSON` (MySQL), `TEXT` (SQLite) in migrations. Values are bound as `Value::Json` in queries.
-- **`.sql(with_types=True)`** — new optional parameter shows exact SQL type tags for each bound parameter: `[("BigInt", 18), ("Uuid", "550e...")]`. Useful for debugging type binding issues.
-
-### Improvements
-
-- **Centralized type classification in Rust** — new `classify_type()` function as single source of truth for mapping IR type names and SQL type names to semantic categories. Replaces scattered match arms across the codebase.
-- **Typed NULL values** — `NULL` parameters now carry their column type (e.g. `Value::Uuid(None)` instead of generic `Value::String(None)`), preventing type mismatch errors on strict databases.
-- **`BIGSERIAL` for integer PKs on PostgreSQL** — integer primary keys now map to `BIGSERIAL` instead of `SERIAL`, supporting larger sequences out of the box.
-- **`reverse_column_map` cached on `ModelMeta`** — `db_column → field_name` mapping is computed once at model finalization, not on every query.
-
-### Internal
-
-- **Rust core bumped to 0.5.0** (core-v0.5.0).
-- Removed `_convert_timedelta_columns()` from Python execution layer (moved to Rust driver).
-- Removed field_name aliasing from Rust SELECT; column remapping now happens in Python via `reverse_column_map`.
-- Unified `_get_python_type_name` to delegate to `get_ir_type`. Added `json` and `T[]` patterns to Rust `python_type_to_sql`.
-- Added `test_type_binding` test suite covering type classification, array handling, typed nulls, and edge cases.
-- Added datetime filtering integration tests.
-
----
-
-## 0.5.2 - 2026-03-13
-
-### Bug Fixes
-
-- **`create()` / `save()` now validates returned data via Pydantic** — `RETURNING *` results were applied via raw `setattr`, bypassing Pydantic validation and type coercion. Additionally, `save()` on new instances did not update the object with auto-generated fields (PK, defaults) after insertion. Both paths now use `model_validate()`.
-- **`save()` on MySQL no longer raises `NotFoundError`** — `save()` for existing records always requested `RETURNING`, which MySQL doesn't support. Now detects the backend and falls back to affected row count for MySQL.
-- **`bulk_create()` no longer loses fields across rows** — `_dump_insert_data()` used `exclude_none=True`, which couldn't distinguish "user didn't set the field" from "user explicitly set None". Changed to `exclude_unset=True` so explicitly passed `None` is preserved while unset fields are omitted (letting DB defaults work).
-- **`bulk_update()` no longer corrupts `bytes` fields** — `model_dump(mode="json")` converted bytes to base64 strings, which Rust wrote as `VARCHAR` instead of binary. Now uses `mode="python"` with `_serialize_value_for_ir()`, matching the same serialization path as `update()`.
-- **`annotate()` rejects invalid expressions** — passing an object without `to_ir()` (e.g. `annotate(x=object())`) was silently ignored. Now raises `TypeError`, matching Django's behavior.
-- **`bulk_create(batch_size=0)` raises `ValueError`** — previously crashed with an unhelpful `range()` error. Negative values silently skipped the INSERT. Now validates `batch_size > 0`.
-- **ContextVar transaction leak** — child async tasks inherited the parent's transaction scope via `ContextVar`. Added `_get_owned_entry()` ownership check using `asyncio.current_task()` so child tasks no longer see the parent's transaction.
-
-### Improvements
-
-- **Streaming query execution** — replaced `fetch_all()` with `fetch()` streams in the Rust driver. Rows are now encoded to MessagePack incrementally as they arrive from the database, reducing peak memory usage for large result sets. (core-v0.4.2)
-- **Unified migration ordering** — `apply_migrations()`, `replay_migrations_up_to()`, and `get_pending_migrations()` now use topological sort via `depends_on`, matching the behavior already used in `replay_migrations()`. Previously these paths used lexicographic sorting only.
-
-### Internal
-
-- Removed dead `get_migration_order()` function from `replay.py`.
-- Moved local imports to module level in migration integration tests.
-
----
-
-## 0.5.1 - 2026-03-08
-
-### Bug Fixes
-
-- **`Optional["Model"]` not detected as FK** — `Optional["Author"]` (with a string forward reference) was not recognized as a foreign key because `ForwardRef` was not handled in the metaclass FK detection. Now works correctly alongside `Author | None` and `from __future__ import annotations`.
-- **Python 3.14 compatibility** — FK detection relied on reading `namespace["__annotations__"]` in the metaclass `__new__`, which is empty on Python 3.14 (PEP 749: lazy annotations). Moved FK detection after class creation, using Pydantic's `model_fields` which works on all Python versions.
-
-### Improvements
-
-- **Metaclass cleanup** — extracted `_build_globalns()` and `_get_db_attr()` helpers, reducing duplication in `_resolve_fk_fields()` and `_parse_field_tags()`. Relation field detection uses `OxydeFieldInfo.is_virtual` property.
-
-### Documentation
-
-- **Fixed FK annotation examples** — replaced `"Author" | None` (TypeError on Python 3.10-3.13) with `Author | None` across all docs. Added a detailed note on type annotations, forward references, and `from __future__ import annotations`.
-
----
-
-## 0.5.0 - 2026-03-07
-
-### Breaking Changes
-
-#### `update()` returns row count by default
-
-`update()` now returns `int` (number of affected rows) instead of `list[dict]`. This aligns with Django's `update()` behavior. Pass `returning=True` to get the previous behavior.
-
-```python
-# Before (0.4.x)
-rows = await Post.objects.filter(id=42).update(status="published")
-# rows was list[dict]
-
-# After (0.5.0)
-count = await Post.objects.filter(id=42).update(status="published")
-# count is int
-
-rows = await Post.objects.filter(id=42).update(status="published", returning=True)
-# rows is list[dict] (explicit opt-in)
-```
-
-#### `execute_to_pylist()`, `execute_batched_dedup()` removed from `AsyncDatabase`
-
-The Python-side batched/dedup execution methods have been removed. JOIN deduplication is now handled entirely in the Rust core encoder. Use `execute()` for all queries.
-
-#### `batch_size` removed from `PoolSettings`
-
-The `batch_size` parameter is no longer needed since batching is handled by the Rust core.
-
----
-
-### Bug Fixes
-
-- **`distinct` ignored in aggregates** — `Count("field", distinct=True)` (and `Sum`, `Avg`) now correctly generates `COUNT(DISTINCT field)`. The `distinct` flag was not propagated through the IR.
-- **`refresh()` overwrote virtual fields** — calling `refresh()` on a model instance with `reverse_fk` or `m2m` relations would overwrite them with raw data from the database. Virtual relation fields are now skipped.
-- **`timedelta` not deserialized** — `timedelta` columns came back as raw integers (microseconds). Now correctly converted back to `datetime.timedelta` objects on the Python side.
-- **`group_by()` produced incorrect SQL** — custom group-by implementation replaced with native sea-query group-by, fixing edge cases with table qualification and JOIN queries.
-- **`union()` / `union_all()` rewritten** — custom union SQL generation replaced with native sea-query `UNION` support. Fixes ordering and parenthesization issues. Union sub-queries are now built recursively.
-- **`datetime` cast incorrect** — fixed datetime value conversion in the Rust driver layer.
-- **Binary data corrupted through serde** — binary fields (`bytes`) were mangled by the `serde_json::Value` intermediate layer. Replaced by `rmpv::Value` for lossless binary round-trip.
-
----
-
-### Improvements
-
-- **serde_json eliminated from data path** — the entire row encoding pipeline now goes directly from sqlx rows to MessagePack via `rmpv`, removing the `serde_json::Value` intermediate representation. This fixes binary/timedelta data corruption and reduces allocations.
-- **`CellEncoder` trait** — new unified trait in `oxyde-driver` for columnar row encoding. Each backend (Postgres, SQLite, MySQL) implements `CellEncoder` with type-specific decoding; generic functions handle the columnar structure.
-- **JOIN dedup moved to Rust** — relation deduplication for JOIN queries is now performed in the Rust encoder (`encoder.rs`), replacing the Python-side `execute_batched_dedup` path. Results use a compact 3-element msgpack format: `[main_columns, main_rows, relations_map]`.
-- **`having()` supports annotation aliases** — `having(total__gt=100)` now correctly resolves `total` from `annotate(total=Sum(...))` instead of treating it as a model field. Supported lookups: `exact`, `gt`, `gte`, `lt`, `lte`.
-- **`group_by()` guards model hydration** — calling `.all()` on a `group_by()` query now raises `TypeError` with a clear message suggesting `.values()` or `.fetch_all()` instead.
-- **Aggregate `DISTINCT` support** — `Count`, `Sum`, and `Avg` now accept `distinct=True` at both the IR and SQL generation levels. `Max`/`Min` ignore it (as `DISTINCT` is meaningless for those).
-- **Rust crate modularization** — `oxyde-core-py`, `oxyde-driver`, and `oxyde-migrate` monolithic `lib.rs` files split into focused modules (`convert.rs`, `execute.rs`, `pool.rs`, `migration.rs`, `diff.rs`, `op.rs`, `sql.rs`, etc.).
-- **Migrations use native sea-query** — migration SQL generation now uses sea-query builders instead of hand-crafted SQL strings, improving dialect compatibility.
-- **Migration code deduplicated** — shared utilities (`detect_dialect`, `load_migration_module`, `parse_query_result`) extracted to `oxyde.migrations.utils`.
-- **Test suite restructured** — tests organized into `unit/`, `smoke/`, and `integration/` directories with shared helpers (`StubExecuteClient`). New integration tests cover CRUD, aggregation, filtering, pagination, relations, transactions, field types, and edge cases against real SQLite.
-- **Free-threaded Python support** — CI now builds wheels for Python 3.13t and 3.14t (free-threaded / no-GIL builds).
-- **`typer` bumped to >= 0.24** — resolves deprecation warnings.
-
----
-
-## 0.4.0 - 2026-02-23
-
-### Breaking Changes
-
-#### `OxydeModel` renamed to `Model`
-
-The base class has been renamed from `OxydeModel` to `Model`:
-
-```python
-# Before (0.3.x)
-from oxyde import OxydeModel
-
-class User(OxydeModel):
-    ...
-
-# After (0.4.0+)
-from oxyde import Model
-
-class User(Model):
-    ...
-```
-
-!!! warning "Deprecation notice"
-    `OxydeModel` still works in 0.4.x and emits a `DeprecationWarning`. It will be **removed** in a future release. Update your imports now:
-
-    ```
-    # Find and replace across your project:
-    OxydeModel → Model
-    ```
-
-    Direct import `from oxyde.models.base import OxydeModel` is **not supported** and will raise `ImportError`.
-
-#### `limit()` and `offset()` reject negative values
-
-Both methods now raise `ValueError` on negative input. Previously negative values were silently accepted and produced invalid SQL.
-
-```python
-# 0.3.x: silently generated broken SQL
-qs.limit(-1)
-
-# 0.4.0: raises ValueError
-qs.limit(-1)  # ValueError: limit() requires a non-negative value, got -1
-```
-
-#### `ensure_field_metadata()` removed
-
-The classmethod `Model.ensure_field_metadata()` has been removed. Model metadata is now finalized eagerly at class definition time. If you were calling this method manually, simply remove the call — it is no longer needed.
-
-#### `resolve_pending_fk()` replaced
-
-`resolve_pending_fk()` in `oxyde.models.registry` has been replaced by:
-
-- `finalize_pending()` — eagerly finalizes all pending models
-- `assert_no_pending_models()` — raises `RuntimeError` if any models are still pending
-
-#### `migrations.types` module removed
-
-The `oxyde.migrations.types` module (`validate_sql_type`, `normalize_sql_type`, `translate_db_specific_type`) has been removed. Type handling is now internal to the Rust core.
-
----
-
-### Bug Fixes
-
-- **`union()` / `union_all()` were silently ignored** — union queries now correctly generate SQL and execute as expected.
-- **FK relation fields included in INSERT/UPDATE** — fields like `author: Author` were incorrectly serialized into INSERT/UPDATE statements alongside the actual `author_id` column. Now properly excluded.
-- **Nested JOIN hydration failed** — deeply nested joins (e.g. `post__author__profile`) could produce incorrect or missing data. Hydration logic rewritten to correctly resolve nested FK references.
-- **`get_or_create()` race condition** — concurrent calls creating the same record could both fail with `IntegrityError`. Now retries `get()` on conflict.
-- **Migration advisory lock on wrong connection** — `pg_try_advisory_lock` and `pg_advisory_unlock` could execute on different pool connections. Lock now pins a connection via `begin_transaction()`.
-- **Transaction leak on savepoint failure** — if savepoint creation failed, transaction depth was already incremented, corrupting state. Depth is now incremented only after successful savepoint creation.
-- **`bulk_create([])` did not raise** — empty list was silently accepted. Now correctly raises `ValueError`.
-- **Negative pool duration accepted** — `PoolSettings` durations now raise `ValueError` for negative values.
-- **`makemigrations` silently continued on broken migrations** — if replaying existing migrations failed, the CLI used an empty schema as baseline, potentially generating destructive migrations. Now fails with exit code 1.
-- **`migrate` wrong exit code** — `migrate` could exit with code 0 when migration was not found.
-
----
-
-### Improvements
-
-- **Eager model finalization** — model metadata (field metadata, column types, PK info) is now computed at class definition time instead of lazily on first query. Eliminates an entire class of "metadata not ready" bugs.
-- **Unified type registry** — `TYPE_REGISTRY` in `oxyde.core.types` consolidates all Python-to-IR type mappings. Fixes `bool` being misclassified as `int` in lookups.
-- **Local imports removed** — circular dependency issues resolved; all imports are now at module level for better readability and faster import time.
+- Python 3.13: 1,226 tests passed, including all 47 generated-stub type-check tests; two PostgreSQL fixture/feature cases are skipped.
+- Rust: 173 workspace tests and 16 explicitly enabled PostgreSQL driver tests passed. The latter include PostgreSQL 18 operation, pre-18 rejection, failed-overwrite preservation, and all seven unnamed-statement regressions.
+- All repository pre-commit checks pass, including Ruff, mypy, Rust formatting, cargo check, Clippy, and file checks. Documentation builds in strict mode.
+- Built both Python distributions and a CPython 3.15 native wheel from the extracted source archive; installed the wheels in a fresh Python 3.15 environment and verified a PostgreSQL array round trip.
+- Python LSP diagnostics were checked against the upstream checkout; existing typing/native-extension diagnostics remain. Rust LSP diagnostics were unavailable on this host; Cargo compilation and Clippy passed.

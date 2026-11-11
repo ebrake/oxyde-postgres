@@ -14,7 +14,7 @@ High-Level Functions:
 
     connect(url, name="default"):
         Context manager for single database connection.
-        Example: async with db.connect("sqlite://test.db"): ...
+        Example: async with db.connect("postgresql://localhost/test"): ...
 
     lifespan(**databases):
         FastAPI/Starlette lifespan context manager.
@@ -23,7 +23,7 @@ High-Level Functions:
 Classes:
     AsyncDatabase: Connection pool wrapper with execute() method.
     AsyncTransaction: Transaction wrapper with execute() method.
-    PoolSettings: Configuration for connection pool and SQLite PRAGMAs.
+    PoolSettings: Configuration for connection pool and PostgreSQL settings.
 
 Transaction API (Django-style):
     from oxyde.db import transaction
@@ -151,7 +151,7 @@ async def connect(
         settings: Optional pool settings.
 
     Example:
-        async with db.connect("sqlite://test.db") as conn:
+        async with db.connect("postgresql://localhost/test") as conn:
             users = await User.objects.all()
     """
     database = AsyncDatabase(

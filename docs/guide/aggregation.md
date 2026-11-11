@@ -251,7 +251,7 @@ class Order(Model):
     status: str
 
 async def main():
-    async with db.connect("sqlite:///orders.db"):
+    async with db.connect("postgresql://localhost/app"):
         # Total orders and revenue
         total_orders = await Order.objects.count()
         total_revenue = await Order.objects.sum("amount")

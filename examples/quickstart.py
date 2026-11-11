@@ -7,7 +7,7 @@ Demonstrates basic ORM usage:
 - Joins and prefetch for related data
 
 Usage:
-    export DATABASE_URL=sqlite://demo.db
+    export DATABASE_URL=postgresql://localhost/app
     python examples/quickstart.py
 """
 
@@ -119,7 +119,7 @@ async def cleanup(db: AsyncDatabase) -> None:
 
 async def main() -> None:
     # Connect to database
-    url = os.getenv("DATABASE_URL", "sqlite://demo.db")
+    url = os.getenv("DATABASE_URL", "postgresql://localhost/app")
     db = AsyncDatabase(url, name="default")
     await db.connect()
 

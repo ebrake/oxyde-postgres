@@ -1,8 +1,8 @@
-site_name: Oxyde ORM
-site_description: High-performance async Python ORM with Rust core
-site_url: https://oxyde.fatalyst.dev/
-repo_url: https://github.com/mr-fatalyst/oxyde
-repo_name: oxyde-orm/oxyde
+site_name: Oxyde for PostgreSQL
+site_description: Type-safe asynchronous ORM for PostgreSQL 18+
+site_url: https://ebrake.github.io/oxyde-postgres/
+repo_url: https://github.com/ebrake/oxyde-postgres
+repo_name: ebrake/oxyde-postgres
 docs_dir: docs/
 
 theme:

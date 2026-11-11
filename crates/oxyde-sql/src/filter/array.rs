@@ -1,31 +1,13 @@
-//! Array lookups: `ARRAY_CONTAINS`, `ARRAY_CONTAINED_BY` and `ARRAY_OVERLAP`.
+//! PostgreSQL array and JSON lookups: contains, contained_by, and overlap.
 //!
-//! Semantics shared by every dialect: the outer array is a set (order and
-//! duplicates are ignored), elements compare as complete values, a `None`
-//! operand element matches a null element, an SQL-NULL column yields NULL
-//! and a non-array JSON value yields false. On PostgreSQL and MySQL, object
-//! elements ignore key order and nested arrays keep theirs; SQLite rejects
-//! operands holding objects or arrays.
+//! The outer array is a set; order and duplicates are ignored. SQL NULL
+//! columns yield NULL. Operand null elements compare explicitly, using
+//! IS NOT DISTINCT FROM. Non-array JSON values yield false.
 //!
-//! - PostgreSQL typed arrays use native `@>` / `<@` / `&&` against an operand
-//!   cast to the column's array type. Native operators never match NULL
-//!   elements, so operands containing NULL switch to an `unnest` form with
-//!   `IS NOT DISTINCT FROM`.
-//! - PostgreSQL JSON columns enumerate `jsonb_array_elements` and compare
-//!   whole jsonb values.
-//! - MySQL walks both arrays with `JSON_TABLE` and compares elements as JSON
-//!   values. Its `JSON PATH '$'` columns turn JSON null elements into SQL
-//!   NULL, so comparisons are null-safe.
-//! - SQLite walks both arrays with `json_each` and compares elements by JSON
-//!   type and value, with `integer` and `real` as one type (`1` matches `1.0`
-//!   but not `true`). Typed decimals compare as `REAL`. JSONB values are read
-//!   as the JSON they hold (`json_valid(.., 9)`, SQLite 3.45+; the bundled
-//!   SQLite is newer).
-//!
-//! MySQL and SQLite store typed arrays as JSON. The operand is bound as a
-//! `Value::Array` so the driver serializes it with the same encoder it uses
-//! for stored values; every element is validated here first, because that
-//! encoder (and PostgreSQL array binding) turns mismatched elements into NULL.
+//! Typed arrays use native @>, <@, and && with a cast to the column type.
+//! Operands containing NULL use unnest. JSON columns compare whole values
+//! through jsonb_array_elements; objects ignore key order and nested JSON
+//! arrays retain their order. Operands are validated before binding.
 
 use oxyde_codec::ColumnTypeSpec;
 use rust_decimal::Decimal;
@@ -78,7 +60,7 @@ impl ArrayOp {
 
 /// What the filtered column stores.
 enum Target<'a> {
-    /// Typed array column (`list[T]`): PostgreSQL `T[]`, JSON elsewhere.
+    /// Typed PostgreSQL array column (`list[T]` stored as `T[]`).
     Typed(&'a ColumnTypeSpec),
     /// JSON/JSONB column holding a top-level array.
     Json,
@@ -118,32 +100,18 @@ pub(crate) fn build_array_filter(
 
     match classify(spec)? {
         Target::Typed(item) => {
-            if matches!(item, ColumnTypeSpec::Blob) && dialect != Dialect::Postgres {
-                // The JSON encoder stores bytes elements as null on these
-                // backends, so there is nothing to compare against.
-                return Err(unsupported(
-                    "array lookups on bytes arrays are only supported on PostgreSQL",
-                ));
-            }
             let arr_type = element_array_type(item)
                 .ok_or_else(|| unsupported("array lookups do not support this element type"))?;
             let mut elements = items
                 .iter()
                 .map(|v| typed_element(v, item))
                 .collect::<Result<Vec<_>>>()?;
-            if dialect == Dialect::Sqlite {
-                for element in &elements {
-                    if let Value::Json(Some(json)) = element {
-                        check_sqlite_scalar(json)?;
-                    }
-                }
-            }
+
             // Native operators never match NULL elements, so None operands
             // compare element by element.
             let has_null = items.iter().any(rmpv::Value::is_nil);
-            let decimal = matches!(item, ColumnTypeSpec::Decimal { .. });
 
-            if dialect == Dialect::Postgres {
+            {
                 let array_type = pg_column_array_type(item, db_type)?;
                 // An element the column type cannot hold equals no stored
                 // element: `contains` matches no row, and the other lookups
@@ -156,20 +124,15 @@ pub(crate) fn build_array_filter(
                 }
                 let operand = Value::Array(arr_type, Some(Box::new(elements)));
                 let json = matches!(item, ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary);
-                return Ok(postgres_typed(
+                Ok(postgres_typed(
                     col,
                     op,
                     &operand,
                     &array_type,
                     has_null,
                     json,
-                ));
+                ))
             }
-            let operand = Value::Array(arr_type, Some(Box::new(elements)));
-            Ok(match dialect {
-                Dialect::Mysql => mysql(col, op, &operand, decimal),
-                _ => sqlite(col, op, &operand, decimal),
-            })
         }
         Target::Json => {
             let elements = items
@@ -182,15 +145,11 @@ pub(crate) fn build_array_filter(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            if dialect == Dialect::Sqlite {
-                elements.iter().try_for_each(check_sqlite_scalar)?;
-            }
+
             let operand = Value::Json(Some(Box::new(serde_json::Value::Array(elements))));
 
             Ok(match dialect {
                 Dialect::Postgres => postgres_json(col, op, &operand, pg_json_needs_cast(db_type)),
-                Dialect::Mysql => mysql(col, op, &operand, false),
-                Dialect::Sqlite => sqlite(col, op, &operand, false),
             })
         }
     }
@@ -390,180 +349,6 @@ fn postgres_json(col: &SimpleExpr, op: ArrayOp, operand: &Value, cast_column: bo
 }
 
 // ---------------------------------------------------------------------------
-// MySQL
-// ---------------------------------------------------------------------------
-
-/// Decimal lexemes the MySQL decimal comparison casts: at most 35 integer
-/// and 30 fractional digits, which DECIMAL(65,30) holds exactly, and a
-/// two-digit exponent, which keeps the `+ 0e0` range check finite.
-const MYSQL_DECIMAL_LEXEME: &str =
-    "^[-+]?([0-9]{1,35}([.][0-9]{0,30})?|[.][0-9]{1,30})([eE][-+]?[0-9]{1,2})?$";
-
-fn mysql(col: &SimpleExpr, op: ArrayOp, operand: &Value, decimal: bool) -> SimpleExpr {
-    // `?` placeholders bind one value each, so the operand is bound once in
-    // a derived table and every other use reads its column. JSON_TABLE can
-    // refer to tables before it in the same FROM clause.
-    //
-    // `{col}` is unqualified outside joins, so read inside these subqueries
-    // it could resolve to one of their columns instead (a column named
-    // `oxyde_v`). It is read once, by a holder that is the only FROM item of
-    // a subquery, where nothing but the outer query is in scope; a
-    // JSON_TABLE, since derived tables cannot refer to the outer query
-    // before MySQL 8.0.14.
-    let left = "JSON_TABLE(oxyde_h.oxyde_c, '$[*]' COLUMNS (oxyde_v JSON PATH '$')) AS oxyde_l";
-    let right = "(SELECT CAST({arg} AS JSON) AS oxyde_j) AS oxyde_a \
-         CROSS JOIN JSON_TABLE(oxyde_a.oxyde_j, '$[*]' COLUMNS (oxyde_v JSON PATH '$')) AS oxyde_r";
-    // Elements, extracted once per row of each JSON_TABLE. The path always
-    // exists, so SQL NULL here is a JSON null element; before MySQL 8.0.21,
-    // JSON_TABLE yields a JSON null instead, which `null` also accepts.
-    let l = "oxyde_l.oxyde_v";
-    let r = "oxyde_r.oxyde_v";
-
-    let eq = if decimal {
-        // Typed decimals are stored as JSON strings that keep their scale
-        // ("1.50"); compare them as DECIMAL, never as floating point.
-        // Operands are exact rust_decimal values (at most 28 fractional
-        // digits, magnitude below ~7.9e28; anything that would round is
-        // rejected), which DECIMAL(65,30) holds exactly.
-        //
-        // The stored side can hold anything, and CAST turns text that is not
-        // a number into 0 (a false match), or raises under strict mode in
-        // UPDATE/DELETE, as it does on overflow. So, in CASE order (MySQL
-        // evaluates CASE lazily): JSON nulls never reach the cast; anything
-        // that is not a decimal lexeme DECIMAL(65,30) can hold is a
-        // non-match; and an exponent lexeme must be 0, or within the
-        // operand range, checked as a double (`+ 0e0`, which cannot fail on
-        // a validated lexeme), since it could overflow the cast or underflow
-        // into 0, and have at most 30 fractional digits once expanded
-        // ("1.001e-28" has 31 and would round to 1e-28). Without an
-        // exponent, the lexeme pattern already bounds both.
-        let lt = format!("JSON_UNQUOTE({l})");
-        // Fractional digits of the expanded value: digits up to the last
-        // non-zero one, minus integer-part digits, minus the exponent.
-        let mantissa = format!("REGEXP_REPLACE({lt}, '^[-+]|[eE].*$', '')");
-        let expanded = format!(
-            "(LENGTH(TRIM(TRAILING '0' FROM REPLACE({mantissa}, '.', ''))) \
-             - LENGTH(SUBSTRING_INDEX({mantissa}, '.', 1)) \
-             - CAST(REGEXP_SUBSTR({lt}, '[-+]?[0-9]+$') AS SIGNED))"
-        );
-        let null = |x: &str| format!("({x} IS NULL OR JSON_TYPE({x}) = 'NULL')");
-        let (ln, rn) = (null(l), null(r));
-        format!(
-            "CASE WHEN {ln} OR {rn} THEN {ln} AND {rn} \
-             WHEN JSON_TYPE({l}) NOT IN ('STRING', 'INTEGER', 'UNSIGNED INTEGER', 'DECIMAL', 'DOUBLE') \
-             OR {lt} NOT REGEXP '{MYSQL_DECIMAL_LEXEME}' THEN FALSE \
-             WHEN {lt} REGEXP '[eE]' \
-             AND NOT ({lt} + 0e0 = 0 OR (ABS({lt} + 0e0) BETWEEN 1e-28 AND 1e29 \
-             AND {expanded} <= 30)) THEN FALSE \
-             ELSE CAST({lt} AS DECIMAL(65,30)) = CAST(JSON_UNQUOTE({r}) AS DECIMAL(65,30)) END"
-        )
-    } else {
-        format!("{l} <=> {r}")
-    };
-
-    let body = format!(
-        "(SELECT {} FROM JSON_TABLE({{col}}, '$' COLUMNS (oxyde_c JSON PATH '$')) AS oxyde_h)",
-        set_predicate(op, left, right, &eq)
-    );
-    // JSON_TABLE yields no rows for a scalar, which would make the NOT EXISTS
-    // forms true; non-arrays are answered before it runs.
-    let guarded = format!(
-        "CASE WHEN {{col}} IS NULL THEN NULL \
-         WHEN JSON_TYPE({{col}}) = 'ARRAY' THEN {body} ELSE FALSE END"
-    );
-    // Exact containment implies JSON_CONTAINS, which is linear, so it rejects
-    // most rows before the pairwise subqueries run; it binds the operand a
-    // second time, outside the derived table. (JSON_OVERLAPS would do
-    // the same for overlap but needs MySQL 8.0.17.) Decimals compare as
-    // DECIMAL, which JSON containment does not, so they keep the bare form.
-    let prefilter = match op {
-        _ if decimal => None,
-        ArrayOp::Contains => Some("JSON_CONTAINS({col}, CAST({arg} AS JSON))"),
-        ArrayOp::ContainedBy => Some("JSON_CONTAINS(CAST({arg} AS JSON), {col})"),
-        ArrayOp::Overlap => None,
-    };
-    let sql = match prefilter {
-        Some(prefilter) => format!("({prefilter} AND {guarded})"),
-        None => format!("({guarded})"),
-    };
-    render(&sql, col, operand, Dialect::Mysql)
-}
-
-// ---------------------------------------------------------------------------
-// SQLite
-// ---------------------------------------------------------------------------
-
-/// The stored value inside `sqlite`'s holder subquery.
-const SQLITE_HELD: &str = r#""oxyde_h"."oxyde_c""#;
-/// `json_each` columns of a stored (`l`) and an operand (`r`) element.
-const SQLITE_L_TYPE: &str = r#""oxyde_l"."type""#;
-const SQLITE_L_VALUE: &str = r#""oxyde_l"."value""#;
-const SQLITE_R_TYPE: &str = r#""oxyde_r"."type""#;
-const SQLITE_R_VALUE: &str = r#""oxyde_r"."value""#;
-
-fn sqlite(col: &SimpleExpr, op: ArrayOp, operand: &Value, decimal: bool) -> SimpleExpr {
-    let left = format!(r#"json_each({SQLITE_HELD}) AS "oxyde_l""#);
-    let right = r#"json_each({arg}) AS "oxyde_r""#;
-    let (lt, lv, rt, rv) = (SQLITE_L_TYPE, SQLITE_L_VALUE, SQLITE_R_TYPE, SQLITE_R_VALUE);
-
-    let eq = if decimal {
-        // Typed decimals are stored as JSON strings that keep their scale
-        // ("1.50"), so they compare as REAL. Other clients may have stored
-        // anything, and CAST turns text that is not a number into 0, so only
-        // JSON numbers and strings holding one are cast; nulls match nulls.
-        format!(
-            "CASE WHEN {lt} = 'null' OR {rt} = 'null' THEN {lt} = {rt} \
-             WHEN CASE WHEN {lt} IN ('integer', 'real') THEN TRUE \
-             WHEN {lt} = 'text' AND json_valid({lv}) THEN json_type({lv}) IN ('integer', 'real') \
-             ELSE FALSE END \
-             THEN CAST({lv} AS REAL) = CAST({rv} AS REAL) ELSE FALSE END"
-        )
-    } else {
-        // `true` and `1` differ by type; `1` and `1.0` only by integer/real.
-        format!(
-            "({lt} = {rt} OR ({lt} IN ('integer', 'real') AND {rt} IN ('integer', 'real'))) \
-             AND {lv} IS {rv}"
-        )
-    };
-
-    // `{col}` is unqualified outside joins, so read inside the json_each
-    // subqueries it could resolve to one of their columns instead (a column
-    // named `value` or `type`). The holder reads it once, as the only FROM
-    // item of a subquery, where nothing but the outer query is in scope.
-    let body = format!(
-        r#"(SELECT {} FROM (SELECT {{col}} AS "oxyde_c") AS "oxyde_h")"#,
-        set_predicate(op, &left, right, &eq)
-    );
-    // SQLite does not validate JSON columns, and json_type() / json_each()
-    // raise on text that is not JSON, so it is checked first; CASE, not
-    // AND, fixes that order. Flags 9 accept RFC 8259 text (1) and strictly
-    // valid JSONB blobs (8). json_each() would walk an object's members or
-    // yield a scalar itself, so only arrays reach it.
-    let sql = format!(
-        "(CASE WHEN {{col}} IS NULL THEN NULL \
-         WHEN json_valid({{col}}, 9) THEN \
-         CASE WHEN json_type({{col}}) = 'array' THEN {body} ELSE FALSE END \
-         ELSE FALSE END)"
-    );
-    render(&sql, col, operand, Dialect::Sqlite)
-}
-
-/// SQLite compares `json_each` scalars, so an object or array element in an
-/// operand is an error rather than a filter that silently matches nothing.
-fn check_sqlite_scalar(element: &serde_json::Value) -> Result<()> {
-    if element.is_object() || element.is_array() {
-        return Err(unsupported(
-            "array lookups with object or array elements are only supported on \
-             PostgreSQL and MySQL",
-        ));
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 /// Set predicate over two FROM items enumerating the stored (`left`) and
 /// operand (`right`) elements; `eq` matches one pair.
 fn set_predicate(op: ArrayOp, left: &str, right: &str, eq: &str) -> String {

@@ -93,10 +93,7 @@ def _serialize_default(value: Any, dialect: str) -> str | None:
 
     # Boolean
     if isinstance(value, bool):
-        if dialect == "postgres":
-            return "TRUE" if value else "FALSE"
-        else:
-            return "1" if value else "0"
+        return "TRUE" if value else "FALSE"
 
     # Numbers
     if isinstance(value, (int, float, Decimal)):
@@ -116,12 +113,7 @@ def _serialize_default(value: Any, dialect: str) -> str | None:
 
     # Bytes
     if isinstance(value, bytes):
-        if dialect == "postgres":
-            return f"'\\x{value.hex()}'"
-        elif dialect == "sqlite":
-            return f"X'{value.hex()}'"
-        else:  # mysql
-            return f"X'{value.hex()}'"
+        return f"'\\x{value.hex()}'"
 
     # Fallback - try str() but return None if it looks like a repr
     str_val = str(value)
@@ -130,11 +122,11 @@ def _serialize_default(value: Any, dialect: str) -> str | None:
     return str_val
 
 
-def extract_current_schema(dialect: str = "sqlite") -> dict[str, Any]:
+def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
     """Extract current schema from registered models.
 
     Args:
-        dialect: Target database dialect (sqlite, postgres, mysql)
+        dialect: Target database dialect (postgres)
 
     Returns:
         Schema snapshot compatible with Rust Snapshot structure:
@@ -150,6 +142,9 @@ def extract_current_schema(dialect: str = "sqlite") -> dict[str, Any]:
             }
         }
     """
+    from oxyde.migrations.utils import validate_dialect
+
+    validate_dialect(dialect)
     tables = {}
 
     for model_cls in iter_tables():
@@ -172,22 +167,7 @@ def extract_current_schema(dialect: str = "sqlite") -> dict[str, Any]:
             # Determine Python type for SQL mapping
             python_type_for_sql = field_meta.python_type
 
-            # Determine if this field needs AUTO_INCREMENT (MySQL only)
-            # AUTO_INCREMENT is needed when:
-            # 1. It's a primary key AND python type is int AND
-            # 2. Either db_type is not specified OR db_type is SERIAL/BIGSERIAL
             auto_increment = False
-            if (
-                dialect == "mysql"
-                and field_meta.primary_key
-                and field_meta.python_type is int
-            ):
-                if field_meta.db_type is None:
-                    # No explicit db_type - auto-increment enabled
-                    auto_increment = True
-                elif field_meta.db_type.upper() in ("SERIAL", "BIGSERIAL"):
-                    # Explicit SERIAL/BIGSERIAL - auto-increment enabled
-                    auto_increment = True
 
             # Convert default value to SQL expression
             default_val = None

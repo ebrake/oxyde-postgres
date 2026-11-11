@@ -6,9 +6,9 @@ from decimal import Decimal
 
 import pytest
 
-from oxyde import Avg, Count, Max, Min, Sum
+from oxyde import Count, Max, Sum
 
-from .conftest import AllTypes, Author, Post
+from .conftest import AllTypes, Post
 
 
 class TestAggregateShortcuts:
@@ -96,7 +96,6 @@ class TestAnnotateGroupBy:
 
 
 async def _seed_typed_groups(db):
-    # SQLite stores Decimal as TEXT, so HAVING compares it as text there (as
     # it always has); the decimals share their number of integer digits.
     for str_val, decimal_val, date_val in [
         ("a", Decimal("1.25"), date(2024, 1, 10)),

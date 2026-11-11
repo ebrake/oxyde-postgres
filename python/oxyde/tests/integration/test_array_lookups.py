@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import sqlite3
-from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -12,7 +9,6 @@ from uuid import UUID
 import pytest
 
 from oxyde import Field, Model, Q
-from oxyde.migrations.utils import detect_dialect
 from oxyde.queries.raw import execute_raw
 
 from .conftest import ArrayDoc, ArrayNote, ArrayShadow, ArrayShadowJson
@@ -20,8 +16,6 @@ from .conftest import ArrayDoc, ArrayNote, ArrayShadow, ArrayShadowJson
 U1 = UUID("10000000-0000-4000-8000-000000000001")
 U2 = UUID("20000000-0000-4000-8000-000000000002")
 CEST = timezone(timedelta(hours=2))
-# SQLite compares scalar elements only.
-SQLITE_SCALARS_ONLY = "only supported on PostgreSQL and MySQL"
 
 
 class PgArrayOverrides(Model):
@@ -84,15 +78,9 @@ async def _names(db, *args, **filters) -> set[str]:
 
 
 async def _check_structured(db, cases) -> None:
-    """Cases with object or nested-array elements in the lookup value: compared
-    as complete values on PostgreSQL and MySQL, rejected on SQLite."""
-    sqlite = detect_dialect(db.url) == "sqlite"
+    """Objects and nested JSON arrays compare as complete values."""
     for filters, expected in cases:
-        if sqlite:
-            with pytest.raises(RuntimeError, match=SQLITE_SCALARS_ONLY):
-                await _names(db, **filters)
-        else:
-            assert await _names(db, **filters) == expected, filters
+        assert await _names(db, **filters) == expected, filters
 
 
 CASES = [
@@ -224,18 +212,9 @@ class TestArrayLookups:
     async def test_filtered_update_and_delete(self, db):
         await _seed(db)
         # The same rows by an object and a nested array, or by scalars on
-        # SQLite, which rejects the others before anything runs.
         update_filter = {"items__contains": [{"c": 3}]}
         delete_filter = {"payload__overlap": [True, [1, 2]]}
-        if detect_dialect(db.url) == "sqlite":
-            for filters in (update_filter, delete_filter):
-                query = ArrayDoc.objects.filter(**filters)
-                with pytest.raises(RuntimeError, match=SQLITE_SCALARS_ONLY):
-                    await query.update(name="touched", using=db.name)
-                with pytest.raises(RuntimeError, match=SQLITE_SCALARS_ONLY):
-                    await query.delete(using=db.name)
-            update_filter = {"payload__contains": ["x"]}
-            delete_filter = {"payload__overlap": [True, 1.5]}
+        pass
 
         updated = await ArrayDoc.objects.filter(**update_filter).update(
             name="touched", using=db.name
@@ -276,8 +255,7 @@ class TestArrayLookups:
 
 class TestColumnsNamedLikeInternalAliases:
     """A stored column named like an alias or column inside the lookup's
-    subqueries (`__oxyde_v` on PostgreSQL, `oxyde_v` / `oxyde_j` on MySQL,
-    `oxyde_c` and json_each()'s `value` / `type` on SQLite) is still the
+    subqueries (including `__oxyde_v` on PostgreSQL) is still the
     column being filtered."""
 
     @pytest.mark.asyncio
@@ -365,8 +343,7 @@ class TestDecimalArraysWithForeignValues:
 
     @pytest.mark.asyncio
     async def test_only_numeric_elements_compare(self, db):
-        if detect_dialect(db.url) == "postgres":
-            pytest.skip("NUMERIC[] columns cannot hold non-numeric elements")
+        pytest.skip("NUMERIC[] columns cannot hold non-numeric elements")
         for name, amounts in self.ROWS.items():
             await execute_raw(
                 "INSERT INTO array_docs (name, amounts) VALUES (?, ?)",
@@ -409,8 +386,7 @@ class TestDecimalArraysWithForeignValues:
 class TestPostgresArrayCasts:
     @pytest.mark.asyncio
     async def test_operands_cast_to_overridden_column_types(self, db):
-        if detect_dialect(db.url) != "postgres":
-            pytest.skip("db_type array overrides are PostgreSQL DDL")
+        pass
         await execute_raw("DROP TABLE IF EXISTS pg_array_overrides", using=db.name)
         await execute_raw(
             "CREATE TABLE pg_array_overrides ("
@@ -486,75 +462,3 @@ class TestPostgresArrayCasts:
         assert await count(ratios__contains=[2**54]) == 1
         with pytest.raises(RuntimeError):
             await count(ratios__contains=[2**54 + 1])
-
-
-class TestSqliteInterop:
-    """Array lookups are plain SQL: rows written by other clients match like
-    Oxyde's own, and the generated SQL runs on any SQLite 3.45+ connection."""
-
-    # Rows another client writes: text and JSONB arrays, malformed text and
-    # a JSON document that is not an array.
-    EXTERNAL = {
-        "text": """'["zig", "rust"]'""",
-        "jsonb": """jsonb('["zig"]')""",
-        "malformed": """'["zig"'""",
-        "scalar": """'"zig"'""",
-    }
-
-    @pytest.mark.asyncio
-    async def test_other_clients_share_the_file(self, db):
-        if detect_dialect(db.url) != "sqlite":
-            pytest.skip("SQLite file interop")
-        if sqlite3.sqlite_version_info < (3, 45):
-            pytest.skip("jsonb() needs SQLite 3.45+")
-        await _seed(db)
-        path = db.url.removeprefix("sqlite://")
-
-        # A stdlib connection opened while Oxyde's pool is still live.
-        with closing(sqlite3.connect(path, timeout=5)) as conn:
-            for name, tags in self.EXTERNAL.items():
-                conn.execute(
-                    f"INSERT INTO array_docs (name, tags) VALUES (?, {tags})", [name]
-                )
-            conn.commit()
-
-        def query(*args, **filters):
-            # Names only: the malformed row does not load as an ArrayDoc.
-            return ArrayDoc.objects.filter(*args, **filters).values_list(
-                "name", flat=True
-            )
-
-        async def names(*args, **filters) -> set[str]:
-            return set(await query(*args, **filters).all(using=db.name))
-
-        # Malformed text and non-arrays are false, not errors, so negation
-        # includes them; SQL NULL stays unknown.
-        assert await names(tags__contains=["zig"]) == {"text", "jsonb"}
-        assert await names(tags__contains=["rust"]) == {"full", "dupes", "text"}
-        assert await names(~Q(tags__overlap=["zig"])) == {
-            "full",
-            "empty",
-            "dupes",
-            "malformed",
-            "scalar",
-        }
-
-        # The SQL Oxyde runs gives the same rows on a connection without
-        # Oxyde, with the lookup value bound as the JSON text Oxyde binds
-        # (decimals as strings).
-        lookups = [
-            ("tags__contains", ["zig"]),
-            ("tags__contained_by", ["zig", "rust", "python", None]),
-            ("tags__overlap", ["go", "zig"]),
-            ("scores__contains", [3, 1]),
-            ("amounts__overlap", [Decimal("2")]),
-            ("payload__contained_by", [1, True, 2]),
-        ]
-        with closing(sqlite3.connect(path, timeout=5)) as conn:
-            for key, value in lookups:
-                sql, params = query(**{key: value}).sql(dialect="sqlite")
-                assert len(params) == 1
-                bound = [json.dumps(value, default=str)]
-                rows = {name for (name,) in conn.execute(sql, bound)}
-                assert rows == await names(**{key: value}), key
-                assert rows, key

@@ -23,7 +23,7 @@ from oxyde.queries import F
 from oxyde.queries.base import _build_column_types, _model_key
 from oxyde.queries.expressions import _serialize_value_for_ir
 
-DIALECTS = ["postgres", "sqlite", "mysql"]
+DIALECTS = ["postgres"]
 
 # -- Test fixtures (values used across tests) --
 
@@ -278,8 +278,6 @@ def test_null_filter(dialect):
     "dialect,placeholder,quote",
     [
         ("postgres", "$1", '"'),
-        ("sqlite", "?", '"'),
-        ("mysql", "?", "`"),
     ],
 )
 def test_sql_syntax(dialect, placeholder, quote):

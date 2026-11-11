@@ -366,7 +366,7 @@ See [Relations](relations.md) for more.
 
 #### for_update()
 
-Lock rows for update (PostgreSQL/MySQL):
+Lock rows for update (PostgreSQL):
 
 ```python
 from oxyde.db import transaction

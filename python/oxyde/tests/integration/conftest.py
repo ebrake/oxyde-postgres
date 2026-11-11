@@ -1,4 +1,4 @@
-"""Integration test fixtures — multi-dialect via testcontainers."""
+"""PostgreSQL 18 integration fixtures with isolated schemas."""
 from __future__ import annotations
 
 import uuid
@@ -12,26 +12,13 @@ import pytest_asyncio
 from pydantic import computed_field
 
 from oxyde import AsyncDatabase, Field, Model, disconnect_all
-from oxyde.db.schema import create_tables, drop_tables
+from oxyde.db.schema import create_tables
 from oxyde.migrations.utils import detect_dialect
 from oxyde.models.registry import clear_registry, register_table
 from oxyde.models.utils import _unpack_annotated, _unwrap_optional
 from oxyde.queries.raw import execute_raw
 
-# ── Testcontainers availability ────────────────────────────────────────
-
-try:
-    from testcontainers.postgres import PostgresContainer
-    from testcontainers.mysql import MySqlContainer
-
-    HAS_CONTAINERS = True
-except ImportError:
-    HAS_CONTAINERS = False
-
-_DIALECTS = ["sqlite"]
-if HAS_CONTAINERS:
-    _DIALECTS.extend(["postgres", "mysql"])
-
+_DIALECTS = ["postgres"]
 
 # ── Models ─────────────────────────────────────────────────────────────
 
@@ -249,12 +236,12 @@ class ConvertedValues(Model):
     name: str = Field(default="", max_length=50)
     # Naive TIMESTAMP[] on PostgreSQL: aware elements are stored as UTC
     times: list[datetime] | None = Field(default=None, db_nullable=True)
-    # JSONB[] on PostgreSQL, a JSON array elsewhere
+    # PostgreSQL JSONB[]
     items: list[dict | str] | None = Field(default=None, db_nullable=True)
     mixed: list[dict | int | bool] | None = Field(default=None, db_nullable=True)
     ratios: list[float] | None = Field(default=None, db_nullable=True)
     amounts: list[Decimal] | None = Field(default=None, db_nullable=True)
-    # A union element type: TEXT[] on PostgreSQL, a JSON array elsewhere
+    # A union element type: PostgreSQL TEXT[]
     labels: list[str | int] | None = Field(default=None, db_nullable=True)
     # A str field stored as JSON
     body: str | None = Field(default=None, db_nullable=True, db_type="JSON")
@@ -277,7 +264,7 @@ class ArrayDoc(Model):
     ids: list[UUID] | None = Field(default=None, db_nullable=True)
     # Naive TIMESTAMP[]: aware elements are stored (and matched) as UTC
     times: list[datetime] | None = Field(default=None, db_nullable=True)
-    # JSONB[] on PostgreSQL, a JSON array elsewhere
+    # PostgreSQL JSONB[]
     items: list[dict | str] | None = Field(default=None, db_nullable=True)
     # JSONB on PostgreSQL
     payload: dict | list | None = Field(default=None, db_nullable=True)
@@ -321,7 +308,6 @@ class ArrayShadow(Model):
     )
     # JSONB on PostgreSQL, whose lookups walk elements under their own alias
     c: dict | list | None = Field(default=None, db_nullable=True, db_column="oxyde_c")
-    # json_each() columns on SQLite
     val: list[int | None] | None = Field(
         default=None, db_nullable=True, db_column="value"
     )
@@ -354,77 +340,12 @@ ALL_MODELS = [
 ]
 
 
-# ── Container fixtures (session-scoped) ────────────────────────────────
-
-
-@pytest.fixture(scope="session")
-def _pg_container():
-    if not HAS_CONTAINERS:
-        yield None
-        return
-    try:
-        container = PostgresContainer("postgres:16")
-        container.start()
-        yield container
-        container.stop()
-    except Exception:
-        yield None
-
-
-@pytest.fixture(scope="session")
-def _mysql_container():
-    if not HAS_CONTAINERS:
-        yield None
-        return
-    try:
-        container = MySqlContainer("mysql:8")
-        container.start()
-        yield container
-        container.stop()
-    except Exception:
-        yield None
-
-
-# ── URL builders ───────────────────────────────────────────────────────
-
-
-def _pg_url(container) -> str:
-    host = container.get_container_host_ip()
-    port = container.get_exposed_port(5432)
-    return f"postgres://test:test@{host}:{port}/test"
-
-
-def _mysql_url(container) -> str:
-    host = container.get_container_host_ip()
-    port = container.get_exposed_port(3306)
-    return f"mysql://root:test@{host}:{port}/test"
-
-
-def _get_url(dialect: str, tmp_path, pg_container, mysql_container) -> str:
-    if dialect == "sqlite":
-        return f"sqlite://{tmp_path / 'test.db'}"
-    if dialect == "postgres":
-        if pg_container is None:
-            pytest.skip("PostgreSQL container not available")
-        return _pg_url(pg_container)
-    if dialect == "mysql":
-        if mysql_container is None:
-            pytest.skip("MySQL container not available")
-        return _mysql_url(mysql_container)
-    pytest.fail(f"Unknown dialect: {dialect}")
-
-
 # ── Table management ───────────────────────────────────────────────────
 
-# Track per-dialect to avoid re-creating tables on every test
-_tables_created: set[str] = set()
-
-
 async def _ensure_tables(database: AsyncDatabase) -> None:
-    """Create tables on first use per dialect, truncate + reset on reuse.
+    """Create tables in the fresh PostgreSQL schema.
 
-    SQLite always creates (each test gets a fresh file).
-    PG/MySQL create once, then truncate for subsequent tests.
+    Each fixture gets its own PostgreSQL schema.
 
     Clears registry and re-registers ALL_MODELS right before schema extraction.
     Other test suites (smoke) may register models with same table_name but
@@ -435,20 +356,7 @@ async def _ensure_tables(database: AsyncDatabase) -> None:
     for model in ALL_MODELS:
         register_table(model, overwrite=True)
 
-    dialect = detect_dialect(database.url)
-    if dialect == "sqlite" or dialect not in _tables_created:
-        await create_tables(database)
-        if dialect != "sqlite":
-            _tables_created.add(dialect)
-    else:
-        await _clear_all_tables(database)
-
-
-async def _clear_all_tables(database: AsyncDatabase) -> None:
-    """Delete all data from tables in reverse FK order."""
-    tables = [m.Meta.table_name for m in ALL_MODELS]
-    for t in reversed(tables):
-        await execute_raw(f"DELETE FROM {t}", using=database.name)
+    await create_tables(database)
 
 
 async def _fix_pg_sequences(database: AsyncDatabase) -> None:
@@ -525,9 +433,9 @@ def _register_models():
 
 
 @pytest_asyncio.fixture(params=_DIALECTS)
-async def db(request, tmp_path, _pg_container, _mysql_container):
+async def db(request, postgres_database_url):
     """Fresh DB with main seed data, parametrized by dialect."""
-    url = _get_url(request.param, tmp_path, _pg_container, _mysql_container)
+    url = postgres_database_url
     database = AsyncDatabase(
         url, name=f"test_{request.param}", overwrite=True
     )
@@ -540,9 +448,9 @@ async def db(request, tmp_path, _pg_container, _mysql_container):
 
 
 @pytest_asyncio.fixture(params=_DIALECTS)
-async def event_db(request, tmp_path, _pg_container, _mysql_container):
+async def event_db(request, postgres_database_url):
     """Fresh DB with event seed data for datetime filtering tests."""
-    url = _get_url(request.param, tmp_path, _pg_container, _mysql_container)
+    url = postgres_database_url
     database = AsyncDatabase(
         url, name=f"evt_{request.param}", overwrite=True
     )
@@ -555,9 +463,9 @@ async def event_db(request, tmp_path, _pg_container, _mysql_container):
 
 
 @pytest_asyncio.fixture(params=_DIALECTS)
-async def aliased_db(request, tmp_path, _pg_container, _mysql_container):
+async def aliased_db(request, postgres_database_url):
     """Fresh DB with aliased_events seed for db_column remapping tests."""
-    url = _get_url(request.param, tmp_path, _pg_container, _mysql_container)
+    url = postgres_database_url
     database = AsyncDatabase(
         url, name=f"alias_{request.param}", overwrite=True
     )

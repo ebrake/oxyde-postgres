@@ -1,45 +1,42 @@
-"""Smoke test fixtures — real SQLite file DB."""
+"""Smoke test fixtures — real PostgreSQL 18 database."""
 from __future__ import annotations
 
-import sqlite3
 import uuid
-from pathlib import Path
 
+import psycopg2
 import pytest_asyncio
 
 from oxyde import AsyncDatabase, disconnect_all
 
 
-def _prepare_db(path: str | Path) -> None:
-    """Create schema and seed data via stdlib sqlite3."""
-    path_obj = Path(path) if isinstance(path, str) else path
-    path_obj.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA foreign_keys = ON")
+def _prepare_db(url: str) -> None:
+    """Create schema and seed data via psycopg2 on PostgreSQL 18."""
+    conn = psycopg2.connect(url)
+    cur = conn.cursor()
 
     # Create all tables first
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, views INTEGER NOT NULL)"
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS articles (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, views BIGINT NOT NULL)"
     )
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS authors (id INTEGER PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL)"
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS authors (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL)"
     )
-    conn.execute(
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY,
+            id BIGSERIAL PRIMARY KEY,
             title TEXT NOT NULL,
-            author_id INTEGER NOT NULL,
-            views INTEGER NOT NULL,
+            author_id BIGINT NOT NULL,
+            views BIGINT NOT NULL,
             FOREIGN KEY(author_id) REFERENCES authors(id)
         )
         """
     )
-    conn.execute(
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY,
-            post_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            post_id BIGINT NOT NULL,
             body TEXT NOT NULL,
             FOREIGN KEY(post_id) REFERENCES posts(id)
         )
@@ -47,55 +44,55 @@ def _prepare_db(path: str | Path) -> None:
     )
 
     # Delete in reverse FK order (child tables first)
-    conn.execute("DELETE FROM comments")
-    conn.execute("DELETE FROM posts")
-    conn.execute("DELETE FROM authors")
-    conn.execute("DELETE FROM articles")
+    cur.execute("DELETE FROM comments")
+    cur.execute("DELETE FROM posts")
+    cur.execute("DELETE FROM authors")
+    cur.execute("DELETE FROM articles")
 
     # Insert in FK order (parent tables first)
-    conn.executemany(
-        "INSERT INTO articles (id, title, views) VALUES (?, ?, ?)",
+    cur.executemany(
+        "INSERT INTO articles (id, title, views) VALUES (%s, %s, %s)",
         [
             (1, "First", 10),
             (2, "Second", 5),
             (3, "Third", 20),
         ],
     )
-    conn.executemany(
-        "INSERT INTO authors (id, email, name) VALUES (?, ?, ?)",
+    cur.executemany(
+        "INSERT INTO authors (id, email, name) VALUES (%s, %s, %s)",
         [
             (1, "ada@example.com", "Ada Lovelace"),
             (2, "linus@example.com", "Linus Torvalds"),
         ],
     )
-    conn.executemany(
-        "INSERT INTO posts (id, title, author_id, views) VALUES (?, ?, ?, ?)",
+    cur.executemany(
+        "INSERT INTO posts (id, title, author_id, views) VALUES (%s, %s, %s, %s)",
         [
             (1, "Rust Patterns", 1, 120),
             (2, "Async ORM", 1, 35),
             (3, "Kernel Notes", 2, 80),
         ],
     )
-    conn.executemany(
-        "INSERT INTO comments (id, post_id, body) VALUES (?, ?, ?)",
+    cur.executemany(
+        "INSERT INTO comments (id, post_id, body) VALUES (%s, %s, %s)",
         [
             (1, 1, "Great read!"),
             (2, 1, "Thanks for sharing"),
             (3, 3, "Subscribed!"),
         ],
     )
+    cur.execute("SELECT setval(pg_get_serial_sequence('articles', 'id'), 3)")
     conn.commit()
     conn.close()
 
 
 @pytest_asyncio.fixture
-async def sqlite_db(tmp_path):
-    """Fresh SQLite DB with seed data for each test."""
-    db_path = tmp_path / "test.db"
-    _prepare_db(str(db_path))
+async def postgres_db(postgres_database_url):
+    """Fresh PostgreSQL DB with seed data for each test."""
+    _prepare_db(postgres_database_url)
 
     db = AsyncDatabase(
-        f"sqlite://{db_path}",
+        postgres_database_url,
         name=f"test_{uuid.uuid4().hex}",
         overwrite=True,
     )

@@ -17,7 +17,7 @@ test-smoke:
 	pytest $(TEST_DIR)/smoke
 
 test-rust:
-	cargo test --workspace
+	cargo test --workspace --no-default-features
 
 coverage:
 	pytest $(TEST_DIR) --cov=$(COV_PKG) --cov-report=term-missing

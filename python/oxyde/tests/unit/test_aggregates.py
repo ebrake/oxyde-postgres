@@ -16,8 +16,6 @@ from oxyde.queries.aggregates import (
     RawSQL,
     Sum,
 )
-
-
 from oxyde.tests.helpers import StubExecuteClient
 
 
@@ -320,7 +318,7 @@ class TestManagerAggregates:
         """Test manager.sum() method."""
         stub = StubExecuteClient([(["__sum__"], [[150.0]])])
 
-        total = await Product.objects.sum("price", client=stub)
+        await Product.objects.sum("price", client=stub)
 
         # Result depends on implementation
         assert stub.calls[0]["aggregates"][0]["op"] == "sum"
@@ -330,7 +328,7 @@ class TestManagerAggregates:
         """Test manager.avg() method."""
         stub = StubExecuteClient([(["__avg__"], [[4.5]])])
 
-        avg = await Product.objects.avg("rating", client=stub)
+        await Product.objects.avg("rating", client=stub)
 
         assert stub.calls[0]["aggregates"][0]["op"] == "avg"
 
@@ -339,7 +337,7 @@ class TestManagerAggregates:
         """Test manager.max() method."""
         stub = StubExecuteClient([(["__max__"], [[99.99]])])
 
-        max_val = await Product.objects.max("price", client=stub)
+        await Product.objects.max("price", client=stub)
 
         assert stub.calls[0]["aggregates"][0]["op"] == "max"
 
@@ -348,7 +346,7 @@ class TestManagerAggregates:
         """Test manager.min() method."""
         stub = StubExecuteClient([(["__min__"], [[0.99]])])
 
-        min_val = await Product.objects.min("price", client=stub)
+        await Product.objects.min("price", client=stub)
 
         assert stub.calls[0]["aggregates"][0]["op"] == "min"
 

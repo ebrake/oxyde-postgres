@@ -1,5 +1,0 @@
----
-source: crates/oxyde-sql/tests/golden_ddl.rs
-expression: sql
----
-DROP TABLE `enum_posts`

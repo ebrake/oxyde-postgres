@@ -29,9 +29,9 @@ from oxyde.migrations.replay import replay_migrations
 from oxyde.migrations.utils import load_migration_module
 from oxyde.models.registry import clear_registry
 
-ALL_DIALECTS = ["postgres", "mysql", "sqlite"]
-NON_SQLITE = ["postgres", "mysql"]
-PARTIAL_INDEX_DIALECTS = ["postgres", "sqlite"]
+ALL_DIALECTS = ["postgres"]
+POSTGRES_DIALECTS = ["postgres"]
+PARTIAL_INDEX_DIALECTS = ["postgres"]
 
 
 class PublishState(Enum):
@@ -163,19 +163,12 @@ class TestEnumPipeline:
         )
 
         assert [op["type"] for op in ops[:2]] == ["create_enum_type", "create_table"]
-        if dialect == "postgres":
-            assert up_sql[0] == (
-                'CREATE TYPE "publish_state_enum" AS ENUM ('
-                "'draft', 'published')"
-            )
-            assert any('"state" "publish_state_enum" NOT NULL' in s for s in up_sql)
-            assert down_sql[-1] == 'DROP TYPE "publish_state_enum"'
-        elif dialect == "mysql":
-            assert not any("CREATE TYPE" in s.upper() for s in up_sql)
-            assert any("ENUM('draft','published')" in s for s in up_sql)
-        else:
-            assert not any("CREATE TYPE" in s.upper() for s in up_sql)
-            assert any('"state" TEXT NOT NULL' in s for s in up_sql)
+        assert up_sql[0] == (
+            'CREATE TYPE "publish_state_enum" AS ENUM ('
+            "'draft', 'published')"
+        )
+        assert any('"state" "publish_state_enum" NOT NULL' in s for s in up_sql)
+        assert down_sql[-1] == 'DROP TYPE "publish_state_enum"'
 
     def test_add_enum_value_diff_emits_enum_op_only(self):
         old = _enum_snapshot(["draft", "published"])
@@ -194,22 +187,7 @@ class TestEnumPipeline:
         assert migration_to_sql(ops_json, "postgres") == [
             'ALTER TYPE "publish_state_enum" ADD VALUE IF NOT EXISTS \'archived\''
         ]
-        assert migration_to_sql(ops_json, "mysql") == [
-            "ALTER TABLE `articles` MODIFY COLUMN `state` ENUM('draft','published','archived') NOT NULL"
-        ]
 
-    def test_add_multiple_enum_values_updates_mysql_inline_enum_progressively(self):
-        old = _enum_snapshot(["draft", "published"])
-        new = _enum_snapshot(["draft", "published", "archived", "deleted"])
-
-        ops_json = migration_compute_diff(json.dumps(old), json.dumps(new))
-        ops = json.loads(ops_json)
-
-        assert [op["value"] for op in ops] == ["archived", "deleted"]
-        assert migration_to_sql(ops_json, "mysql") == [
-            "ALTER TABLE `articles` MODIFY COLUMN `state` ENUM('draft','published','archived') NOT NULL",
-            "ALTER TABLE `articles` MODIFY COLUMN `state` ENUM('draft','published','archived','deleted') NOT NULL",
-        ]
 
     def test_enum_value_removal_requires_manual_migration(self):
         old = _enum_snapshot(["draft", "published"])
@@ -324,7 +302,7 @@ class TestDropForeignKeyPipeline:
     but removes the FK relationship; makemigrations + sqlmigrate must succeed.
     """
 
-    @pytest.mark.parametrize("dialect", NON_SQLITE)
+    @pytest.mark.parametrize("dialect", POSTGRES_DIALECTS)
     def test_drop_fk_keeping_column(self, tmp_path, dialect):
         class AuthorV1(Model):
             id: int | None = Field(default=None, db_pk=True)

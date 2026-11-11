@@ -7,7 +7,7 @@ Full working example: [github.com/mr-fatalyst/fastapi-oxyde-example](https://git
 ## Setup
 
 ```bash
-pip install oxyde fastapi uvicorn
+pip install oxyde-postgres fastapi uvicorn
 ```
 
 ## Project Structure
@@ -56,7 +56,7 @@ from oxyde import db
 from routes import router
 
 app = FastAPI(
-    lifespan=db.lifespan(default="sqlite:///app.db")
+    lifespan=db.lifespan(default="postgresql://localhost/app")
 )
 app.include_router(router)
 ```

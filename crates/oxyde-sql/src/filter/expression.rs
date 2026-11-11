@@ -111,7 +111,6 @@ fn pg_array_cast(
 /// an ordering comparison against one raises rather than fail the cast.
 /// On PostgreSQL, an array element of another type than the column's (a
 /// float in a `list[Decimal]`) raises, as it would bind as NULL. JSON arrays
-/// (MySQL, SQLite) encode each element as given, exactly as a saved value,
 /// so the members of a union element type (`list[str | int]`) all match.
 fn filter_value_expr(
     value: Value,
@@ -119,7 +118,7 @@ fn filter_value_expr(
     array_cast: Option<&Result<String>>,
     dialect: Dialect,
 ) -> Result<SimpleExpr> {
-    if dialect == Dialect::Postgres {
+    {
         if let (Value::Array(arr_type, _), Some(element)) =
             (&value, mismatched_array_element(&value))
         {
@@ -181,16 +180,10 @@ fn like_target(col: Expr, spec: &ColumnTypeSpec, dialect: Dialect) -> Expr {
         Dialect::Postgres => "{col} #>> '{}'",
         // JSON_UNQUOTE() prints a JSON null as 'null'; `#>>` and
         // json_extract() give SQL NULL.
-        Dialect::Mysql => {
-            "CASE WHEN JSON_TYPE({col}) = 'NULL' THEN NULL ELSE JSON_UNQUOTE({col}) END"
-        }
-        // SQLite does not validate JSON columns, and json_extract() raises
+
         // on text that is not JSON, so it is checked first; such text
         // matches as stored. Flags 9 accept RFC 8259 text (1) and strictly
         // valid JSONB blobs (8).
-        Dialect::Sqlite => {
-            "CASE WHEN json_valid({col}, 9) THEN json_extract({col}, '$') ELSE {col} END"
-        }
     };
     Expr::expr(render_col(template, &col.into(), dialect))
 }

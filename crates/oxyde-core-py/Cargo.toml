@@ -27,10 +27,10 @@ rmpv = { version = "1", features = ["with-serde"] }
 oxyde-codec = { path = "../oxyde-codec" }
 oxyde-sql = { path = "../oxyde-sql" }
 oxyde-driver = { path = "../oxyde-driver" }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "mysql"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
 oxyde-migrate = { path = "../oxyde-migrate" }
 once_cell = "1.19"
-sea-query = "0.31"
+sea-query = { version = "0.31", default-features = false, features = ["backend-postgres"] }
 futures = "0.3"
 
 # Optional allocators for better memory management

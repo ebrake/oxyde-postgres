@@ -21,7 +21,7 @@ AsyncDatabase:
 PoolSettings:
     Configuration dataclass for pool tuning.
 
-    Pool settings (all databases):
+    PostgreSQL pool settings:
         max_connections: Maximum pool size (default: auto)
         min_connections: Minimum idle connections
         acquire_timeout: Max wait time for connection
@@ -33,12 +33,6 @@ PoolSettings:
         transaction_timeout: Max transaction duration (default: 5 min)
         transaction_cleanup_interval: Cleanup check interval (default: 1 min)
 
-    SQLite-specific PRAGMAs (auto-applied on connect):
-        sqlite_journal_mode: "WAL" (default, 10-20x faster writes)
-        sqlite_synchronous: "NORMAL" (default, balance speed/safety)
-        sqlite_cache_size: 10000 pages (~10MB)
-        sqlite_busy_timeout: 5000ms lock wait timeout
-
 Rust Integration:
     _init_pool(): Create pool in Rust registry
     _execute(): Send IR bytes to Rust, execute via sqlx
@@ -47,8 +41,6 @@ Rust Integration:
 
 URL Schemes:
     postgres://, postgresql://  → PostgreSQL
-    mysql://                    → MySQL
-    sqlite://                   → SQLite
 """
 
 from __future__ import annotations
@@ -71,24 +63,36 @@ try:
 except ImportError:
     # Stub for when the Rust module is not built
     async def _execute(pool_name: str, ir_bytes: bytes) -> bytes:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _init_pool(name: str, url: str, settings: dict[str, Any] | None) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _init_pool_overwrite(
         name: str, url: str, settings: dict[str, Any] | None
     ) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def close_pool(name: str) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def close_all_pools() -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _pool_backend(pool_name: str) -> str:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
 
 def _msgpack_encoder(obj: Any) -> Any:
@@ -114,12 +118,10 @@ def _normalize_duration(value: float | int | timedelta | None) -> float | None:
 
 
 def _validate_url_scheme(url: str) -> None:
-    """Validate database URL scheme."""
-    allowed_prefixes = ("postgres", "mysql", "sqlite")
-    if not url.startswith(allowed_prefixes):
+    """Accept PostgreSQL connection URL schemes only."""
+    if not url.startswith(("postgres://", "postgresql://")):
         raise ValueError(
-            f"Unsupported database URL '{url}'. "
-            "Supported prefixes: postgres*, mysql*, sqlite*."
+            "PostgreSQL 18 or newer is required; use postgres:// or postgresql://."
         )
 
 
@@ -142,22 +144,9 @@ class PoolSettings:
         60  # 1 minute (cleanup interval)
     )
 
-    # SQLite-specific PRAGMA settings (applied on connection)
-    sqlite_journal_mode: str | None = (
-        "WAL"  # WAL mode for better concurrent writes (10-20x faster)
-    )
-    sqlite_synchronous: str | None = (
-        "NORMAL"  # NORMAL is a good balance between safety and speed
-    )
-    sqlite_cache_size: int | None = (
-        10000  # Cache size in pages (~10MB with default page size)
-    )
-    sqlite_busy_timeout: int | None = 5000  # Timeout in milliseconds for busy database
-
-    # TLS settings (PostgreSQL + MySQL)
+    # TLS settings (PostgreSQL)
     # ssl_mode controls both TLS requirement and certificate verification:
     #   PG:    "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
-    #   MySQL: "disabled", "preferred", "required", "verify-ca", "verify-identity"
     ssl_mode: str | None = None
     ssl_root_cert: str | None = None  # Path to CA certificate
     ssl_client_cert: str | None = None  # Path to client certificate (mTLS)
@@ -166,10 +155,6 @@ class PoolSettings:
     # PostgreSQL-specific
     pg_application_name: str | None = None  # Visible in pg_stat_activity
     pg_statement_cache_capacity: int | None = None  # Prepared statement cache size
-
-    # MySQL-specific
-    mysql_charset: str | None = None  # Character set (default: utf8mb4)
-    mysql_collation: str | None = None  # Collation
 
     def to_payload(self) -> dict[str, Any] | None:
         payload: dict[str, Any] = {}
@@ -195,16 +180,6 @@ class PoolSettings:
         ) is not None:
             payload["transaction_cleanup_interval"] = value
 
-        # Add SQLite PRAGMA settings to payload
-        if self.sqlite_journal_mode is not None:
-            payload["sqlite_journal_mode"] = str(self.sqlite_journal_mode)
-        if self.sqlite_synchronous is not None:
-            payload["sqlite_synchronous"] = str(self.sqlite_synchronous)
-        if self.sqlite_cache_size is not None:
-            payload["sqlite_cache_size"] = int(self.sqlite_cache_size)
-        if self.sqlite_busy_timeout is not None:
-            payload["sqlite_busy_timeout"] = int(self.sqlite_busy_timeout)
-
         # TLS settings
         if self.ssl_mode is not None:
             payload["ssl_mode"] = str(self.ssl_mode)
@@ -222,12 +197,6 @@ class PoolSettings:
             payload["pg_statement_cache_capacity"] = int(
                 self.pg_statement_cache_capacity
             )
-
-        # MySQL-specific
-        if self.mysql_charset is not None:
-            payload["mysql_charset"] = str(self.mysql_charset)
-        if self.mysql_collation is not None:
-            payload["mysql_collation"] = str(self.mysql_collation)
 
         return payload or None
 

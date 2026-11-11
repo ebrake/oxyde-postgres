@@ -1,4 +1,4 @@
-# Contributing to Oxyde
+# Contributing to Oxyde for PostgreSQL
 
 Thank you for your interest in contributing to Oxyde! This guide covers development setup, building from source, and running tests.
 
@@ -27,7 +27,7 @@ Oxyde is a hybrid Python/Rust project:
                          │ SQL + parameters
                          ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Database (PostgreSQL / SQLite / MySQL)                      │
+│  Database (PostgreSQL 18+)                      │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -82,16 +82,15 @@ python/oxyde/
   warnings CI does not (or vice versa) — always build through rustup.
 - **Python** 3.10+
 - **maturin** (`pip install maturin`)
-- **Docker** — integration tests spin up PostgreSQL/MySQL via testcontainers;
-  without Docker they are skipped and only unit/smoke tests run.
+- **Docker** — database tests start PostgreSQL 18 via testcontainers. Alternatively set `OXYDE_TEST_POSTGRES_URL` to a disposable PostgreSQL 18+ database. Tests create and drop isolated schemas. Database tests fail if the server cannot start; they are not silently skipped.
 
 ## Development Setup
 
 ### 1. Clone and Create Virtual Environment
 
 ```bash
-git clone https://github.com/mr-fatalyst/oxyde.git
-cd oxyde
+git clone https://github.com/ebrake/oxyde-postgres.git
+cd oxyde-postgres
 
 python -m venv .venv
 source .venv/bin/activate  # Linux/macOS
@@ -107,9 +106,7 @@ cargo build --release
 ### 3. Install Rust Python Extension
 
 ```bash
-cd crates/oxyde-core-py
-maturin develop --release
-cd ../..
+maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
 ```
 
 ### 4. Install Python Package
@@ -126,9 +123,9 @@ Day-to-day commands are `make` targets (see the `Makefile` at the repo root):
 
 | Command | What it does |
 |---|---|
-| `make build-core` | Rebuild the Rust extension (`maturin develop --release`) |
-| `make test-rust` | All Rust tests (`cargo test --workspace`) |
-| `make test` | All Python tests (integration auto-skips without Docker) |
+| `make build-core` | Rebuild the Rust extension (`maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml`) |
+| `make test-rust` | All Rust tests (`cargo test --workspace --no-default-features`) |
+| `make test` | All Python tests (PostgreSQL 18 required for database tests) |
 | `make test-unit` / `test-smoke` / `test-integration` | One Python suite |
 | `make coverage` | Python tests with coverage |
 | `make lint` | Everything CI checks: ruff, mypy, cargo fmt/check/clippy |
@@ -177,12 +174,12 @@ description: changed DDL bytes are a feature decision, never a side effect.
 Tests are split into suites under `python/oxyde/tests/`:
 
 - `unit/` — no database needed
-- `smoke/` — quick end-to-end sanity on SQLite
-- `integration/` — real PostgreSQL/MySQL via testcontainers (needs Docker)
+- `smoke/` — quick end-to-end sanity on PostgreSQL 18
+- `integration/` — real PostgreSQL via testcontainers (needs Docker)
 - `typecheck/` — mypy against generated stubs
 
 ```bash
-make test          # all (integration is skipped automatically without Docker)
+make test          # all (database tests require Docker or OXYDE_TEST_POSTGRES_URL)
 make test-unit     # or test-smoke / test-integration
 make coverage
 
@@ -281,7 +278,7 @@ Column type semantics live in exactly two places — keep it that way:
 2. **Map it in Rust** (`crates/oxyde-sql/`):
    - `src/spec_sql.rs` — DDL type string per dialect (`resolve_spec_type`);
    - `src/utils/bind.rs` — value binding + typed NULL for the new kind;
-   - `crates/oxyde-driver/src/convert/{postgres,mysql,sqlite}.rs` — row decoding.
+   - `crates/oxyde-driver/src/convert/postgres.rs` — row decoding.
 3. **Map it in Python** (`python/oxyde/core/column_types.py`) — the single
    Python-side classification point (`compute_column_type`). Nothing else in
    the Python layer may classify types.
@@ -303,13 +300,9 @@ Rust async operations release the GIL via `pyo3_asyncio::tokio::future_into_py`.
 
 IR payload should stay under 10KB for best performance. Large bulk operations may need batching.
 
-### SQLite Connection Limits
-
-SQLite doesn't benefit from large connection pools. Use `max_connections=1` or rely on WAL mode with limited concurrency.
-
 ## Pull Request Guidelines
 
-1. **Build the Rust core from source** before submitting a fix. The `oxyde-core` package on PyPI may be behind `main` — your issue might already be fixed. Always run `make build-core` first.
+1. **Build the Rust core from source** before submitting a fix. The `oxyde-postgres-core` package on PyPI may be behind `main` — your issue might already be fixed. Always run `make build-core` first.
 2. **Create a branch** from `main`
 3. **Write tests** for new functionality
 4. **Run `make test-rust`, `make test` and `make lint`** before submitting — CI runs exactly these
@@ -321,3 +314,9 @@ SQLite doesn't benefit from large connection pools. Use `max_connections=1` or r
 
 - Open an issue on GitHub
 - Check existing issues for similar questions
+
+## Release preparation
+
+The initial release is 0.1.0 for both `oxyde-postgres-core` and `oxyde-postgres`. Publish the core (`core-v0.1.0`) before the Python distribution (`v0.1.0`), which depends on it. Configure PyPI publishing and repository hosting for the new project before pushing release tags. The full first-release body is maintained in `docs/changelog.md`.
+
+On macOS, select the virtual environment's interpreter when running Rust tests: `PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --workspace --no-default-features`. Native extension builds retain the extension-module feature.

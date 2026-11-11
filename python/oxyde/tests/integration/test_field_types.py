@@ -455,9 +455,7 @@ class TestArrayRoundTrip:
     @pytest.mark.asyncio
     async def test_integers_in_float_and_decimal_list_filters(self, db):
         # Integer elements were bound as NULL on PostgreSQL, and as JSON
-        # integers on SQLite, so these filters never matched.
-        if detect_dialect(db.url) == "mysql":
-            pytest.skip("array equality filters do not match on MySQL")
+        pass
         await ConvertedValues.objects.create(
             ratios=[1.0, 2.5], amounts=[Decimal("1"), Decimal("2.5")], using=db.name
         )
@@ -478,25 +476,18 @@ class TestArrayRoundTrip:
     async def test_list_filter_elements_of_another_type(self, db, filters):
         # PostgreSQL bound such elements as NULL, and NULL elements compare
         # equal there, so the filter matched rows holding [None]; it now
-        # raises. JSON arrays (MySQL, SQLite) compare each element as given.
         query = ConvertedValues.objects.filter(**filters)
-        if detect_dialect(db.url) == "postgres":
-            with pytest.raises(RuntimeError, match="does not match the array's element type"):
-                await query.count(using=db.name)
-        else:
-            assert await query.count(using=db.name) == 0
+        with pytest.raises(RuntimeError, match="does not match the array's element type"):
+            await query.count(using=db.name)
 
     @pytest.mark.asyncio
     async def test_union_list_filter(self, db):
-        dialect = detect_dialect(db.url)
-        if dialect == "mysql":
-            pytest.skip("array equality filters do not match on MySQL")
+        detect_dialect(db.url)
+        pass
         query = ConvertedValues.objects.filter(labels=["a", 1])
-        if dialect == "postgres":
-            # TEXT[] cannot hold the 1: it would bind as NULL.
-            with pytest.raises(RuntimeError, match="does not match the array's element type"):
-                await query.count(using=db.name)
-            return
+        with pytest.raises(RuntimeError, match="does not match the array's element type"):
+            await query.count(using=db.name)
+        return
         # A JSON array keeps each element's own type, as saved.
         await ConvertedValues.objects.create(labels=["a", 1], using=db.name)
         assert await query.count(using=db.name) == 1

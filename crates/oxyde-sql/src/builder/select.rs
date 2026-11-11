@@ -2,8 +2,8 @@
 
 use oxyde_codec::{JoinSpec, LockType as OxydeLockType, QueryIR};
 use sea_query::{
-    Alias, Asterisk, ColumnRef, Expr, Func, LockType as SeaLockType, MysqlQueryBuilder, Order,
-    PostgresQueryBuilder, Query, SeaRc, SelectStatement, SqliteQueryBuilder, UnionType, Value,
+    Alias, Asterisk, ColumnRef, Expr, Func, LockType as SeaLockType, Order, PostgresQueryBuilder,
+    Query, SeaRc, SelectStatement, UnionType, Value,
 };
 
 use crate::aggregate::build_aggregate;
@@ -159,8 +159,6 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
 fn build_query_string(query: &SelectStatement, dialect: Dialect) -> (String, Vec<Value>) {
     let (sql, values) = match dialect {
         Dialect::Postgres => query.build(PostgresQueryBuilder),
-        Dialect::Sqlite => query.build(SqliteQueryBuilder),
-        Dialect::Mysql => query.build(MysqlQueryBuilder),
     };
     (sql, values.0)
 }

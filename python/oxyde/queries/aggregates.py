@@ -76,25 +76,17 @@ class Count(Aggregate):
 class Sum(Aggregate):
     """SUM aggregate function."""
 
-    pass
-
 
 class Avg(Aggregate):
     """AVG aggregate function."""
-
-    pass
 
 
 class Max(Aggregate):
     """MAX aggregate function."""
 
-    pass
-
 
 class Min(Aggregate):
     """MIN aggregate function."""
-
-    pass
 
 
 class Concat(Aggregate):

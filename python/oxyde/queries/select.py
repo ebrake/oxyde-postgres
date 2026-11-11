@@ -175,7 +175,6 @@ class Query(
         Locks selected rows for update, preventing other transactions
         from modifying them until the current transaction commits.
 
-        Note: On SQLite this is a no-op (SQLite uses database-level locking).
 
         Returns:
             Query with FOR UPDATE lock
@@ -197,7 +196,6 @@ class Query(
         from modifying them (but allowing reads) until the current
         transaction commits.
 
-        Note: On SQLite this is a no-op (SQLite uses database-level locking).
 
         Returns:
             Query with FOR SHARE lock

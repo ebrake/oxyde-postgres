@@ -11,22 +11,17 @@ from typing import Any
 from oxyde._msgpack import msgpack
 
 
+def validate_dialect(dialect: str) -> None:
+    """Reject unsupported migration and SQL dialects."""
+    if dialect != "postgres":
+        raise ValueError("Only the postgres dialect is supported (PostgreSQL 18+).")
+
+
 def detect_dialect(url: str) -> str:
-    """Detect database dialect from connection URL.
+    """Validate a PostgreSQL URL and return the PostgreSQL dialect."""
+    from oxyde.db.pool import _validate_url_scheme
 
-    Args:
-        url: Database connection URL (e.g. "postgresql://...", "sqlite:///...")
-
-    Returns:
-        Dialect string: "sqlite", "postgres", or "mysql"
-    """
-    url_lower = url.lower()
-    if url_lower.startswith("sqlite"):
-        return "sqlite"
-    if url_lower.startswith("postgres"):
-        return "postgres"
-    if url_lower.startswith("mysql") or url_lower.startswith("mariadb"):
-        return "mysql"
+    _validate_url_scheme(url)
     return "postgres"
 
 

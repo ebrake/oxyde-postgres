@@ -19,6 +19,11 @@ class OxydeConfig:
     migrations_dir: str = "migrations"
     databases: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        from oxyde.migrations.utils import validate_dialect
+
+        validate_dialect(self.dialect)
+
 
 def load_config() -> OxydeConfig | None:
     """Load configuration from oxyde_config.py.
@@ -105,6 +110,11 @@ def generate_config_file(
     Returns:
         Generated Python file content.
     """
+    from oxyde.migrations.utils import detect_dialect, validate_dialect
+
+    validate_dialect(dialect)
+    for url in (databases or {}).values():
+        detect_dialect(url)
     if databases is None:
         databases = {"default": "postgresql://localhost/mydb"}
 
@@ -121,7 +131,7 @@ def generate_config_file(
 # List of Python modules containing Model classes
 MODELS = [{models_str}]
 
-# Database dialect: "postgres", "sqlite", or "mysql"
+# Database dialect: "postgres"
 DIALECT = "{dialect}"
 
 # Directory for migration files

@@ -49,7 +49,7 @@ class DebugMixin(Generic[TModel]):
         connection.
 
         Args:
-            dialect: SQL dialect - "postgres" (default), "sqlite", or "mysql"
+            dialect: SQL dialect - "postgres"
             with_types: If True, params are returned as (type_tag, value) tuples
                 showing the exact sea_query Value variant used for binding.
 

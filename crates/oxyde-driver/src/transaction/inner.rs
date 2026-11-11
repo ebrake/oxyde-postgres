@@ -12,16 +12,12 @@ use std::time::Instant;
 
 pub(crate) enum DbTx {
     Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
-    MySql(sqlx::Transaction<'static, sqlx::MySql>),
-    Sqlite(sqlx::Transaction<'static, sqlx::Sqlite>),
 }
 
 impl DbTx {
     pub(crate) async fn commit(self) -> Result<()> {
         let result = match self {
             DbTx::Postgres(tx) => tx.commit().await,
-            DbTx::MySql(tx) => tx.commit().await,
-            DbTx::Sqlite(tx) => tx.commit().await,
         };
         result.map_err(|e| DriverError::db("COMMIT failed", e))
     }
@@ -29,8 +25,6 @@ impl DbTx {
     pub(crate) async fn rollback(self) -> Result<()> {
         let result = match self {
             DbTx::Postgres(tx) => tx.rollback().await,
-            DbTx::MySql(tx) => tx.rollback().await,
-            DbTx::Sqlite(tx) => tx.rollback().await,
         };
         result.map_err(|e| DriverError::db("ROLLBACK failed", e))
     }
@@ -39,8 +33,6 @@ impl DbTx {
     pub(crate) async fn execute_raw(&mut self, sql: &str) -> std::result::Result<(), sqlx::Error> {
         match self {
             DbTx::Postgres(tx) => tx.execute(sql).await.map(|_| ()),
-            DbTx::MySql(tx) => tx.execute(sql).await.map(|_| ()),
-            DbTx::Sqlite(tx) => tx.execute(sql).await.map(|_| ()),
         }
     }
 }
@@ -50,8 +42,6 @@ pub(crate) async fn begin_on_pool(pool: &DbPool) -> Result<DbTx> {
     let begin_err = |e: sqlx::Error| DriverError::db("BEGIN failed", e);
     match pool {
         DbPool::Postgres(p) => Ok(DbTx::Postgres(p.begin().await.map_err(begin_err)?)),
-        DbPool::MySql(p) => Ok(DbTx::MySql(p.begin().await.map_err(begin_err)?)),
-        DbPool::Sqlite(p) => Ok(DbTx::Sqlite(p.begin().await.map_err(begin_err)?)),
     }
 }
 

@@ -1,7 +1,7 @@
 //! All SQL generation via sea-query: DML from QueryIR, DDL from MigrationOps.
 //!
 //! This is the single crate that renders SQL text. It converts QueryIR
-//! structures (oxyde-codec) into dialect-specific DML with bound parameters,
+//! structures (oxyde-codec) into PostgreSQL DML with bound parameters,
 //! and MigrationOp lists into DDL statements. Consumers (oxyde-migrate,
 //! oxyde-driver, oxyde-core-py) never touch sea-query's builders themselves.
 //!
@@ -17,8 +17,6 @@
 //! # Dialect Support
 //!
 //! - **PostgreSQL**: `$1, $2, $3` placeholders, RETURNING clause, FOR UPDATE/SHARE
-//! - **SQLite**: `?1, ?2, ?3` placeholders, RETURNING (3.35+), no row-level locking
-//! - **MySQL**: `?, ?, ?` placeholders, no RETURNING, FOR UPDATE/SHARE
 //!
 //! # Architecture
 //!
@@ -64,20 +62,17 @@ pub use spec_sql::resolve_spec_type;
 #[serde(rename_all = "lowercase")]
 pub enum Dialect {
     Postgres,
-    Sqlite,
-    Mysql,
 }
 
 /// Whether the generated statement carries a full `RETURNING *` clause —
-/// i.e. the caller asked for rows back (`ir.returning`) and the dialect
-/// supports RETURNING (MySQL does not).
+/// i.e. the caller asked for rows back (`ir.returning`).
 ///
 /// Execution routing must use this predicate, not the SQL text: identifiers
 /// may legally contain the word RETURNING, and INSERTs may later carry a
 /// pk-only `RETURNING "id"` clause that does not mean "return full rows".
 #[must_use]
 pub fn emits_returning(ir: &QueryIR, dialect: Dialect) -> bool {
-    ir.returning.unwrap_or(false) && matches!(dialect, Dialect::Postgres | Dialect::Sqlite)
+    ir.returning.unwrap_or(false) && matches!(dialect, Dialect::Postgres)
 }
 
 /// Build SQL from QueryIR
@@ -312,32 +307,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mysql_placeholders() {
-        let ir = QueryIR {
-            table: "widgets".into(),
-            cols: Some(vec!["id".into()]),
-            filter_tree: Some(filter_cond("slug", "=", rmpv_str("foo"))),
-            ..Default::default()
-        };
-        let (sql, params) = build_sql(&ir, Dialect::Mysql).unwrap();
-        assert!(sql.contains('?'));
-        assert_eq!(params.len(), 1);
-    }
-
-    #[test]
-    fn test_sqlite_placeholders() {
-        let ir = QueryIR {
-            op: Operation::Insert,
-            table: "widgets".into(),
-            values: Some(HashMap::from([("name".into(), rmpv_str("foo"))])),
-            ..Default::default()
-        };
-        let (sql, params) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(sql.contains('?'));
-        assert_eq!(params.len(), 1);
-    }
-
-    #[test]
     fn test_select_ilike_lookup() {
         let ir = QueryIR {
             table: "articles".into(),
@@ -351,51 +320,6 @@ mod tests {
         assert_eq!(params.len(), 1);
         match &params[0] {
             Value::String(Some(val)) => assert_eq!(val.as_ref(), "%rust%"),
-            other => panic!("unexpected parameter value {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_select_like_escape_lookup() {
-        let ir = QueryIR {
-            table: "articles".into(),
-            cols: Some(vec!["id".into()]),
-            filter_tree: Some(filter_with_escape(
-                "title",
-                "LIKE",
-                rmpv_str(r"%snake\_case%"),
-                "\\",
-            )),
-            ..Default::default()
-        };
-        let (sql, params) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(sql.contains("ESCAPE"));
-        assert_eq!(params.len(), 1);
-        match &params[0] {
-            Value::String(Some(val)) => assert_eq!(val.as_ref(), r"%snake\_case%"),
-            other => panic!("unexpected parameter value {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_select_ilike_escape_lookup() {
-        let ir = QueryIR {
-            table: "articles".into(),
-            cols: Some(vec!["id".into()]),
-            filter_tree: Some(filter_with_escape(
-                "title",
-                "ILIKE",
-                rmpv_str(r"%snake\_case%"),
-                "\\",
-            )),
-            ..Default::default()
-        };
-        let (sql, params) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(sql.to_uppercase().contains("LOWER"));
-        assert!(sql.contains("ESCAPE"));
-        assert_eq!(params.len(), 1);
-        match &params[0] {
-            Value::String(Some(val)) => assert_eq!(val.as_ref(), r"%snake\_case%"),
             other => panic!("unexpected parameter value {other:?}"),
         }
     }
@@ -423,7 +347,7 @@ mod tests {
         let upper = "90000000-0000-4000-8000-000000000003";
         let expected = [lower, upper];
 
-        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+        for dialect in [Dialect::Postgres] {
             for operator in [">", ">=", "<", "<=", "BETWEEN"] {
                 let filter = if operator == "BETWEEN" {
                     filter_with_column(
@@ -586,57 +510,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mysql_on_duplicate_key_update() {
-        let ir = QueryIR {
-            op: Operation::Insert,
-            table: "items".into(),
-            values: Some(HashMap::from([
-                ("id".into(), rmpv_int(1)),
-                ("name".into(), rmpv_str("test")),
-                ("count".into(), rmpv_int(10)),
-            ])),
-            on_conflict: Some(OnConflict {
-                columns: vec!["id".into()],
-                action: ConflictAction::Update,
-                update_values: Some(HashMap::from([
-                    ("name".into(), rmpv_str("updated")),
-                    ("count".into(), rmpv_int(20)),
-                ])),
-            }),
-            ..Default::default()
-        };
-        let (sql, params) = build_sql(&ir, Dialect::Mysql).unwrap();
-        assert!(
-            sql.contains("ON DUPLICATE KEY UPDATE"),
-            "MySQL should use ON DUPLICATE KEY UPDATE, got: {sql}"
-        );
-        assert!(params.len() >= 3, "Should have insert params");
-    }
-
-    #[test]
-    fn test_mysql_on_duplicate_key_nothing() {
-        let ir = QueryIR {
-            op: Operation::Insert,
-            table: "items".into(),
-            values: Some(HashMap::from([
-                ("id".into(), rmpv_int(1)),
-                ("name".into(), rmpv_str("test")),
-            ])),
-            on_conflict: Some(OnConflict {
-                columns: vec!["id".into()],
-                action: ConflictAction::Nothing,
-                update_values: None,
-            }),
-            ..Default::default()
-        };
-        let (sql, _) = build_sql(&ir, Dialect::Mysql).unwrap();
-        assert!(
-            sql.contains("ON DUPLICATE KEY UPDATE"),
-            "MySQL DoNothing should use ON DUPLICATE KEY UPDATE (no-op), got: {sql}"
-        );
-    }
-
-    #[test]
     fn test_union_order_by_after_union() {
         let union_ir = QueryIR {
             table: "posts".into(),
@@ -653,7 +526,8 @@ mod tests {
             ..Default::default()
         };
 
-        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql] {
+        {
+            let dialect = Dialect::Postgres;
             let (sql, _) = build_sql(&ir, dialect).unwrap();
             let union_pos = sql.find("UNION").expect("should contain UNION");
             let order_pos = sql.find("ORDER BY").expect("should contain ORDER BY");
@@ -662,72 +536,6 @@ mod tests {
                 "{dialect:?}: ORDER BY should come after UNION.\nSQL: {sql}"
             );
         }
-    }
-
-    #[test]
-    fn test_order_by_random() {
-        let ir = QueryIR {
-            table: "authors".into(),
-            order_by: Some(vec![("?".into(), "RANDOM".into())]),
-            ..Default::default()
-        };
-
-        let (sqlite_sql, _) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(
-            sqlite_sql.contains("ORDER BY RANDOM()"),
-            "SQLite: expected ORDER BY RANDOM(), got: {sqlite_sql}"
-        );
-
-        let (pg_sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
-        assert!(
-            pg_sql.contains("ORDER BY RANDOM()"),
-            "Postgres: expected ORDER BY RANDOM(), got: {pg_sql}"
-        );
-
-        let (mysql_sql, _) = build_sql(&ir, Dialect::Mysql).unwrap();
-        assert!(
-            mysql_sql.contains("ORDER BY RAND()"),
-            "MySQL: expected ORDER BY RAND(), got: {mysql_sql}"
-        );
-    }
-
-    #[test]
-    fn test_order_by_random_mixed_with_field() {
-        let ir = QueryIR {
-            table: "authors".into(),
-            order_by: Some(vec![
-                ("name".into(), "ASC".into()),
-                ("?".into(), "RANDOM".into()),
-            ]),
-            ..Default::default()
-        };
-
-        let (sql, _) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(
-            sql.contains("ORDER BY") && sql.contains("\"name\" ASC") && sql.contains("RANDOM()"),
-            "expected mixed ORDER BY with field and RANDOM(), got: {sql}"
-        );
-    }
-
-    #[test]
-    fn test_union_all_generates_correct_sql() {
-        let union_ir = QueryIR {
-            table: "posts".into(),
-            cols: Some(vec!["id".into()]),
-            filter_tree: Some(filter_cond("id", "=", rmpv_int(3))),
-            ..Default::default()
-        };
-        let ir = QueryIR {
-            table: "posts".into(),
-            cols: Some(vec!["id".into()]),
-            filter_tree: Some(filter_cond("id", "=", rmpv_int(1))),
-            union_query: Some(Box::new(union_ir)),
-            union_all: Some(true),
-            ..Default::default()
-        };
-        let (sql, params) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(sql.contains("UNION ALL"), "should contain UNION ALL: {sql}");
-        assert_eq!(params.len(), 2, "should have 2 params: {params:?}");
     }
 
     #[test]
@@ -771,54 +579,9 @@ mod tests {
         assert!(sql.contains("unique_emails"), "should have alias: {sql}");
     }
 
-    #[test]
-    fn test_sum_distinct() {
-        let ir = QueryIR {
-            table: "orders".into(),
-            aggregates: Some(vec![oxyde_codec::Aggregate {
-                op: oxyde_codec::AggregateOp::Sum,
-                field: Some("amount".into()),
-                alias: Some("unique_total".into()),
-                distinct: Some(true),
-            }]),
-            ..Default::default()
-        };
-        let (sql, _) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(
-            sql.contains("SUM(DISTINCT"),
-            "should have SUM(DISTINCT: {sql}"
-        );
-    }
-
-    #[test]
-    fn test_emits_returning_dialect_matrix() {
-        let mut ir = QueryIR {
-            op: Operation::Insert,
-            table: "users".into(),
-            values: Some(HashMap::from([("name".into(), rmpv_str("a"))])),
-            returning: Some(true),
-            ..Default::default()
-        };
-        assert!(emits_returning(&ir, Dialect::Postgres));
-        assert!(emits_returning(&ir, Dialect::Sqlite));
-        assert!(
-            !emits_returning(&ir, Dialect::Mysql),
-            "MySQL has no RETURNING"
-        );
-
-        ir.returning = Some(false);
-        assert!(!emits_returning(&ir, Dialect::Postgres));
-
-        ir.returning = None;
-        assert!(!emits_returning(&ir, Dialect::Postgres));
-    }
-
     /// Guard against predicate/builder desync. The contract:
     /// - `RETURNING *` appears iff `emits_returning` says so;
-    /// - INSERT on Postgres/SQLite always carries at least pk-only
     ///   `RETURNING "<pk>"` (the driver reads generated PKs from rows);
-    /// - UPDATE/DELETE and everything on MySQL carry RETURNING only when
-    ///   the predicate is true (i.e. never on MySQL).
     #[test]
     fn test_emits_returning_matches_builder_output() {
         let ops: Vec<QueryIR> = vec![
@@ -845,7 +608,8 @@ mod tests {
 
         for base in ops {
             for returning in [None, Some(false), Some(true)] {
-                for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+                {
+                    let dialect = Dialect::Postgres;
                     let mut ir = base.clone();
                     ir.returning = returning;
                     let (sql, _) = build_sql(&ir, dialect).unwrap();
@@ -859,8 +623,8 @@ mod tests {
                         dialect,
                         sql
                     );
-                    let pk_only_insert = ir.op == Operation::Insert
-                        && matches!(dialect, Dialect::Postgres | Dialect::Sqlite);
+                    let pk_only_insert =
+                        ir.op == Operation::Insert && matches!(dialect, Dialect::Postgres);
                     assert_eq!(
                         full || pk_only_insert,
                         sql.contains("RETURNING"),
@@ -873,26 +637,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn test_insert_carries_pk_returning() {
-        let mut ir = QueryIR {
-            op: Operation::Insert,
-            table: "t".into(),
-            values: Some(HashMap::from([("name".into(), rmpv_str("a"))])),
-            ..Default::default()
-        };
-
-        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
-        assert!(sql.ends_with(r#"RETURNING "id""#), "{sql}");
-
-        ir.pk_column = Some("uuid".into());
-        let (sql, _) = build_sql(&ir, Dialect::Sqlite).unwrap();
-        assert!(sql.ends_with(r#"RETURNING "uuid""#), "{sql}");
-
-        let (sql, _) = build_sql(&ir, Dialect::Mysql).unwrap();
-        assert!(!sql.contains("RETURNING"), "{sql}");
     }
 
     #[test]
@@ -909,5 +653,37 @@ mod tests {
         };
         let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
         assert!(!sql.contains("DISTINCT"), "should NOT have DISTINCT: {sql}");
+    }
+
+    #[test]
+    fn postgres_string_lookups_preserve_escape() {
+        let ir = QueryIR {
+            table: "articles".into(),
+            filter_tree: Some(filter_with_escape(
+                "title",
+                "LIKE",
+                rmpv_str(r"%snake\_case%"),
+                "\\",
+            )),
+            ..Default::default()
+        };
+        let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.contains("LIKE") && sql.contains("ESCAPE"), "{sql}");
+        assert_eq!(params.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod postgres_regressions {
+    use super::*;
+    #[test]
+    fn postgres_is_the_only_dialect() {
+        assert_eq!(
+            serde_json::to_string(&Dialect::Postgres).unwrap(),
+            "\"postgres\""
+        );
+        for name in ["mysql", "sqlite", "mariadb", "unknown"] {
+            assert!(serde_json::from_str::<Dialect>(&format!("\"{name}\"")).is_err());
+        }
     }
 }

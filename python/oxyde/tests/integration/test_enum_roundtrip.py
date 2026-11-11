@@ -10,8 +10,6 @@ from oxyde.db.schema import create_tables
 from oxyde.models.registry import clear_registry, register_table
 from oxyde.queries.raw import execute_raw
 
-from .conftest import _get_url
-
 
 class LiveStatus(str, Enum):
     DRAFT = "draft"
@@ -29,10 +27,10 @@ class EnumRoundTrip(Model):
         table_name = "enum_roundtrip_test"
 
 
-@pytest_asyncio.fixture(params=["postgres", "mysql"])
-async def enum_db(request, tmp_path, _pg_container, _mysql_container):
+@pytest_asyncio.fixture(params=["postgres"])
+async def enum_db(request, postgres_database_url):
     dialect = request.param
-    url = _get_url(dialect, tmp_path, _pg_container, _mysql_container)
+    url = postgres_database_url
 
     clear_registry()
     register_table(EnumRoundTrip, overwrite=True)
@@ -53,13 +51,10 @@ async def enum_db(request, tmp_path, _pg_container, _mysql_container):
 
 
 async def _drop_enum_roundtrip_schema(database: AsyncDatabase, dialect: str) -> None:
-    if dialect == "postgres":
-        await execute_raw(
-            "DROP TABLE IF EXISTS enum_roundtrip_test CASCADE", client=database
-        )
-        await execute_raw("DROP TYPE IF EXISTS live_status_enum CASCADE", client=database)
-    else:
-        await execute_raw("DROP TABLE IF EXISTS enum_roundtrip_test", client=database)
+    await execute_raw(
+        "DROP TABLE IF EXISTS enum_roundtrip_test CASCADE", client=database
+    )
+    await execute_raw("DROP TYPE IF EXISTS live_status_enum CASCADE", client=database)
 
 
 class TestEnumRoundTrip:

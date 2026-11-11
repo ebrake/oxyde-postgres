@@ -135,7 +135,7 @@ pub enum ColumnTypeSpec {
         scale: Option<u32>,
     },
     Json,
-    /// JSONB on Postgres; identical to Json elsewhere.
+    /// PostgreSQL JSONB, with the same binding semantics as Json.
     JsonBinary,
     Enum {
         name: String,

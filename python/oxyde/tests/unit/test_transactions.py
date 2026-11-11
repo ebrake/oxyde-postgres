@@ -15,6 +15,8 @@ from oxyde.db.transaction import (
     AsyncTransaction,
     get_active_transaction,
 )
+
+
 @pytest.fixture
 def reset_transactions():
     """Reset transaction state before each test."""
@@ -150,7 +152,7 @@ class TestAsyncTransaction:
         db = DummyDatabase()
 
         with pytest.raises(ValueError):
-            async with AsyncTransaction(db) as tx:
+            async with AsyncTransaction(db):
                 raise ValueError("test error")
 
         # Should have begun and rolled back
@@ -201,7 +203,7 @@ class TestAtomicContext:
     @pytest.mark.asyncio
     async def test_atomic_with_using(self, mock_tx, mock_get_connection):
         """Test atomic() with using parameter."""
-        async with atomic(using="other") as ctx:
+        async with atomic(using="other"):
             pass
 
         assert ("begin", "other") in mock_tx.calls
@@ -213,8 +215,8 @@ class TestNestedTransactions:
     @pytest.mark.asyncio
     async def test_nested_creates_savepoint(self, mock_tx, mock_get_connection):
         """Test nested atomic() creates savepoint."""
-        async with atomic() as outer:
-            async with atomic() as inner:
+        async with atomic():
+            async with atomic():
                 pass
 
         # Should have created savepoint
@@ -291,7 +293,7 @@ class TestTransactionTimeout:
         """Test timeout as timedelta."""
         from datetime import timedelta
 
-        async with atomic(timeout=timedelta(seconds=10)) as ctx:
+        async with atomic(timeout=timedelta(seconds=10)):
             # Timeout should be normalized to float
             pass
 

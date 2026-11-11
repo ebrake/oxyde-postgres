@@ -48,13 +48,16 @@ class MigrationContext:
         Args:
             mode: Internal mode - "collect" or "execute"
             db_alias: Database alias for execute mode (deprecated, use db_conn)
-            dialect: Database dialect (sqlite, postgres, mysql)
+            dialect: Database dialect (postgres)
             db_conn: Database connection (for execute mode)
-            schema_state: Current schema state (for SQLite table rebuild)
+            schema_state: Current schema state for migration replay
         """
         self._mode = mode
         self._db_alias = db_alias
-        self._dialect = dialect or "sqlite"
+        self._dialect = dialect or "postgres"
+        from oxyde.migrations.utils import validate_dialect
+
+        validate_dialect(self._dialect)
         self._db_conn = db_conn
         self._schema_state = schema_state
         self._operations: list[dict[str, Any]] = []
@@ -67,7 +70,7 @@ class MigrationContext:
         """Get current database dialect.
 
         Returns:
-            Database dialect: "sqlite", "postgres", or "mysql"
+            Database dialect: "postgres"
         """
         return self._dialect
 
@@ -110,8 +113,7 @@ class MigrationContext:
         if self._mode == "collect":
             self._operations.append(op)
         else:
-            if self._dialect == "postgres":
-                self._non_transactional_ddl = True
+            self._non_transactional_ddl = True
             self._execute_operation(op)
 
     def alter_enum_type(
@@ -276,8 +278,6 @@ class MigrationContext:
 
         # For execute mode, build Rust-compatible format with old_field/new_field
         old_field = None
-        table_fields = None
-        table_indexes: list[dict[str, Any]] = []
 
         if self._schema_state:
             table_schema = self._schema_state.tables.get(table)
@@ -287,8 +287,6 @@ class MigrationContext:
                     if field["name"] == field_name:
                         old_field = dict(field)
                         break
-                table_fields = table_schema["fields"]
-                table_indexes = table_schema.get("indexes", [])
 
         if old_field is None:
             # Fallback: create minimal field definition
@@ -337,11 +335,6 @@ class MigrationContext:
             "old_field": old_field,
             "new_field": new_field,
         }
-
-        # For SQLite, include full table schema for rebuild
-        if self._dialect == "sqlite" and table_fields:
-            op["table_fields"] = table_fields
-            op["table_indexes"] = table_indexes
 
         self._execute_operation(op)
 
@@ -553,8 +546,6 @@ class MigrationContext:
 
         Transaction behavior by dialect:
         - PostgreSQL: DDL is transactional except ALTER TYPE ADD VALUE chains
-        - SQLite: DDL is transactional, uses Rust transaction API
-        - MySQL: DDL is NOT transactional (implicit commit), no wrapping
 
         IMPORTANT: We use the Rust transaction API (begin_transaction/execute_in_transaction)
         instead of raw BEGIN/COMMIT SQL because the connection pool may assign different
@@ -599,11 +590,9 @@ class MigrationContext:
             self._non_transactional_ddl = False
 
     def _should_use_transaction(self) -> bool:
-        if self._dialect == "mysql":
-            return False
         if self._non_transactional_ddl:
             return False
-        return self._dialect in ("postgres", "sqlite")
+        return True
 
 
 __all__ = ["MigrationContext"]

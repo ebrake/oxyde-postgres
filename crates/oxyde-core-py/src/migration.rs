@@ -35,7 +35,6 @@ pub(crate) fn migration_compute_diff(old_json: &str, new_json: &str) -> PyResult
 ///
 /// Args:
 ///     operations_json: JSON string with list of migration operations
-///     dialect: Database dialect ("sqlite", "postgres", or "mysql")
 ///
 /// Returns:
 ///     List of SQL statements
@@ -48,9 +47,7 @@ pub(crate) fn migration_to_sql(operations_json: &str, dialect: &str) -> PyResult
         .map_err(|e| PyErr::new::<PyValueError, _>(format!("Failed to parse operations: {e}")))?;
 
     let dialect_enum = match dialect {
-        "sqlite" => Dialect::Sqlite,
         "postgres" => Dialect::Postgres,
-        "mysql" => Dialect::Mysql,
         _ => {
             return Err(PyErr::new::<PyValueError, _>(format!(
                 "Invalid dialect: {dialect}"

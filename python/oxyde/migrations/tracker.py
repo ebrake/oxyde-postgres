@@ -20,35 +20,16 @@ async def ensure_migrations_table(db_alias: str = "default") -> None:
     """
     db_conn = await _get_connection_async(db_alias)
 
-    dialect = detect_dialect(db_conn.url)
+    detect_dialect(db_conn.url)
 
     # Generate dialect-specific SQL
-    if dialect == "sqlite":
-        # SQLite: INTEGER PRIMARY KEY auto-increments automatically
-        create_sql = f"""
-        CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            applied_at TIMESTAMP NOT NULL
-        )
-        """
-    elif dialect == "mysql":
-        create_sql = f"""
-        CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            name VARCHAR(255) NOT NULL UNIQUE,
-            applied_at TIMESTAMP NOT NULL
-        )
-        """
-    else:
-        # PostgreSQL
-        create_sql = f"""
-        CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(255) NOT NULL UNIQUE,
-            applied_at TIMESTAMP NOT NULL
-        )
-        """
+    create_sql = f"""
+    CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL UNIQUE,
+        applied_at TIMESTAMP NOT NULL
+    )
+    """
 
     # Execute using IR
     create_ir = build_raw_sql_ir(sql=create_sql)
@@ -91,28 +72,14 @@ async def record_migration(name: str, db_alias: str = "default") -> None:
 
     db_conn = await _get_connection_async(db_alias)
 
-    dialect = detect_dialect(db_conn.url)
+    detect_dialect(db_conn.url)
 
     # Insert migration record with dialect-specific SQL
-    if dialect == "postgres":
-        insert_sql = f"""
-        INSERT INTO {MIGRATIONS_TABLE} (name, applied_at)
-        VALUES ($1, NOW())
-        """
-        params = [name]
-    elif dialect == "mysql":
-        insert_sql = f"""
-        INSERT INTO {MIGRATIONS_TABLE} (name, applied_at)
-        VALUES (?, NOW())
-        """
-        params = [name]
-    else:
-        # SQLite
-        insert_sql = f"""
-        INSERT INTO {MIGRATIONS_TABLE} (name, applied_at)
-        VALUES (?, datetime('now'))
-        """
-        params = [name]
+    insert_sql = f"""
+    INSERT INTO {MIGRATIONS_TABLE} (name, applied_at)
+    VALUES ($1, NOW())
+    """
+    params = [name]
 
     insert_ir = build_raw_sql_ir(
         sql=insert_sql,
@@ -130,18 +97,12 @@ async def remove_migration(name: str, db_alias: str = "default") -> None:
     """
     db_conn = await _get_connection_async(db_alias)
 
-    dialect = detect_dialect(db_conn.url)
+    detect_dialect(db_conn.url)
 
-    if dialect == "postgres":
-        delete_sql = f"""
-        DELETE FROM {MIGRATIONS_TABLE}
-        WHERE name = $1
-        """
-    else:
-        delete_sql = f"""
-        DELETE FROM {MIGRATIONS_TABLE}
-        WHERE name = ?
-        """
+    delete_sql = f"""
+    DELETE FROM {MIGRATIONS_TABLE}
+    WHERE name = $1
+    """
 
     delete_ir = build_raw_sql_ir(sql=delete_sql, params=[name])
     await db_conn.execute(delete_ir)

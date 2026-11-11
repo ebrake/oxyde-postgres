@@ -3,10 +3,10 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "oxyde-core"
-version = "0.7.1"
-description = "Rust core for Oxyde ORM - high-performance database operations"
-readme = "README.md"
+name = "oxyde-postgres-core"
+version = "0.1.0"
+description = "PostgreSQL 18+ Rust core for Oxyde for PostgreSQL"
+readme = "crates/oxyde-core-py/README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
@@ -30,11 +30,15 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mr-fatalyst/oxyde"
-Documentation = "https://github.com/mr-fatalyst/oxyde#readme"
-Repository = "https://github.com/mr-fatalyst/oxyde"
-Issues = "https://github.com/mr-fatalyst/oxyde/issues"
+Homepage = "https://github.com/ebrake/oxyde-postgres"
+Documentation = "https://github.com/ebrake/oxyde-postgres#readme"
+Repository = "https://github.com/ebrake/oxyde-postgres"
+Issues = "https://github.com/ebrake/oxyde-postgres/issues"
 
 [tool.maturin]
+manifest-path = "crates/oxyde-core-py/Cargo.toml"
 module-name = "_oxyde_core"
 features = ["pyo3/extension-module"]
+
+# Keep the patched driver and its licenses in source releases.
+include = [{ path = "vendor/sqlx-postgres/**/*", format = "sdist" }]

@@ -3,10 +3,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use oxyde_codec::{BulkUpdate, BulkUpdateRow, ColumnTypeSpec, QueryIR};
-use sea_query::{
-    CaseStatement, Cond, Expr, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr,
-    SqliteQueryBuilder, Value,
-};
+use sea_query::{CaseStatement, Cond, Expr, PostgresQueryBuilder, Query, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};
 use crate::filter::build_filter_node;
@@ -96,8 +93,6 @@ pub fn build_bulk_update(
 
     let built = match dialect {
         Dialect::Postgres => query.build(PostgresQueryBuilder),
-        Dialect::Sqlite => query.build(SqliteQueryBuilder),
-        Dialect::Mysql => query.build(MysqlQueryBuilder),
     };
 
     Ok((built.0, built.1 .0))

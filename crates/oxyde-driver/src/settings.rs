@@ -13,12 +13,7 @@ pub struct PoolSettings {
     // Transaction cleanup settings
     pub transaction_timeout: Option<Duration>, // Max age before cleanup (default: 5 min)
     pub transaction_cleanup_interval: Option<Duration>, // How often to run cleanup (default: 60 sec)
-    // SQLite-specific PRAGMA settings
-    pub sqlite_journal_mode: Option<String>,
-    pub sqlite_synchronous: Option<String>,
-    pub sqlite_cache_size: Option<i32>,
-    pub sqlite_busy_timeout: Option<i32>,
-    // TLS settings (PostgreSQL + MySQL)
+    // TLS settings (PostgreSQL)
     pub ssl_mode: Option<String>,
     pub ssl_root_cert: Option<String>,
     pub ssl_client_cert: Option<String>,
@@ -26,9 +21,6 @@ pub struct PoolSettings {
     // PostgreSQL-specific
     pub pg_application_name: Option<String>,
     pub pg_statement_cache_capacity: Option<u32>,
-    // MySQL-specific
-    pub mysql_charset: Option<String>,
-    pub mysql_collation: Option<String>,
 }
 
 impl Default for PoolSettings {
@@ -42,18 +34,12 @@ impl Default for PoolSettings {
             test_before_acquire: Some(false),
             transaction_timeout: Some(Duration::from_secs(300)), // 5 minutes
             transaction_cleanup_interval: Some(Duration::from_secs(60)), // 1 minute
-            sqlite_journal_mode: None,
-            sqlite_synchronous: None,
-            sqlite_cache_size: None,
-            sqlite_busy_timeout: None,
             ssl_mode: None,
             ssl_root_cert: None,
             ssl_client_cert: None,
             ssl_client_key: None,
             pg_application_name: None,
             pg_statement_cache_capacity: None,
-            mysql_charset: None,
-            mysql_collation: None,
         }
     }
 }

@@ -13,7 +13,6 @@ from oxyde.db.pool import (
     _normalize_duration,
     _validate_url_scheme,
 )
-
 from oxyde.db.registry import (
     _CONNECTIONS,
     disconnect_all,
@@ -21,8 +20,9 @@ from oxyde.db.registry import (
     register_connection,
 )
 
+
 async def _mock_pool_backend(pool_name: str) -> str:
-    return "sqlite"
+    return "postgres"
 
 @pytest.fixture(autouse=True)
 def reset_connections():
@@ -41,10 +41,6 @@ class TestPoolSettings:
 
         assert settings.max_connections is None
         assert settings.min_connections is None
-        assert settings.sqlite_journal_mode == "WAL"
-        assert settings.sqlite_synchronous == "NORMAL"
-        assert settings.sqlite_cache_size == 10000
-        assert settings.sqlite_busy_timeout == 5000
 
     def test_custom_settings(self):
         """Test PoolSettings with custom values."""
@@ -65,9 +61,7 @@ class TestPoolSettings:
         settings = PoolSettings()
         payload = settings.to_payload()
 
-        # Should include default SQLite settings
         assert payload is not None
-        assert payload["sqlite_journal_mode"] == "WAL"
 
     def test_to_payload_with_values(self):
         """Test to_payload() with custom values."""
@@ -93,20 +87,6 @@ class TestPoolSettings:
         assert payload["acquire_timeout"] == 5.0
         assert payload["idle_timeout"] == 300.0
 
-    def test_to_payload_sqlite_settings(self):
-        """Test to_payload() includes SQLite settings."""
-        settings = PoolSettings(
-            sqlite_journal_mode="DELETE",
-            sqlite_synchronous="FULL",
-            sqlite_cache_size=5000,
-            sqlite_busy_timeout=10000,
-        )
-        payload = settings.to_payload()
-
-        assert payload["sqlite_journal_mode"] == "DELETE"
-        assert payload["sqlite_synchronous"] == "FULL"
-        assert payload["sqlite_cache_size"] == 5000
-        assert payload["sqlite_busy_timeout"] == 10000
 
     def test_to_payload_transaction_settings(self):
         """Test to_payload() includes transaction settings."""
@@ -156,15 +136,8 @@ class TestValidateUrlScheme:
         _validate_url_scheme("postgresql://user:pass@host/db")
         # Should not raise
 
-    def test_valid_mysql_urls(self):
-        """Test valid MySQL URLs."""
-        _validate_url_scheme("mysql://user:pass@host/db")
         # Should not raise
 
-    def test_valid_sqlite_urls(self):
-        """Test valid SQLite URLs."""
-        _validate_url_scheme("sqlite:///path/to/db.sqlite")
-        _validate_url_scheme("sqlite:///:memory:")
         # Should not raise
 
     def test_invalid_url_raises(self):
@@ -225,12 +198,12 @@ class TestAsyncDatabaseInit:
     def test_init_with_valid_url(self):
         """Test initialization with valid URL."""
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
 
-        assert db.url == "sqlite:///test.db"
+        assert db.url == "postgresql://localhost/test"
         assert db.name == "test"
         assert db.connected is False
 
@@ -245,8 +218,8 @@ class TestAsyncDatabaseInit:
 
     def test_init_auto_registers(self):
         """Test initialization auto-registers by default."""
-        db = AsyncDatabase(
-            url="sqlite:///test.db",
+        AsyncDatabase(
+            url="postgresql://localhost/test",
             name="auto_test",
         )
 
@@ -256,7 +229,7 @@ class TestAsyncDatabaseInit:
         """Test initialization with custom settings."""
         settings = PoolSettings(max_connections=5)
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             settings=settings,
             auto_register=False,
@@ -280,7 +253,7 @@ class TestAsyncDatabaseConnect:
         monkeypatch.setattr("oxyde.db.pool._pool_backend", _mock_pool_backend)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -303,7 +276,7 @@ class TestAsyncDatabaseConnect:
         monkeypatch.setattr("oxyde.db.pool._pool_backend", _mock_pool_backend)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -330,7 +303,7 @@ class TestAsyncDatabaseConnect:
         monkeypatch.setattr("oxyde.db.pool.close_pool", mock_close_pool)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -359,7 +332,7 @@ class TestAsyncDatabaseConnect:
         monkeypatch.setattr("oxyde.db.pool.close_pool", mock_close_pool)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -395,7 +368,7 @@ class TestAsyncDatabaseContextManager:
         monkeypatch.setattr("oxyde.db.pool.close_pool", mock_close_pool)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -414,7 +387,7 @@ class TestAsyncDatabaseExecute:
     async def test_execute_requires_connection(self):
         """Test execute() raises error if not connected."""
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -429,7 +402,7 @@ class TestConnectionRegistry:
     def test_register_connection(self):
         """Test register_connection()."""
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test_reg",
             auto_register=False,
         )
@@ -442,12 +415,12 @@ class TestConnectionRegistry:
     def test_register_connection_overwrite(self):
         """Test register_connection() with overwrite."""
         db1 = AsyncDatabase(
-            url="sqlite:///test1.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
         db2 = AsyncDatabase(
-            url="sqlite:///test2.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -460,12 +433,12 @@ class TestConnectionRegistry:
     def test_register_connection_no_overwrite_raises(self):
         """Test register_connection() without overwrite raises on duplicate."""
         db1 = AsyncDatabase(
-            url="sqlite:///test1.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
         db2 = AsyncDatabase(
-            url="sqlite:///test2.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -487,7 +460,7 @@ class TestConnectionRegistry:
         monkeypatch.setattr("oxyde.db.pool._pool_backend", _mock_pool_backend)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test_get",
         )
 
@@ -519,8 +492,8 @@ class TestConnectionRegistry:
         monkeypatch.setattr("oxyde.db.pool.close_all_pools", mock_close_all_pools)
         monkeypatch.setattr("oxyde.db.registry.close_all_pools", mock_close_all_pools)
 
-        db1 = AsyncDatabase(url="sqlite:///test1.db", name="db1")
-        db2 = AsyncDatabase(url="sqlite:///test2.db", name="db2")
+        db1 = AsyncDatabase(url="postgresql://localhost/test", name="db1")
+        db2 = AsyncDatabase(url="postgresql://localhost/test", name="db2")
 
         await db1.connect()
         await db2.connect()
@@ -553,7 +526,7 @@ class TestEnsureConnected:
         monkeypatch.setattr("oxyde.db.pool._pool_backend", _mock_pool_backend)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )
@@ -577,7 +550,7 @@ class TestEnsureConnected:
         monkeypatch.setattr("oxyde.db.pool._pool_backend", _mock_pool_backend)
 
         db = AsyncDatabase(
-            url="sqlite:///test.db",
+            url="postgresql://localhost/test",
             name="test",
             auto_register=False,
         )

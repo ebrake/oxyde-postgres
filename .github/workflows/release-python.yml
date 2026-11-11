@@ -1,4 +1,4 @@
-name: Release oxyde
+name: Release oxyde-postgres
 
 on:
   push:
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14', '3.15']
 
     steps:
       - uses: actions/checkout@v6.0.2
@@ -63,7 +63,9 @@ jobs:
           path: dist
 
       - name: Install package
-        run: pip install dist/*.whl
+        run: |
+          pip install dist/*.whl
+          python -c "import oxyde, _oxyde_core; print(oxyde.__version__)"
 
   publish:
     name: Publish to PyPI
@@ -71,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/oxyde/
+      url: https://pypi.org/project/oxyde-postgres/
     permissions:
       id-token: write  # For trusted publishing
 
@@ -120,8 +122,8 @@ jobs:
         uses: softprops/action-gh-release@v3.0.0
         with:
           files: dist/*
-          generate_release_notes: true
-          tag_name: ${{ github.ref_name }}
+          body_path: docs/changelog.md
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
   # Deploy docs for minor/major releases
   docs:
@@ -129,4 +131,4 @@ jobs:
     needs: [publish]
     uses: ./.github/workflows/docs.yml
     with:
-      version: ${{ github.ref_name }}
+      version: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}

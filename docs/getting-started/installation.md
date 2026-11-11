@@ -2,13 +2,14 @@
 
 ## Requirements
 
+- PostgreSQL 18+
 - Python 3.10+
 - Rust 1.88+ (for building from source)
 
 ## Install from PyPI
 
 ```bash
-pip install oxyde
+pip install oxyde-postgres
 ```
 
 ## Install from Source
@@ -18,8 +19,8 @@ If you need to build from source (e.g., for development or customization):
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/mr-fatalyst/oxyde.git
-cd oxyde
+git clone https://github.com/ebrake/oxyde-postgres.git
+cd oxyde-postgres
 ```
 
 ### 2. Create Virtual Environment
@@ -64,8 +65,6 @@ Oxyde uses SQLx under the hood. Database drivers are included — no additional 
 | Database | Connection URL |
 |----------|----------------|
 | PostgreSQL | `postgresql://user:pass@host:5432/db` |
-| SQLite | `sqlite:///path/to/file.db` or `sqlite:///:memory:` |
-| MySQL | `mysql://user:pass@host:3306/db` |
 
 
 ## Next Steps

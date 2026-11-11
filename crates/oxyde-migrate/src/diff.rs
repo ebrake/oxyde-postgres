@@ -668,7 +668,6 @@ pub fn compute_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> 
                             table: name.clone(),
                             old_field: old_field.clone(),
                             new_field: new_field.clone(),
-                            // Note: these will be filled by Python for SQLite migrations
                             table_fields: None,
                             table_indexes: None,
                             table_foreign_keys: None,

@@ -10,7 +10,7 @@ blog/
 ├── oxyde_config.py    # Oxyde configuration
 ├── migrations/        # Migration files
 ├── main.py            # Application logic
-└── blog.db            # SQLite database (auto-created)
+└── oxyde_config.py    # PostgreSQL 18+ connection settings
 ```
 
 ## Step 1: Initialize Project
@@ -25,8 +25,8 @@ oxyde init
 When prompted:
 
 - Models module: `models`
-- Dialect: `sqlite`
-- Database URL: `sqlite:///blog.db`
+- Dialect: `postgres`
+- Database URL: `postgresql://localhost/app`
 - Migrations directory: `migrations`
 
 ## Step 2: Define Models
@@ -133,7 +133,7 @@ from models import Author, Post, Tag
 
 async def main():
     # Connect to database
-    await db.init(default="sqlite:///blog.db")
+    await db.init(default="postgresql://localhost/app")
 
     try:
         # Create sample data

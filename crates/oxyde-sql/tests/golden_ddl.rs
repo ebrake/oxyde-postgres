@@ -38,15 +38,11 @@ fn arr(item: S) -> S {
     }
 }
 
-const ALL_DIALECTS: &[Dialect] = &[Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite];
-const PG_MYSQL: &[Dialect] = &[Dialect::Postgres, Dialect::Mysql];
-const PG_SQLITE: &[Dialect] = &[Dialect::Postgres, Dialect::Sqlite];
+const ALL_DIALECTS: &[Dialect] = &[Dialect::Postgres];
 
 fn dialect_name(dialect: Dialect) -> &'static str {
     match dialect {
         Dialect::Postgres => "postgres",
-        Dialect::Mysql => "mysql",
-        Dialect::Sqlite => "sqlite",
     }
 }
 
@@ -411,8 +407,6 @@ fn add_drop_column_table() {
     snap("add_drop_column_table", &ops, ALL_DIALECTS);
 }
 
-// ── 6. AlterColumn (PG: per-change statements; MySQL: MODIFY COLUMN) ───────
-
 #[test]
 fn alter_column() {
     let ops = [
@@ -477,34 +471,7 @@ fn alter_column() {
             table_checks: None,
         },
     ];
-    snap("alter_column", &ops, PG_MYSQL);
-}
-
-// ── 7. AlterColumn on SQLite: full table rebuild ────────────────────────────
-
-#[test]
-fn alter_column_sqlite_rebuild() {
-    let ops = [MigrationOp::AlterColumn {
-        table: "users".into(),
-        old_field: field("age", S::BigInteger),
-        new_field: field("age", S::String { length: None }).max_len(50),
-        table_fields: Some(vec![
-            field("id", S::BigInteger).pk().auto_inc(),
-            field("name", S::String { length: None }),
-            field("age", S::BigInteger),
-        ]),
-        table_indexes: Some(vec![index("ix_users_name", &["name"])]),
-        table_foreign_keys: Some(vec![fk(
-            "fk_users_org",
-            &["org_id"],
-            "org",
-            &["id"],
-            Some("CASCADE"),
-            None,
-        )]),
-        table_checks: Some(vec![check("chk_users_age", "age >= 0")]),
-    }];
-    snap("alter_column_sqlite_rebuild", &ops, &[Dialect::Sqlite]);
+    snap("alter_column", &ops, ALL_DIALECTS);
 }
 
 // ── 8. Index operations ─────────────────────────────────────────────────────
@@ -559,7 +526,6 @@ fn index_ops() {
     snap("index_ops", &ops, ALL_DIALECTS);
 }
 
-/// Partial indexes are unsupported on MySQL (returns Err) — PG/SQLite only.
 #[test]
 fn index_partial() {
     let partial = IndexDef {
@@ -573,10 +539,8 @@ fn index_partial() {
         table: "users".into(),
         index: partial,
     }];
-    snap("index_partial", &ops, PG_SQLITE);
+    snap("index_partial", &ops, ALL_DIALECTS);
 }
-
-// ── 9. Foreign key operations (SQLite returns Err — excluded) ──────────────
 
 #[test]
 fn foreign_key_ops() {
@@ -598,10 +562,8 @@ fn foreign_key_ops() {
             fk_def: None,
         },
     ];
-    snap("foreign_key_ops", &ops, PG_MYSQL);
+    snap("foreign_key_ops", &ops, ALL_DIALECTS);
 }
-
-// ── 10. Check constraint operations (SQLite returns Err — excluded) ────────
 
 #[test]
 fn check_ops() {
@@ -616,7 +578,7 @@ fn check_ops() {
             check_def: None,
         },
     ];
-    snap("check_ops", &ops, PG_MYSQL);
+    snap("check_ops", &ops, ALL_DIALECTS);
 }
 
 // ── 11. Rename operations ───────────────────────────────────────────────────
@@ -628,7 +590,6 @@ fn rename_ops() {
             old_name: "users_old".into(),
             new_name: "users".into(),
         },
-        // MySQL CHANGE with full column definition
         MigrationOp::RenameColumn {
             table: "users".into(),
             old_name: "login".into(),
@@ -639,7 +600,6 @@ fn rename_ops() {
                     .unique(),
             ),
         },
-        // MySQL fallback path without field_def (emits a warning comment)
         MigrationOp::RenameColumn {
             table: "users".into(),
             old_name: "addr".into(),
@@ -661,8 +621,6 @@ fn enum_spec(name: &str, values: &[&str]) -> S {
 
 /// PG: CREATE TYPE (incl. schema-qualified quoting) before CREATE TABLE,
 /// native type name for scalar and `[]` for array columns.
-/// MySQL: no CREATE TYPE, inline ENUM(...); arrays fall back to JSON.
-/// SQLite: TEXT everywhere.
 #[test]
 fn enum_create_table() {
     let ops = [
@@ -701,8 +659,6 @@ fn enum_create_table() {
 
 /// Deliberately unsafe input: the dependent index is authored before the enum
 /// value addition. The renderer must preserve that order unchanged rather than
-/// silently repairing it. PG: native ALTER TYPE ... ADD VALUE; MySQL:
-/// progressive MODIFY COLUMN per referencing column; SQLite: nothing.
 #[test]
 fn enum_add_value_ordering() {
     let ops = [
@@ -752,7 +708,6 @@ fn enum_drop_and_manual_alter() {
 /// Column type conversion to/from an enum. PG needs the `::text::<target>`
 /// USING bridge (no implicit cast in either direction) — this is the 0.6→0.7
 /// upgrade path for pre-existing str-Enum fields stored as TEXT.
-/// SQLite goes through table rebuild — excluded here.
 #[test]
 fn alter_column_enum() {
     let ops = [
@@ -780,5 +735,5 @@ fn alter_column_enum() {
             table_checks: None,
         },
     ];
-    snap("alter_column_enum", &ops, PG_MYSQL);
+    snap("alter_column_enum", &ops, ALL_DIALECTS);
 }

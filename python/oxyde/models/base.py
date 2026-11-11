@@ -666,7 +666,6 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                 if self.password and not self.password.startswith("$2b$"):
                     self.password = await hash_password(self.password)
         """
-        pass
 
     async def post_save(
         self,
@@ -685,7 +684,6 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                 if is_create:
                     await send_welcome_email(self.email)
         """
-        pass
 
     async def pre_delete(self) -> None:
         """Called before delete. Override to add custom logic.
@@ -694,7 +692,6 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             async def pre_delete(self) -> None:
                 await cleanup_user_files(self.id)
         """
-        pass
 
     async def post_delete(self) -> None:
         """Called after delete. Override to add custom logic.
@@ -703,7 +700,6 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             async def post_delete(self) -> None:
                 await notify_admin(f"User {self.email} deleted")
         """
-        pass
 
     # =========================================================================
     # Instance Methods

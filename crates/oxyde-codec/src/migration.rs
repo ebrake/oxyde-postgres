@@ -89,7 +89,6 @@ pub struct FieldDef {
     pub default: Option<String>,
     #[serde(default)]
     pub auto_increment: bool,
-    /// Max length for str fields (used for VARCHAR(N) on PG/MySQL)
     #[serde(default)]
     pub max_length: Option<u32>,
     /// Total digits for decimal fields (used for DECIMAL(M,D))
@@ -264,7 +263,6 @@ pub enum MigrationOp {
         table: String,
         old_name: String,
         new_name: String,
-        /// Full field definition - required for MySQL CHANGE command
         #[serde(skip_serializing_if = "Option::is_none")]
         field_def: Option<FieldDef>,
     },
@@ -272,16 +270,12 @@ pub enum MigrationOp {
         table: String,
         old_field: FieldDef,
         new_field: FieldDef,
-        /// Full table schema for SQLite rebuild (optional)
         #[serde(skip_serializing_if = "Option::is_none")]
         table_fields: Option<Vec<FieldDef>>,
-        /// Table indexes for SQLite rebuild (optional)
         #[serde(skip_serializing_if = "Option::is_none")]
         table_indexes: Option<Vec<IndexDef>>,
-        /// Table foreign keys for SQLite rebuild (optional)
         #[serde(skip_serializing_if = "Option::is_none")]
         table_foreign_keys: Option<Vec<ForeignKeyDef>>,
-        /// Table check constraints for SQLite rebuild (optional)
         #[serde(skip_serializing_if = "Option::is_none")]
         table_checks: Option<Vec<CheckDef>>,
     },

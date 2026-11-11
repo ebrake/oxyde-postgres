@@ -47,15 +47,5 @@ async def drop_tables(database: AsyncDatabase) -> None:
     if not table_names:
         return
 
-    if dialect == "postgres":
-        tables = ", ".join(table_names)
-        await execute_raw(f"DROP TABLE IF EXISTS {tables} CASCADE", client=database)
-    elif dialect == "mysql":
-        await execute_raw("SET FOREIGN_KEY_CHECKS = 0", client=database)
-        for t in table_names:
-            await execute_raw(f"DROP TABLE IF EXISTS {t}", client=database)
-        await execute_raw("SET FOREIGN_KEY_CHECKS = 1", client=database)
-    else:
-        # SQLite: typically fresh file per test, but support drop anyway
-        for t in table_names:
-            await execute_raw(f"DROP TABLE IF EXISTS {t}", client=database)
+    tables = ", ".join(table_names)
+    await execute_raw(f"DROP TABLE IF EXISTS {tables} CASCADE", client=database)

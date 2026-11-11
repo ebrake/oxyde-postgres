@@ -1,18 +1,15 @@
 //! Backend-agnostic query execution traits.
 //!
 //! This module provides traits that abstract over the three database backends
-//! (PostgreSQL, MySQL, SQLite), reducing code duplication in query execution.
 
 use async_trait::async_trait;
 use oxyde_codec::ColumnTypeSpec;
 use sea_query::Value;
 use std::collections::HashMap;
 
-use crate::bind::{bind_mysql, bind_postgres, bind_sqlite};
+use crate::bind::bind_postgres;
 use crate::convert::encoder::{encode_stream, encode_stream_mutation_returning, RelationInfo};
-use crate::convert::mysql::MySqlEncoder;
 use crate::convert::postgres::PgEncoder;
-use crate::convert::sqlite::SqliteEncoder;
 use crate::error::{DriverError, Result};
 use crate::pool::DbPool;
 use crate::transaction::DbTx;
@@ -115,20 +112,6 @@ impl PoolExec for DbPool {
                     .await
                     .map_err(exec_err)
             }
-            DbPool::MySql(pool) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let stream = query.fetch(pool);
-                encode_stream::<MySqlEncoder, _>(stream, col_types, None)
-                    .await
-                    .map_err(exec_err)
-            }
-            DbPool::Sqlite(pool) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
-                let stream = query.fetch(pool);
-                encode_stream::<SqliteEncoder, _>(stream, col_types, None)
-                    .await
-                    .map_err(exec_err)
-            }
         }
     }
 
@@ -144,20 +127,6 @@ impl PoolExec for DbPool {
                 let query = bind_postgres(sqlx::query(sql), params)?;
                 let stream = query.fetch(pool);
                 encode_stream::<PgEncoder, _>(stream, col_types, Some(relations))
-                    .await
-                    .map_err(exec_err)
-            }
-            DbPool::MySql(pool) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let stream = query.fetch(pool);
-                encode_stream::<MySqlEncoder, _>(stream, col_types, Some(relations))
-                    .await
-                    .map_err(exec_err)
-            }
-            DbPool::Sqlite(pool) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
-                let stream = query.fetch(pool);
-                encode_stream::<SqliteEncoder, _>(stream, col_types, Some(relations))
                     .await
                     .map_err(exec_err)
             }
@@ -178,20 +147,6 @@ impl PoolExec for DbPool {
                     .await
                     .map_err(exec_err)
             }
-            DbPool::MySql(pool) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let stream = query.fetch(pool);
-                encode_stream_mutation_returning::<MySqlEncoder, _>(stream, col_types)
-                    .await
-                    .map_err(exec_err)
-            }
-            DbPool::Sqlite(pool) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
-                let stream = query.fetch(pool);
-                encode_stream_mutation_returning::<SqliteEncoder, _>(stream, col_types)
-                    .await
-                    .map_err(exec_err)
-            }
         }
     }
 
@@ -202,24 +157,12 @@ impl PoolExec for DbPool {
                 let result = query.execute(pool).await.map_err(stmt_err)?;
                 Ok(result.rows_affected())
             }
-            DbPool::MySql(pool) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let result = query.execute(pool).await.map_err(stmt_err)?;
-                Ok(result.rows_affected())
-            }
-            DbPool::Sqlite(pool) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
-                let result = query.execute(pool).await.map_err(stmt_err)?;
-                Ok(result.rows_affected())
-            }
         }
     }
 
     fn backend_name(&self) -> &'static str {
         match self {
             DbPool::Postgres(_) => "Postgres",
-            DbPool::MySql(_) => "MySQL",
-            DbPool::Sqlite(_) => "SQLite",
         }
     }
 }
@@ -244,20 +187,6 @@ impl ConnExec for DbTx {
                     .await
                     .map_err(exec_err)
             }
-            DbTx::MySql(tx) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let stream = query.fetch(&mut **tx);
-                encode_stream::<MySqlEncoder, _>(stream, col_types, None)
-                    .await
-                    .map_err(exec_err)
-            }
-            DbTx::Sqlite(tx) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
-                let stream = query.fetch(&mut **tx);
-                encode_stream::<SqliteEncoder, _>(stream, col_types, None)
-                    .await
-                    .map_err(exec_err)
-            }
         }
     }
 
@@ -273,20 +202,6 @@ impl ConnExec for DbTx {
                 let query = bind_postgres(sqlx::query(sql), params)?;
                 let stream = query.fetch(&mut **tx);
                 encode_stream::<PgEncoder, _>(stream, col_types, Some(relations))
-                    .await
-                    .map_err(exec_err)
-            }
-            DbTx::MySql(tx) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let stream = query.fetch(&mut **tx);
-                encode_stream::<MySqlEncoder, _>(stream, col_types, Some(relations))
-                    .await
-                    .map_err(exec_err)
-            }
-            DbTx::Sqlite(tx) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
-                let stream = query.fetch(&mut **tx);
-                encode_stream::<SqliteEncoder, _>(stream, col_types, Some(relations))
                     .await
                     .map_err(exec_err)
             }
@@ -307,20 +222,6 @@ impl ConnExec for DbTx {
                     .await
                     .map_err(exec_err)
             }
-            DbTx::MySql(tx) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let stream = query.fetch(&mut **tx);
-                encode_stream_mutation_returning::<MySqlEncoder, _>(stream, col_types)
-                    .await
-                    .map_err(exec_err)
-            }
-            DbTx::Sqlite(tx) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
-                let stream = query.fetch(&mut **tx);
-                encode_stream_mutation_returning::<SqliteEncoder, _>(stream, col_types)
-                    .await
-                    .map_err(exec_err)
-            }
         }
     }
 
@@ -328,16 +229,6 @@ impl ConnExec for DbTx {
         match self {
             DbTx::Postgres(tx) => {
                 let query = bind_postgres(sqlx::query(sql), params)?;
-                let result = query.execute(&mut **tx).await.map_err(stmt_err)?;
-                Ok(result.rows_affected())
-            }
-            DbTx::MySql(tx) => {
-                let query = bind_mysql(sqlx::query(sql), params)?;
-                let result = query.execute(&mut **tx).await.map_err(stmt_err)?;
-                Ok(result.rows_affected())
-            }
-            DbTx::Sqlite(tx) => {
-                let query = bind_sqlite(sqlx::query(sql), params)?;
                 let result = query.execute(&mut **tx).await.map_err(stmt_err)?;
                 Ok(result.rows_affected())
             }

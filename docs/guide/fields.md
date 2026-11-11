@@ -136,8 +136,6 @@ name: str = Field(db_type="VARCHAR(255)")
 data: dict = Field(db_type="JSONB")
 tags: list[str] = Field(db_type="TEXT[]")
 
-# MySQL-specific
-content: str = Field(db_type="LONGTEXT")
 ```
 
 ### Array Inner Constraints
@@ -155,7 +153,6 @@ prices: list[Annotated[Decimal, Field(max_digits=10, decimal_places=2)]] | None 
 # PostgreSQL: NUMERIC(10,2)[]
 ```
 
-On MySQL and SQLite arrays fall back to `JSON` / `TEXT`, so inner constraints only affect DDL on PostgreSQL.
 
 ## Enum Fields
 
@@ -191,13 +188,13 @@ Only the *values* must be strings — subclassing `str` is idiomatic but not req
 
 ### Per-Dialect Behavior
 
-| | PostgreSQL | MySQL | SQLite |
-|---|---|---|---|
-| Column type | native type, `CREATE TYPE "post_status_enum" AS ENUM (...)` | inline `ENUM('draft','published','archived')` | `TEXT` |
-| Query parameters | cast to the type: `$1::"post_status_enum"` | plain string | plain string |
-| `list[PostStatus]` | `"post_status_enum"[]` | `JSON` | `TEXT` (JSON-encoded) |
-| Database-level enforcement | yes | yes | **none** |
-| `ORDER BY` on the column | declaration order | declaration order | lexicographic |
+| | PostgreSQL |
+|---|---|
+| Column type | native type, `CREATE TYPE "post_status_enum" AS ENUM (...)` |
+| Query parameters | cast to the type: `$1::"post_status_enum"` |
+| `list[PostStatus]` | `"post_status_enum"[]` |
+| Database-level enforcement | yes |
+| `ORDER BY` on the column | declaration order |
 
 ### Type Naming and Collisions
 
@@ -230,9 +227,6 @@ status: PostStatus = Field(default=PostStatus.DRAFT, db_type="TEXT")
     Enum field 'Priority' must define string values. Use a str-valued Enum for
     database enum columns, or annotate the field as int for integer storage.
     ```
-
-!!! warning "SQLite has no enum enforcement"
-    On SQLite the column is plain `TEXT` and no `CHECK` constraint is generated — a raw SQL write can store any string. Validation happens in Pydantic only. Sorting also differs: `ORDER BY status` follows declaration order on PostgreSQL/MySQL but is lexicographic on SQLite.
 
 See [Migrations — Enum Migrations](migrations.md#enum-migrations) for how enum changes are applied.
 
@@ -354,7 +348,6 @@ from decimal import Decimal
 
 price: Decimal = Field(max_digits=10, decimal_places=2)
 # PostgreSQL: NUMERIC(10,2)
-# MySQL:      DECIMAL(10,2)
 ```
 
 These constraints are tracked by migrations — changing `max_digits` or `decimal_places` generates an `ALTER COLUMN`.

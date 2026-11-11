@@ -270,7 +270,7 @@ def build_update_ir(
         values: Values to update
         filter_tree: Filter conditions
         column_types: ColumnTypeSpec dicts for typed parameter binding.
-        column_db_types: Array db_type overrides by column, for filter casts.
+        column_db_types: Column db_type overrides for array casts and JSON lookups.
         model: Model name
         returning: Whether to return updated rows
         bulk_update: Bulk update rows

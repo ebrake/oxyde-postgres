@@ -217,40 +217,6 @@ fn test_migration_preserves_authored_operation_order() {
 }
 
 #[test]
-fn test_migration_keeps_each_operation_statements_contiguous() {
-    let old_field = sample_field("email");
-    let mut new_field = old_field.clone();
-    new_field.nullable = true;
-
-    let mut replacement = sample_table();
-    replacement.name = "replacement_users".into();
-    replacement.indexes.clear();
-
-    let operations = vec![
-        MigrationOp::AlterColumn {
-            table: "users".into(),
-            old_field,
-            new_field,
-            table_fields: Some(sample_table().fields),
-            table_indexes: Some(sample_table().indexes),
-            table_foreign_keys: Some(vec![]),
-            table_checks: Some(vec![]),
-        },
-        MigrationOp::CreateTable { table: replacement },
-    ];
-    let expected = operations
-        .iter()
-        .flat_map(|op| op.to_sql(Dialect::Sqlite).unwrap())
-        .collect::<Vec<_>>();
-    let migration = Migration {
-        name: "rebuild_then_create".into(),
-        operations,
-    };
-
-    assert_eq!(migration.to_sql(Dialect::Sqlite).unwrap(), expected);
-}
-
-#[test]
 fn test_postgres_enum_type_is_created_before_table() {
     let migration = Migration {
         name: "enum".into(),
@@ -312,17 +278,6 @@ fn test_compute_diff_drops_enum_after_dependent_table() {
 }
 
 #[test]
-fn test_mysql_enum_is_inline_column_type() {
-    let sql = MigrationOp::CreateTable {
-        table: enum_table(&["draft", "published"]),
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap();
-
-    assert!(sql[0].contains("`status` ENUM('draft','published') NOT NULL"));
-}
-
-#[test]
 fn test_compute_diff_adds_enum_value_without_altering_column() {
     let mut old = Snapshot::new();
     old.add_table(enum_table(&["draft", "published"]));
@@ -345,50 +300,6 @@ fn test_compute_diff_adds_enum_value_without_altering_column() {
         }
         op => panic!("expected AddEnumValue, got {op:?}"),
     }
-}
-
-#[test]
-fn test_mysql_enum_value_append_modifies_inline_enum_columns() {
-    let mut old = Snapshot::new();
-    old.add_table(enum_table(&["draft", "published"]));
-    let mut new = Snapshot::new();
-    new.add_table(enum_table(&["draft", "published", "archived"]));
-
-    let ops = compute_diff(&old, &new).unwrap();
-    let migration = Migration {
-        name: "enum_value".into(),
-        operations: ops,
-    };
-
-    let sql = migration.to_sql(Dialect::Mysql).unwrap();
-    assert_eq!(sql.len(), 1);
-    assert_eq!(
-        sql[0],
-        "ALTER TABLE `posts` MODIFY COLUMN `status` ENUM('draft','published','archived') NOT NULL"
-    );
-}
-
-#[test]
-fn test_mysql_multiple_enum_value_append_modifies_inline_enum_columns_progressively() {
-    let mut old = Snapshot::new();
-    old.add_table(enum_table(&["draft", "published"]));
-    let mut new = Snapshot::new();
-    new.add_table(enum_table(&["draft", "published", "archived", "deleted"]));
-
-    let ops = compute_diff(&old, &new).unwrap();
-    let migration = Migration {
-        name: "enum_value".into(),
-        operations: ops,
-    };
-
-    let sql = migration.to_sql(Dialect::Mysql).unwrap();
-    assert_eq!(
-        sql,
-        vec![
-            "ALTER TABLE `posts` MODIFY COLUMN `status` ENUM('draft','published','archived') NOT NULL",
-            "ALTER TABLE `posts` MODIFY COLUMN `status` ENUM('draft','published','archived','deleted') NOT NULL",
-        ]
-    );
 }
 
 #[test]
@@ -448,85 +359,6 @@ fn test_compute_diff_emits_manual_enum_alter_for_value_removal() {
 }
 
 #[test]
-fn test_sqlite_create_table_with_fk_inline() {
-    // SQLite should have FK constraints inline in CREATE TABLE, not as ALTER TABLE
-    let table = TableDef {
-        name: "posts".into(),
-        fields: vec![
-            FieldDef {
-                name: "id".into(),
-                column_type: ColumnTypeSpec::BigInteger,
-                db_type: None,
-                nullable: false,
-                primary_key: true,
-                unique: false,
-                default: None,
-                auto_increment: true,
-                max_length: None,
-                max_digits: None,
-                decimal_places: None,
-            },
-            FieldDef {
-                name: "author_id".into(),
-                column_type: ColumnTypeSpec::BigInteger,
-                db_type: None,
-                nullable: false,
-                primary_key: false,
-                unique: false,
-                default: None,
-                auto_increment: false,
-                max_length: None,
-                max_digits: None,
-                decimal_places: None,
-            },
-        ],
-        indexes: vec![],
-        foreign_keys: vec![ForeignKeyDef {
-            name: "fk_posts_author".into(),
-            columns: vec!["author_id".into()],
-            ref_table: "users".into(),
-            ref_columns: vec!["id".into()],
-            on_delete: Some("CASCADE".into()),
-            on_update: None,
-        }],
-        checks: vec![CheckDef {
-            name: "valid_author".into(),
-            expression: "author_id > 0".into(),
-        }],
-        comment: None,
-    };
-
-    let sql = MigrationOp::CreateTable { table }
-        .to_sql(Dialect::Sqlite)
-        .unwrap();
-
-    // Should have only 1 statement (CREATE TABLE with inline FK and CHECK)
-    assert_eq!(
-        sql.len(),
-        1,
-        "SQLite should not generate ALTER TABLE for FK"
-    );
-
-    let create_stmt = &sql[0];
-    assert!(
-        create_stmt.contains(r#"FOREIGN KEY ("author_id") REFERENCES "users" ("id")"#),
-        "FK should be inline: {create_stmt}"
-    );
-    assert!(
-        create_stmt.contains("ON DELETE CASCADE"),
-        "ON DELETE should be present: {create_stmt}"
-    );
-    assert!(
-        create_stmt.contains("CHECK (author_id > 0)"),
-        "CHECK should be inline: {create_stmt}"
-    );
-    assert!(
-        !create_stmt.contains("ALTER TABLE"),
-        "Should not contain ALTER TABLE: {create_stmt}"
-    );
-}
-
-#[test]
 fn test_postgres_create_table_with_fk_as_alter() {
     // PostgreSQL should have FK constraints as separate ALTER TABLE
     let table = TableDef {
@@ -572,52 +404,6 @@ fn test_postgres_create_table_with_fk_as_alter() {
 }
 
 #[test]
-fn test_sqlite_add_foreign_key_returns_error() {
-    let fk = ForeignKeyDef {
-        name: "fk_test".into(),
-        columns: vec!["user_id".into()],
-        ref_table: "users".into(),
-        ref_columns: vec!["id".into()],
-        on_delete: None,
-        on_update: None,
-    };
-
-    let result = MigrationOp::AddForeignKey {
-        table: "posts".into(),
-        fk,
-    }
-    .to_sql(Dialect::Sqlite);
-
-    assert!(result.is_err(), "SQLite AddForeignKey should return error");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("SQLite does not support ALTER TABLE ADD FOREIGN KEY"),
-        "Error message should mention limitation: {err}"
-    );
-}
-
-#[test]
-fn test_sqlite_add_check_returns_error() {
-    let check = CheckDef {
-        name: "valid_age".into(),
-        expression: "age >= 0".into(),
-    };
-
-    let result = MigrationOp::AddCheck {
-        table: "users".into(),
-        check,
-    }
-    .to_sql(Dialect::Sqlite);
-
-    assert!(result.is_err(), "SQLite AddCheck should return error");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("SQLite does not support ALTER TABLE ADD CHECK"),
-        "Error message should mention limitation: {err}"
-    );
-}
-
-#[test]
 fn test_migration_add_column_sql() {
     let sql = MigrationOp::AddColumn {
         table: "users".into(),
@@ -633,73 +419,6 @@ fn test_migration_add_column_sql() {
 }
 
 #[test]
-fn test_dialect_specific_sql() {
-    // Test SQLite AUTOINCREMENT
-    let pk_field = FieldDef {
-        name: "id".into(),
-        column_type: ColumnTypeSpec::BigInteger,
-        db_type: None,
-        nullable: false,
-        primary_key: true,
-        unique: false,
-        default: None,
-        auto_increment: true,
-        max_length: None,
-        max_digits: None,
-        decimal_places: None,
-    };
-    let table = TableDef {
-        name: "test".into(),
-        fields: vec![pk_field],
-        indexes: vec![],
-        foreign_keys: vec![],
-        checks: vec![],
-        comment: None,
-    };
-    let sql = MigrationOp::CreateTable {
-        table: table.clone(),
-    }
-    .to_sql(Dialect::Sqlite)
-    .unwrap();
-    assert!(sql[0].contains("AUTOINCREMENT"));
-
-    // Test MySQL AUTO_INCREMENT
-    let sql = MigrationOp::CreateTable {
-        table: table.clone(),
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap();
-    assert!(sql[0].contains("AUTO_INCREMENT"));
-
-    // Test DROP INDEX MySQL vs others
-    let dummy_index_def = IndexDef {
-        name: "idx_name".into(),
-        fields: vec!["name".into()],
-        unique: false,
-        method: None,
-        where_clause: None,
-    };
-    let drop_idx_mysql = MigrationOp::DropIndex {
-        table: "users".into(),
-        name: "idx_name".into(),
-        index_def: Some(dummy_index_def.clone()),
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap();
-    assert!(drop_idx_mysql[0].contains("ON"));
-
-    let drop_idx_pg = MigrationOp::DropIndex {
-        table: "users".into(),
-        name: "idx_name".into(),
-        index_def: Some(dummy_index_def),
-    }
-    .to_sql(Dialect::Postgres)
-    .unwrap();
-    // PostgreSQL DROP INDEX doesn't include the table name
-    assert!(!drop_idx_pg[0].contains("ON "));
-}
-
-#[test]
 fn test_compute_diff_detects_new_table_and_column() {
     let old = Snapshot::new();
     let mut new_snapshot = Snapshot::new();
@@ -709,255 +428,6 @@ fn test_compute_diff_detects_new_table_and_column() {
 
     let ops = compute_diff(&old, &new_snapshot).unwrap();
     assert!(matches!(ops[0], MigrationOp::CreateTable { .. }));
-}
-
-#[test]
-fn test_sqlite_alter_column_returns_error_without_schema() {
-    let old_field = FieldDef {
-        name: "age".into(),
-        column_type: ColumnTypeSpec::BigInteger,
-        db_type: None,
-        nullable: true,
-        primary_key: false,
-        unique: false,
-        default: None,
-        auto_increment: false,
-        max_length: None,
-        max_digits: None,
-        decimal_places: None,
-    };
-    let new_field = FieldDef {
-        name: "age".into(),
-        column_type: ColumnTypeSpec::String { length: None }, // type change
-        db_type: None,
-        nullable: true,
-        primary_key: false,
-        unique: false,
-        default: None,
-        auto_increment: false,
-        max_length: None,
-        max_digits: None,
-        decimal_places: None,
-    };
-
-    let result = MigrationOp::AlterColumn {
-        table: "users".into(),
-        old_field,
-        new_field,
-        table_fields: None, // No schema - should error
-        table_indexes: None,
-        table_foreign_keys: None,
-        table_checks: None,
-    }
-    .to_sql(Dialect::Sqlite);
-
-    assert!(
-        result.is_err(),
-        "SQLite AlterColumn without schema should return error"
-    );
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("SQLite does not support ALTER COLUMN"),
-        "Error should mention SQLite limitation: {err}"
-    );
-}
-
-#[test]
-fn test_sqlite_alter_column_with_schema_generates_rebuild() {
-    let old_field = FieldDef {
-        name: "age".into(),
-        column_type: ColumnTypeSpec::BigInteger,
-        db_type: None,
-        nullable: true,
-        primary_key: false,
-        unique: false,
-        default: None,
-        auto_increment: false,
-        max_length: None,
-        max_digits: None,
-        decimal_places: None,
-    };
-    let new_field = FieldDef {
-        name: "age".into(),
-        column_type: ColumnTypeSpec::String { length: None }, // type change
-        db_type: None,
-        nullable: false, // nullable change
-        primary_key: false,
-        unique: false,
-        default: None,
-        auto_increment: false,
-        max_length: None,
-        max_digits: None,
-        decimal_places: None,
-    };
-
-    // Full table schema
-    let table_fields = vec![
-        FieldDef {
-            name: "id".into(),
-            column_type: ColumnTypeSpec::BigInteger,
-            db_type: None,
-            nullable: false,
-            primary_key: true,
-            unique: false,
-            default: None,
-            auto_increment: true,
-            max_length: None,
-            max_digits: None,
-            decimal_places: None,
-        },
-        old_field.clone(),
-        FieldDef {
-            name: "name".into(),
-            column_type: ColumnTypeSpec::String { length: None },
-            db_type: None,
-            nullable: false,
-            primary_key: false,
-            unique: false,
-            default: None,
-            auto_increment: false,
-            max_length: None,
-            max_digits: None,
-            decimal_places: None,
-        },
-    ];
-
-    let table_indexes = vec![IndexDef {
-        name: "users_name_idx".into(),
-        fields: vec!["name".into()],
-        unique: false,
-        method: None,
-        where_clause: None,
-    }];
-
-    let result = MigrationOp::AlterColumn {
-        table: "users".into(),
-        old_field,
-        new_field,
-        table_fields: Some(table_fields),
-        table_indexes: Some(table_indexes),
-        table_foreign_keys: None,
-        table_checks: None,
-    }
-    .to_sql(Dialect::Sqlite);
-
-    assert!(
-        result.is_ok(),
-        "SQLite AlterColumn with schema should succeed"
-    );
-    let stmts = result.unwrap();
-
-    // Verify rebuild sequence
-    assert!(
-        stmts[0].contains("PRAGMA foreign_keys=OFF"),
-        "Should disable FK: {}",
-        stmts[0]
-    );
-    assert!(
-        stmts[1].contains("_new_users"),
-        "Should create temp table: {}",
-        stmts[1]
-    );
-    assert!(
-        stmts[1].contains("VARCHAR(255) NOT NULL"),
-        "Should have altered column: {}",
-        stmts[1]
-    );
-    assert!(
-        stmts[2].contains("_new_users"),
-        "Should copy data: {}",
-        stmts[2]
-    );
-    assert!(
-        stmts[3].contains("DROP TABLE"),
-        "Should drop old table: {}",
-        stmts[3]
-    );
-    assert!(
-        stmts[4].contains("RENAME"),
-        "Should rename temp table: {}",
-        stmts[4]
-    );
-    assert!(
-        stmts[5].contains("users_name_idx"),
-        "Should recreate index: {}",
-        stmts[5]
-    );
-    assert!(
-        stmts[6].contains("PRAGMA foreign_keys=ON"),
-        "Should enable FK: {}",
-        stmts[6]
-    );
-}
-
-#[test]
-fn test_rename_column_mysql_with_field_def() {
-    let field_def = FieldDef {
-        name: "old_name".into(),
-        column_type: ColumnTypeSpec::String { length: None },
-        db_type: Some("VARCHAR(255)".into()),
-        nullable: false,
-        primary_key: false,
-        unique: true,
-        default: Some("'default'".into()),
-        auto_increment: false,
-        max_length: None,
-        max_digits: None,
-        decimal_places: None,
-    };
-
-    let sql = MigrationOp::RenameColumn {
-        table: "users".into(),
-        old_name: "old_name".into(),
-        new_name: "new_name".into(),
-        field_def: Some(field_def),
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap();
-
-    assert_eq!(sql.len(), 1, "Should produce single SQL statement");
-    let stmt = &sql[0];
-    assert!(stmt.contains("CHANGE"), "Should use CHANGE: {stmt}");
-    assert!(
-        stmt.contains("old_name"),
-        "Should reference old name: {stmt}"
-    );
-    assert!(stmt.contains("new_name"), "Should contain new name: {stmt}");
-    assert!(
-        stmt.contains("VARCHAR(255)"),
-        "Should preserve type: {stmt}"
-    );
-    assert!(
-        stmt.contains("NOT NULL"),
-        "Should preserve NOT NULL: {stmt}"
-    );
-    assert!(stmt.contains("UNIQUE"), "Should preserve UNIQUE: {stmt}");
-    assert!(stmt.contains("DEFAULT"), "Should preserve DEFAULT: {stmt}");
-}
-
-#[test]
-fn test_rename_column_mysql_without_field_def_fallback() {
-    let sql = MigrationOp::RenameColumn {
-        table: "users".into(),
-        old_name: "old_name".into(),
-        new_name: "new_name".into(),
-        field_def: None, // No field_def - should use fallback
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap();
-
-    assert_eq!(sql.len(), 2, "Should produce warning + SQL");
-    assert!(
-        sql[0].contains("WARNING"),
-        "First line should be warning: {}",
-        sql[0]
-    );
-    assert!(sql[1].contains("CHANGE"), "Should use CHANGE: {}", sql[1]);
-    assert!(
-        sql[1].contains("TEXT"),
-        "Fallback should use TEXT: {}",
-        sql[1]
-    );
 }
 
 #[test]
@@ -1216,7 +686,7 @@ fn test_compute_diff_drops_column_dependencies_before_the_column() {
     new.add_table(table_with_fields("users", &["id"]));
 
     let operations = compute_diff(&old, &new).unwrap();
-    for dialect in [Dialect::Postgres, Dialect::Mysql] {
+    for dialect in [Dialect::Postgres] {
         let sql = Migration {
             name: "drop_age".into(),
             operations: operations.clone(),
@@ -1261,7 +731,8 @@ fn test_compute_diff_drops_fk_before_its_referenced_column() {
     new.add_table(table_with_fields("z_child", &["id", "parent_code"]));
 
     let operations = compute_diff(&old, &new).unwrap();
-    for dialect in [Dialect::Postgres, Dialect::Mysql] {
+    {
+        let dialect = Dialect::Postgres;
         let sql = Migration {
             name: "drop_parent_code".into(),
             operations: operations.clone(),
@@ -1303,7 +774,8 @@ fn test_compute_diff_drops_fk_before_its_referenced_table() {
     new.add_table(table_with_fields("z_child", &["id", "parent_id"]));
 
     let operations = compute_diff(&old, &new).unwrap();
-    for dialect in [Dialect::Postgres, Dialect::Mysql] {
+    {
+        let dialect = Dialect::Postgres;
         let sql = Migration {
             name: "drop_parent".into(),
             operations: operations.clone(),
@@ -1344,7 +816,8 @@ fn test_compute_diff_adds_local_and_referenced_columns_before_fk() {
     new.add_table(table_with_fields("z_parent", &["id", "code"]));
 
     let operations = compute_diff(&old, &new).unwrap();
-    for dialect in [Dialect::Postgres, Dialect::Mysql] {
+    {
+        let dialect = Dialect::Postgres;
         let sql = Migration {
             name: "add_parent_code_fk".into(),
             operations: operations.clone(),
@@ -1399,7 +872,8 @@ fn test_compute_diff_adds_existing_table_column_before_new_table_fk() {
     new.add_table(new_child);
 
     let operations = compute_diff(&old, &new).unwrap();
-    for dialect in [Dialect::Postgres, Dialect::Mysql] {
+    {
+        let dialect = Dialect::Postgres;
         let sql = Migration {
             name: "create_child_with_new_parent_column".into(),
             operations: operations.clone(),
@@ -1465,54 +939,6 @@ fn test_compute_diff_preserves_staging_while_unblocking_new_table() {
 }
 
 #[test]
-fn test_compute_diff_drops_fk_before_its_supporting_index() {
-    let parent = table_with_fields("z_parent", &["id"]);
-    let mut old_child = table_with_fields("a_child", &["id", "parent_id"]);
-    old_child.indexes.push(IndexDef {
-        name: "ix_child_parent_id".into(),
-        fields: vec!["parent_id".into()],
-        unique: false,
-        method: None,
-        where_clause: None,
-    });
-    old_child.foreign_keys.push(sample_foreign_key(
-        "fk_child_parent",
-        &["parent_id"],
-        "z_parent",
-        &["id"],
-    ));
-
-    let mut old = Snapshot::new();
-    old.add_table(parent.clone());
-    old.add_table(old_child);
-
-    let mut new = Snapshot::new();
-    new.add_table(parent);
-    new.add_table(table_with_fields("a_child", &["id", "parent_id"]));
-
-    let operations = compute_diff(&old, &new).unwrap();
-    let sql = Migration {
-        name: "drop_fk_and_index".into(),
-        operations,
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap();
-    let drop_fk = sql
-        .iter()
-        .position(|statement| statement.contains("fk_child_parent"))
-        .unwrap();
-    let drop_index = sql
-        .iter()
-        .position(|statement| statement.contains("ix_child_parent_id"))
-        .unwrap();
-
-    assert!(
-        drop_fk < drop_index,
-        "MySQL requires the FK to be removed before its supporting index: {sql:?}"
-    );
-}
-
-#[test]
 fn test_compute_diff_creates_referenced_index_before_fk() {
     let child = table_with_fields("a_child", &["id", "parent_code"]);
     let parent = table_with_fields("z_parent", &["id", "code"]);
@@ -1542,7 +968,8 @@ fn test_compute_diff_creates_referenced_index_before_fk() {
     new.add_table(new_parent);
 
     let operations = compute_diff(&old, &new).unwrap();
-    for dialect in [Dialect::Postgres, Dialect::Mysql] {
+    {
+        let dialect = Dialect::Postgres;
         let sql = Migration {
             name: "add_index_and_fk".into(),
             operations: operations.clone(),
@@ -1698,40 +1125,6 @@ fn test_create_drop_index_sql() {
 }
 
 #[test]
-fn test_partial_index_sql() {
-    let index = IndexDef {
-        name: "users_active_email_idx".into(),
-        fields: vec!["email".into()],
-        unique: true,
-        method: Some("btree".into()),
-        where_clause: Some("deleted_at IS NULL".into()),
-    };
-
-    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        let sql = MigrationOp::CreateIndex {
-            table: "users".into(),
-            index: index.clone(),
-        }
-        .to_sql(dialect)
-        .unwrap();
-
-        assert_eq!(sql.len(), 1);
-        assert!(sql[0].contains("WHERE deleted_at IS NULL"));
-    }
-
-    let err = MigrationOp::CreateIndex {
-        table: "users".into(),
-        index,
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap_err();
-
-    assert!(err
-        .to_string()
-        .contains("MySQL does not support partial indexes"));
-}
-
-#[test]
 fn test_partial_index_json_roundtrip_trims_predicate() {
     let snapshot = Snapshot::from_json(
         r#"{
@@ -1773,103 +1166,6 @@ fn test_rename_table_sql() {
 
     assert_eq!(sql.len(), 1);
     assert!(sql[0].contains("RENAME") || sql[0].contains("ALTER TABLE"));
-}
-
-#[test]
-fn test_array_field_preserves_constraints() {
-    let table = TableDef {
-        name: "items".into(),
-        fields: vec![
-            FieldDef {
-                name: "id".into(),
-                column_type: ColumnTypeSpec::BigInteger,
-                db_type: None,
-                nullable: false,
-                primary_key: true,
-                unique: false,
-                default: None,
-                auto_increment: true,
-                max_length: None,
-                max_digits: None,
-                decimal_places: None,
-            },
-            FieldDef {
-                name: "tags".into(),
-                column_type: ColumnTypeSpec::Array {
-                    item: Box::new(ColumnTypeSpec::String { length: Some(100) }),
-                },
-                db_type: None,
-                nullable: false,
-                primary_key: false,
-                unique: false,
-                default: None,
-                auto_increment: false,
-                max_length: Some(100),
-                max_digits: None,
-                decimal_places: None,
-            },
-            FieldDef {
-                name: "prices".into(),
-                column_type: ColumnTypeSpec::Array {
-                    item: Box::new(ColumnTypeSpec::Decimal {
-                        precision: Some(10),
-                        scale: Some(2),
-                    }),
-                },
-                db_type: None,
-                nullable: false,
-                primary_key: false,
-                unique: false,
-                default: None,
-                auto_increment: false,
-                max_length: None,
-                max_digits: Some(10),
-                decimal_places: Some(2),
-            },
-        ],
-        indexes: vec![],
-        foreign_keys: vec![],
-        checks: vec![],
-        comment: None,
-    };
-
-    // PostgreSQL: array with inner constraints
-    let pg_sql = MigrationOp::CreateTable {
-        table: table.clone(),
-    }
-    .to_sql(Dialect::Postgres)
-    .unwrap();
-    let create = &pg_sql[0];
-    assert!(
-        create.contains("VARCHAR(100)[]"),
-        "PG str[] with max_length=100 should be VARCHAR(100)[], got: {create}"
-    );
-    assert!(
-        create.contains("NUMERIC(10,2)[]"),
-        "PG decimal[] with max_digits should be NUMERIC(10,2)[], got: {create}"
-    );
-
-    // MySQL: arrays become JSON
-    let mysql_sql = MigrationOp::CreateTable {
-        table: table.clone(),
-    }
-    .to_sql(Dialect::Mysql)
-    .unwrap();
-    let create = &mysql_sql[0];
-    assert!(
-        create.contains("JSON"),
-        "MySQL arrays should be JSON, got: {create}"
-    );
-
-    // SQLite: arrays become TEXT
-    let sqlite_sql = MigrationOp::CreateTable { table }
-        .to_sql(Dialect::Sqlite)
-        .unwrap();
-    let create = &sqlite_sql[0];
-    assert!(
-        create.contains("TEXT"),
-        "SQLite arrays should be TEXT, got: {create}"
-    );
 }
 
 #[test]

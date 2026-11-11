@@ -67,14 +67,14 @@ def _check_migration_dependency(
 
 
 async def _acquire_migration_lock(
-    db_conn: AsyncDatabase, dialect: str
+    db_conn: AsyncDatabase, _dialect: str
 ) -> tuple[bool, int | None]:
     """Acquire advisory lock on a dedicated connection.
 
     Uses begin_transaction to pin a connection, ensuring the lock is held
     on the same connection until explicitly released. This prevents the pool
     from routing acquire and release to different connections (advisory locks
-    are session-scoped in PostgreSQL and MySQL).
+    are session-scoped in PostgreSQL).
 
     Args:
         db_conn: Database connection
@@ -84,40 +84,20 @@ async def _acquire_migration_lock(
         Tuple of (lock_acquired, lock_tx_id). lock_tx_id must be passed
         to _release_migration_lock to release on the same connection.
     """
-    if dialect == "sqlite":
-        return True, None
 
     # Pin a connection via transaction so acquire and release use the same session
     tx_id = await begin_transaction(db_conn.name)
 
     try:
-        if dialect == "postgres":
-            sql = f"SELECT pg_try_advisory_lock({MIGRATION_LOCK_KEY})"
-            ir = build_raw_sql_ir(sql=sql)
-            ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
-            result_bytes = await execute_in_transaction(db_conn.name, tx_id, ir_bytes)
-            result = parse_query_result(result_bytes)
-            if result and result[0].get("pg_try_advisory_lock", False):
-                return True, tx_id
-            await commit_transaction(tx_id)
-            return False, None
-
-        elif dialect == "mysql":
-            sql = "SELECT GET_LOCK('oxyde_migration', 0)"
-            ir = build_raw_sql_ir(sql=sql)
-            ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
-            result_bytes = await execute_in_transaction(db_conn.name, tx_id, ir_bytes)
-            result = parse_query_result(result_bytes)
-            if result and len(result) > 0:
-                val = list(result[0].values())[0]
-                if val == 1:
-                    return True, tx_id
-            await commit_transaction(tx_id)
-            return False, None
-
-        # Unknown dialect — release connection, proceed without lock
+        sql = f"SELECT pg_try_advisory_lock({MIGRATION_LOCK_KEY})"
+        ir = build_raw_sql_ir(sql=sql)
+        ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
+        result_bytes = await execute_in_transaction(db_conn.name, tx_id, ir_bytes)
+        result = parse_query_result(result_bytes)
+        if result and result[0].get("pg_try_advisory_lock", False):
+            return True, tx_id
         await commit_transaction(tx_id)
-        return True, None
+        return False, None
 
     except Exception:
         try:
@@ -128,7 +108,7 @@ async def _acquire_migration_lock(
 
 
 async def _release_migration_lock(
-    db_conn: AsyncDatabase, dialect: str, lock_tx_id: int | None
+    db_conn: AsyncDatabase, _dialect: str, lock_tx_id: int | None
 ) -> None:
     """Release advisory lock and close the dedicated connection.
 
@@ -141,17 +121,10 @@ async def _release_migration_lock(
         return
 
     try:
-        if dialect == "postgres":
-            sql = f"SELECT pg_advisory_unlock({MIGRATION_LOCK_KEY})"
-            ir = build_raw_sql_ir(sql=sql)
-            ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
-            await execute_in_transaction(db_conn.name, lock_tx_id, ir_bytes)
-
-        elif dialect == "mysql":
-            sql = "SELECT RELEASE_LOCK('oxyde_migration')"
-            ir = build_raw_sql_ir(sql=sql)
-            ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
-            await execute_in_transaction(db_conn.name, lock_tx_id, ir_bytes)
+        sql = f"SELECT pg_advisory_unlock({MIGRATION_LOCK_KEY})"
+        ir = build_raw_sql_ir(sql=sql)
+        ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
+        await execute_in_transaction(db_conn.name, lock_tx_id, ir_bytes)
 
         await commit_transaction(lock_tx_id)
 
@@ -314,7 +287,7 @@ async def apply_migrations(
                 # Execute upgrade (collects SQL statements)
                 module.upgrade(ctx)
 
-                # Execute collected SQL (wrapped in transaction for postgres/sqlite)
+                # Execute collected SQL (wrapped in transaction for postgres)
                 await ctx._execute_collected_sql()
 
                 # Update schema state with this migration's operations

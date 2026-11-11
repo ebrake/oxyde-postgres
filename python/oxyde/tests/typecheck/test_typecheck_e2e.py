@@ -10,8 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import oxyde
 import pytest
+
+import oxyde
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 OXYDE_PARENT = str(Path(oxyde.__file__).parent.parent)

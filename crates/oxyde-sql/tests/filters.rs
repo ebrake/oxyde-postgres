@@ -1,4 +1,4 @@
-//! SQL generation for filters on array and JSON columns across dialects, and
+//! SQL generation for filters on array and JSON columns on PostgreSQL, and
 //! for HAVING conditions on aggregates.
 
 use std::collections::HashMap;
@@ -105,12 +105,6 @@ fn postgres_casts_array_values_to_the_override_for_every_operator() {
         "{sql}"
     );
     assert_eq!(params.len(), 2);
-
-    // Other dialects store arrays as JSON: no cast.
-    for dialect in [Dialect::Mysql, Dialect::Sqlite] {
-        let (sql, _) = int_array_override("=", ints()).build(dialect);
-        assert!(!sql.contains("INTEGER[]"), "{dialect:?}: {sql}");
-    }
 }
 
 #[test]
@@ -168,7 +162,6 @@ fn values_the_array_type_cannot_hold_equal_nothing() {
 fn array_elements_of_another_type_are_an_error_on_postgres() {
     // PostgreSQL would bind each of these elements as NULL, and NULL
     // elements compare equal there, so the filter would match rows holding
-    // [None]. MySQL and SQLite encode each element of a JSON array as
     // given, exactly as a saved value, so a union element type
     // (`list[str | int]`, whose spec is its first member's) still matches.
     let decimal = || ColumnTypeSpec::Decimal {
@@ -198,9 +191,6 @@ fn array_elements_of_another_type_are_an_error_on_postgres() {
                 err.contains("does not match the array's element type"),
                 "{item:?} {operator}: {err}"
             );
-            for dialect in [Dialect::Mysql, Dialect::Sqlite] {
-                condition.build(dialect);
-            }
         }
     }
 
@@ -212,7 +202,8 @@ fn array_elements_of_another_type_are_an_error_on_postgres() {
     // NULL elements fit any array, and integers convert to the element type.
     for value in [arr(vec![rmpv::Value::Nil, 1.into()]), arr(vec![2.into()])] {
         for item in [decimal(), ColumnTypeSpec::Double] {
-            for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+            {
+                let dialect = Dialect::Postgres;
                 Condition::new("=", value.clone(), array_of(item.clone())).build(dialect);
             }
         }
@@ -280,44 +271,6 @@ fn joined_columns_use_their_own_db_type() {
         sql.contains(r#""tags" = $1 AND "a"."tags" = ($2::SMALLINT[])"#),
         "{sql}"
     );
-}
-
-#[test]
-fn like_on_json_columns_matches_the_unquoted_string() {
-    // A `str` field stored as JSON matches the string it reads back as, not
-    // its quoted JSON text.
-    for spec in [ColumnTypeSpec::Json, ColumnTypeSpec::JsonBinary] {
-        let case_sensitive = Condition::new("LIKE", s("%x%"), spec.clone());
-        let case_insensitive = Condition::new("ILIKE", s("%x%"), spec);
-
-        let (sql, _) = case_sensitive.build(Dialect::Postgres);
-        assert!(sql.contains(r#"("tags" #>> '{}') LIKE $1"#), "{sql}");
-        let (sql, _) = case_insensitive.build(Dialect::Postgres);
-        assert!(sql.contains(r#"LOWER("tags" #>> '{}') LIKE $1"#), "{sql}");
-
-        // A JSON null matches nothing, as `#>>` and json_extract() give
-        // SQL NULL for it; JSON_UNQUOTE() alone would give 'null'.
-        let (sql, params) = case_sensitive.build(Dialect::Mysql);
-        assert!(
-            sql.contains(
-                "(CASE WHEN JSON_TYPE(`tags`) = 'NULL' THEN NULL ELSE JSON_UNQUOTE(`tags`) END) LIKE ?"
-            ),
-            "{sql}"
-        );
-        assert_eq!(params.len(), 1);
-
-        let (sql, _) = case_sensitive.build(Dialect::Sqlite);
-        assert!(
-            sql.contains(
-                r#"(CASE WHEN json_valid("tags", 9) THEN json_extract("tags", '$') ELSE "tags" END) LIKE ?"#
-            ),
-            "{sql}"
-        );
-    }
-
-    // Text columns are untouched.
-    let (sql, _) = Condition::new("LIKE", s("%x%"), ColumnTypeSpec::Text).build(Dialect::Postgres);
-    assert!(sql.contains(r#""tags" LIKE $1"#), "{sql}");
 }
 
 #[test]

@@ -22,7 +22,7 @@ graph TD
         Driver --> Sqlx["sqlx"]
     end
 
-    Sqlx -->|"query"| Database[(PostgreSQL / SQLite / MySQL)]
+    Sqlx -->|"query"| Database[(PostgreSQL 18+)]
     Database -->|"rows"| Sqlx
     Sqlx --> Encode["oxyde-driver<br/>(encode to msgpack)"]
     Encode -->|"MessagePack bytes"| MP_IN["msgpack.unpackb()"]
@@ -109,8 +109,6 @@ pub fn build_sql(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value>)>
 
 pub enum Dialect {
     Postgres,
-    Sqlite,
-    Mysql,
 }
 ```
 
@@ -120,7 +118,7 @@ pub enum Dialect {
 
 **Location**: `crates/oxyde-driver/src/`
 
-Modules: `pool/` (registry, handle, api), `transaction/` (registry, inner, api), `convert/` (encoder, postgres, sqlite, mysql), `execute/` (query, insert, traits), `bind/`, `explain/`.
+Modules: `pool/` (registry, handle, api), `transaction/` (registry, inner, api), `convert/` (encoder, postgres), `execute/` (query, insert, traits), `bind/`, `explain/`.
 
 Key components:
 
@@ -137,8 +135,6 @@ pub struct PoolHandle {
 
 pub enum DbPool {
     Postgres(PgPool),
-    MySql(MySqlPool),
-    Sqlite(SqlitePool),
 }
 
 // Transaction management

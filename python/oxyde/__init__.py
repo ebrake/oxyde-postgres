@@ -44,7 +44,7 @@ Example:
         class Meta:
             is_table = True
 
-    async with db.connect("sqlite://app.db"):
+    async with db.connect("postgresql://localhost/app"):
         user = await User.objects.create(name="Alice")
         users = await User.objects.filter(name__startswith="A").all()
 """
@@ -94,7 +94,7 @@ from oxyde.queries import (
     execute_raw,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.1.0"
 
 
 def __getattr__(name: str) -> type:

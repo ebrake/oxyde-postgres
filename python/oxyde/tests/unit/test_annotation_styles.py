@@ -11,11 +11,8 @@ inside exec() with the future import.
 
 from typing import Optional
 
-import pytest
-
 from oxyde import Field, Model
 from oxyde.models.registry import registered_tables
-
 
 # ─── FK: direct type (Author defined above) ──────────────────────────
 

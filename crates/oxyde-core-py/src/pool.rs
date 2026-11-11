@@ -132,7 +132,6 @@ pub(crate) fn rollback_to_savepoint(
 }
 
 /// Get the database backend type for a named pool -> Coroutine[str].
-/// Returns "postgres", "mysql", or "sqlite".
 #[pyfunction]
 pub(crate) fn pool_backend(py: Python<'_>, pool_name: String) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -141,8 +140,6 @@ pub(crate) fn pool_backend(py: Python<'_>, pool_name: String) -> PyResult<Bound<
             .map_err(|e| crate::errors::driver_err(&e))?;
         Ok(match backend {
             DatabaseBackend::Postgres => "postgres",
-            DatabaseBackend::MySql => "mysql",
-            DatabaseBackend::Sqlite => "sqlite",
         })
     })
 }

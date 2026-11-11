@@ -287,7 +287,7 @@ class NotNullViolationError(IntegrityError):    # NOT NULL
 class CheckViolationError(IntegrityError):      # CHECK
 ```
 
-The kind is reported by the Rust driver through sqlx's cross-dialect error kinds — no error-message text is parsed — so the classification works the same on PostgreSQL, MySQL and SQLite.
+The kind is reported by the Rust driver through sqlx's PostgreSQL error kinds; no error-message text is parsed.
 
 ```python
 from oxyde import UniqueViolationError, ForeignKeyViolationError

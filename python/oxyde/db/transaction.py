@@ -100,25 +100,39 @@ except ImportError:
     async def _execute_in_transaction(
         pool_name: str, tx_id: int, ir_bytes: bytes
     ) -> bytes:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _begin_transaction(pool_name: str) -> int:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _commit_transaction(tx_id: int) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _rollback_transaction(tx_id: int) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _create_savepoint(tx_id: int, savepoint_name: str) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _rollback_to_savepoint(tx_id: int, savepoint_name: str) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
     async def _release_savepoint(tx_id: int, savepoint_name: str) -> None:
-        raise RuntimeError("Rust core module not available. Please install oxyde-core.")
+        raise RuntimeError(
+            "Rust core module not available. Please install oxyde-postgres-core."
+        )
 
 
 # Active transactions per connection (ContextVar for async safety)

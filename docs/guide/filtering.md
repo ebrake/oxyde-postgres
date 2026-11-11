@@ -157,31 +157,26 @@ await Article.objects.filter(tags__contains=["rust"]).all()
 await Article.objects.filter(tags__contained_by=("rust", "python", "go")).all()
 await Article.objects.filter(tags__overlap=["rust", "python"]).all()
 
-# Objects are compared as whole values (PostgreSQL and MySQL)
+# Objects are compared as whole values (PostgreSQL)
 await Article.objects.filter(blocks__contains=[{"type": "code", "lang": "rust"}]).all()
 ```
 
 How elements are compared:
 
 - The array is treated as a set: order and duplicates do not matter.
-- On PostgreSQL and MySQL, objects match only as complete values (key order
+- On PostgreSQL, objects match only as complete values (key order
   is ignored). `{"a": 1}` does not match an element `{"a": 1, "b": 2}`.
-  Arrays nested inside elements keep their order. SQLite raises an error for
-  an object or nested array in the list (see the backend notes).
+  Arrays nested inside elements keep their order.
 - Strings are case-sensitive, booleans never equal numbers, and equal numbers
   match (`1` and `1.0`; a `Decimal` array stored as `1.50` matches `1.5`).
-  MySQL compares non-integer JSON numbers, and SQLite compares `Decimal`
-  arrays, as floating point, so values beyond double precision may compare
-  equal there. In a `Decimal` array, an element that is not a number
+  In a `Decimal` array, an element that is not a number
   (written by another tool) never matches.
 - `None` in the list matches a null element.
 - An empty list: `contains=[]` matches every array, `overlap=[]` matches
   none, and `contained_by=[]` matches only empty arrays.
 - A NULL column never matches, nor does its negation (SQL NULL semantics).
   A JSON value that is not an array (an object, a string, JSON `null`) does not
-  match, so `exclude(...)` includes it. On SQLite, which does not validate JSON
-  columns, neither does stored text that is not valid JSON, nor a BLOB;
-  SQLite's binary JSONB is read as the JSON it holds.
+  match, so `exclude(...)` includes it.
 
 Elements must fit the field's element type: `tags__contains=[1]` on a
 `list[str]` field raises an error rather than silently matching nothing.
@@ -203,14 +198,6 @@ Backend notes:
   compared element by element instead, which scans rows. JSON(B) columns
   compare elements individually; `contains` checks `@>` first, which a GIN
   index on the column can serve, while `contained_by` and `overlap` scan rows.
-- **MySQL** evaluates the lookups row by row with `JSON_TABLE` (MySQL 8.0.4+);
-  multi-valued indexes are not used.
-- **SQLite** evaluates the lookups row by row with `json_each()`. The
-  generated SQL is plain SQLite and runs on any connection with SQLite 3.45
-  or later, which reads JSONB. Only scalar elements are compared: an object
-  or nested array in the list raises an error, while stored ones simply do
-  not match a scalar. `Decimal` arrays compare as floating point, and stored
-  integers beyond 64 bits lose precision when `json_each()` reads them.
 
 ## Q Expressions
 
@@ -326,7 +313,7 @@ users = await User.objects.filter(status="active").exclude(role="bot").all()
 - `in`, `isnull`
 
 UUID comparisons follow the database's UUID ordering. PostgreSQL compares its
-native UUID type; SQLite and MySQL compare the stored canonical UUID text.
+native UUID type.
 Ordering does not necessarily reflect creation or commit time.
 
 ```python

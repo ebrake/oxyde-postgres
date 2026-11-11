@@ -1,186 +1,74 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/mr-fatalyst/oxyde/master/logo.png" alt="Logo" width="200">
-</p>
+# Oxyde for PostgreSQL
 
-<p align="center"> <b>Oxyde ORM</b> is a type-safe, Pydantic-centric asynchronous ORM with a high-performance Rust core designed for clarity, speed, and reliability. </p>
+Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.com/mr-fatalyst/oxyde): a type-safe, Pydantic-centric asynchronous ORM with a high-performance Rust core designed for clarity, speed, and reliability. It builds on Oxyde's great work and optimizes it for PostgreSQL with bug fixes and PostgreSQL-specific features.
 
-<p align="center"> Inspired by the elegance of <a href="https://www.djangoproject.com/">Django's ORM</a>, Oxyde focuses on explicitness over magic, providing a modern developer-friendly workflow with predictable behavior and strong typing throughout. </p>
-
-<p align="center">
-  <img src="https://img.shields.io/github/license/mr-fatalyst/oxyde">
-  <img src="https://github.com/mr-fatalyst/oxyde/actions/workflows/test.yml/badge.svg">
-  <img src="https://img.shields.io/pypi/v/oxyde">
-  <img src="https://img.shields.io/pypi/pyversions/oxyde">
-  <img src="https://static.pepy.tech/badge/oxyde" alt="PyPI Downloads">
-</p>
-
----
-
-> **Heads up!** Oxyde is a young project under active development. The API may evolve between minor versions. Feedback, bug reports, and ideas are very welcome. Feel free to [open an issue](https://github.com/mr-fatalyst/oxyde/issues)!
+**Requires PostgreSQL 18+ and Python 3.10+.** The Rust core checks the server version when connecting. Both `postgres://` and `postgresql://` connection URLs are supported.
 
 ## Features
 
-- **Django-style API** — Familiar `Model.objects.filter()` syntax
-- **Pydantic v2 models** — Full validation, type hints, serialization
-- **Async-first** — Built for modern async Python with `asyncio`
-- **Rust performance** — SQL generation and execution in native Rust
-- **Multi-database** — PostgreSQL, SQLite, MySQL support
-- **Transactions** — `transaction.atomic()` context manager with savepoints
-- **Migrations** — Django-style `makemigrations` and `migrate` CLI
+- Pydantic v2 models with validation, type hints, and serialization.
+- Familiar `Model.objects.filter()` queries, joins, aggregates, and bulk operations.
+- Native PostgreSQL arrays, JSONB, enums, UUIDs, decimals, `RETURNING`, and row locks.
+- Array and JSON lookups: `contains`, `contained_by`, and `overlap`.
+- Async transactions with nested savepoints and public transaction-depth reporting.
+- Schema migrations with PostgreSQL advisory locking and transactional DDL.
+- Rust SQL generation, connection pooling, and execution, with Python 3.15 wheel support.
+- Cache-disabled unnamed statements for PostgreSQL/PgBouncer, including cold custom-type decoding without replaying queries.
 
-## Performance
-
-Benchmarks vs popular Python ORMs (avg ops/sec, higher is better):
-
-| Database   | Oxyde | Tortoise | Piccolo | Django | SQLAlchemy | SQLModel | Peewee |
-|------------|-------|----------|---------|--------|------------|----------|--------|
-| PostgreSQL | 1,475 | 888      | 932     | 736    | 445        | 431      | 80     |
-| MySQL      | 1,239 | 794      | —       | 714    | 536        | 505      | 461    |
-| SQLite     | 2,525 | 1,882    | 469     | 1,294  | 588        | 567      | 548    |
-
-Full benchmark report: **[Documentation](https://oxyde.fatalyst.dev/latest/advanced/benchmarks/)**
+The initial fork release is **0.1.0**, currently in preparation. [First-release notes](docs/changelog.md) list every addition and its source.
 
 ## Installation
 
-```bash
-pip install oxyde
-```
-
-## Quick Start
-
-### 1. Initialize Project
+After the first release is published:
 
 ```bash
-oxyde init
+pip install oxyde-postgres
 ```
 
-This creates `oxyde_config.py` with your database settings and model paths.
+The distribution names are `oxyde-postgres` and `oxyde-postgres-core`. Python imports remain `oxyde`, the native module remains `_oxyde_core`, and the CLI remains `oxyde`. Use a separate virtual environment from upstream Oxyde because the packages share these import names.
 
-### 2. Define Models
+To build this checkout:
+
+```bash
+uv venv --python 3.13
+source .venv/bin/activate
+uv pip install maturin
+maturin develop --manifest-path crates/oxyde-core-py/Cargo.toml
+uv pip install -e './python[dev]'
+```
+
+## Quick start
 
 ```python
-# models.py
-from oxyde import Model, Field
+import asyncio
+from oxyde import Field, Model, db
+from oxyde.db.schema import create_tables
 
 class User(Model):
     id: int | None = Field(default=None, db_pk=True)
     name: str
     email: str = Field(db_unique=True)
-    age: int | None = Field(default=None)
+    tags: list[str] = Field(default_factory=list)
 
     class Meta:
         is_table = True
-```
-
-### 3. Create Tables
-
-```bash
-oxyde makemigrations
-oxyde migrate
-```
-
-### 4. Use It
-
-```python
-import asyncio
-from oxyde import db
-from models import User
 
 async def main():
-    await db.init(default="sqlite:///app.db")
-
-    # Create
-    user = await User.objects.create(name="Alice", email="alice@example.com", age=30)
-
-    # Read
-    users = await User.objects.filter(age__gte=18).all()
-    user = await User.objects.get(id=1)
-
-    # Update
-    user.age = 31
-    await user.save()
-
-    # Delete
-    await user.delete()
-
-    await db.close()
+    await db.init(default="postgresql://user:password@localhost:5432/app")
+    try:
+        connection = await db.get_connection()
+        await create_tables(connection)
+        await User.objects.create(name="Alice", email="alice@example.com", tags=["python"])
+        users = await User.objects.filter(tags__contains=["python"]).all()
+        print(users)
+    finally:
+        await db.close()
 
 asyncio.run(main())
 ```
 
-## Transactions
+For managed schema changes, run `oxyde init`, `oxyde makemigrations`, and `oxyde migrate`. See the [documentation](docs/index.md), [connection guide](docs/guide/connections.md), and [contributor guide](.github/CONTRIBUTING.md).
 
-```python
-from oxyde.db import transaction
+## Credit and license
 
-async with transaction.atomic():
-    user = await User.objects.create(name="Alice", email="alice@example.com")
-    await Profile.objects.create(user_id=user.id)
-    # Auto-commits on success, rolls back on exception
-```
-
-## FastAPI Integration
-
-```python
-from fastapi import FastAPI
-from oxyde import db
-
-app = FastAPI(
-    lifespan=db.lifespan(
-        default="postgresql://localhost/mydb",
-    )
-)
-
-@app.get("/users")
-async def get_users():
-    return await User.objects.filter(is_active=True).all()
-```
-
-## Database Support
-
-| Database   | Min Version | Status | Notes |
-|------------|-------------|--------|-------|
-| PostgreSQL | 12+ | Full | RETURNING, UPSERT, FOR UPDATE/SHARE, JSON, Arrays |
-| SQLite     | 3.35+ | Full | RETURNING, UPSERT, WAL mode by default |
-| MySQL      | 8.0+ | Full | UPSERT via ON DUPLICATE KEY, FOR UPDATE/SHARE |
-
-**Connection URLs:**
-
-```
-postgresql://user:password@localhost:5432/database
-sqlite:///path/to/database.db
-sqlite:///:memory:
-mysql://user:password@localhost:3306/database
-```
-
-## Ecosystem
-
-### Oxyde Admin
-
-Auto-generated admin panel for Oxyde ORM with zero boilerplate.
-
-- Automatic CRUD, search, filters, export
-- FastAPI, Litestar, Sanic, Quart, Falcon
-- Theming, authentication, bulk operations
-
-```bash
-pip install oxyde-admin
-```
-
-[GitHub →](https://github.com/mr-fatalyst/oxyde-admin)
-
-## Documentation
-
-Full documentation: **[https://oxyde.fatalyst.dev/](https://oxyde.fatalyst.dev/)**
-
-- [Quick Start](https://oxyde.fatalyst.dev/latest/getting-started/quickstart/) — Get up and running
-- [User Guide](https://oxyde.fatalyst.dev/latest/guide/models/) — Models, queries, relations, transactions
-- [Cheatsheet](https://oxyde.fatalyst.dev/latest/cheatsheet/) — Quick reference for all methods
-
-## Contributing
-
-If you have suggestions or find a bug, please open an issue or create a pull request on GitHub.
-
-## License
-
-This project is licensed under the terms of the MIT license.
+Oxyde for PostgreSQL is based on [Oxyde](https://github.com/mr-fatalyst/oxyde), created by Nikita Ryzhenkov and its contributors. The original MIT [license](LICENSE) is preserved. The vendored SQLx PostgreSQL driver retains its MIT and Apache-2.0 licenses.

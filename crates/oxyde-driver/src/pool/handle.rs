@@ -1,21 +1,17 @@
 //! Pool handle wrapper
 
-use sqlx::{mysql::MySqlPool, postgres::PgPool, sqlite::SqlitePool};
+use sqlx::postgres::PgPool;
 
 /// Supported database backend type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseBackend {
     Postgres,
-    MySql,
-    Sqlite,
 }
 
-/// Database pool enum holding connections for different backends.
+/// PostgreSQL connection pool.
 #[derive(Clone)]
 pub enum DbPool {
     Postgres(PgPool),
-    MySql(MySqlPool),
-    Sqlite(SqlitePool),
 }
 
 /// Named pool handle: backend type + connection pool.
@@ -33,8 +29,6 @@ impl PoolHandle {
     pub async fn close(&self) {
         match &self.pool {
             DbPool::Postgres(pool) => pool.close().await,
-            DbPool::MySql(pool) => pool.close().await,
-            DbPool::Sqlite(pool) => pool.close().await,
         }
     }
 

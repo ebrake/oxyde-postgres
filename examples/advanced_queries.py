@@ -11,7 +11,7 @@ Demonstrates advanced query features:
 - order_by(), distinct(), limit(), offset()
 
 Usage:
-    export DATABASE_URL=sqlite://demo.db
+    export DATABASE_URL=postgresql://localhost/app
     python examples/advanced_queries.py
 """
 
@@ -148,7 +148,7 @@ async def seed_data(db: AsyncDatabase) -> None:
 
 
 async def main() -> None:
-    url = os.getenv("DATABASE_URL", "sqlite://demo.db")
+    url = os.getenv("DATABASE_URL", "postgresql://localhost/app")
     db = AsyncDatabase(url, name="default")
     await db.connect()
 

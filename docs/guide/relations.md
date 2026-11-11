@@ -302,7 +302,7 @@ class Post(Model):
 
 
 async def main():
-    async with db.connect("sqlite:///blog.db"):
+    async with db.connect("postgresql://localhost/app"):
         # Create author
         author = await Author.objects.create(name="Alice")
 

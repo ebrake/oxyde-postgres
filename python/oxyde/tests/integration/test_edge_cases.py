@@ -5,7 +5,7 @@ import pytest
 
 from oxyde import execute_raw
 
-from .conftest import Author, Post, Tag, create_tag
+from .conftest import Author, Post, Tag
 
 
 class TestEmptyTable:
@@ -95,7 +95,7 @@ class TestSqlDebug:
     def test_sql_returns_query(self):
         """sql() returns (sql_string, params) without DB connection."""
         sql, params = Post.objects.filter(published=True, views__gt=100).sql(
-            dialect="sqlite"
+            dialect="postgres"
         )
         assert isinstance(sql, str)
         assert isinstance(params, list)

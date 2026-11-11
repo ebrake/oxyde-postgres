@@ -25,8 +25,6 @@ The Rust core provides:
 | Database | Status | Features |
 |----------|--------|----------|
 | PostgreSQL | Full support | RETURNING, JSONB, Arrays, UPSERT |
-| SQLite | Full support | RETURNING, WAL mode, connection pooling |
-| MySQL | Full support | No RETURNING (uses LAST_INSERT_ID), UPSERT via ON DUPLICATE KEY |
 
 ### Is Oxyde production-ready?
 
@@ -41,7 +39,7 @@ Oxyde is suitable for production use with these considerations:
 ### How do I install Oxyde?
 
 ```bash
-pip install oxyde
+pip install oxyde-postgres
 ```
 
 ### What are the system requirements?
@@ -53,8 +51,8 @@ pip install oxyde
 
 ```bash
 # Clone repository
-git clone https://github.com/mr-fatalyst/oxyde.git
-cd oxyde
+git clone https://github.com/ebrake/oxyde-postgres.git
+cd oxyde-postgres
 
 # Install Rust (if not installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -325,15 +323,6 @@ sql, params = User.objects.filter(age__gte=18).sql()
 print(sql)  # SELECT ... WHERE age >= $1
 print(params)  # [18]
 ```
-
-### What are the best SQLite settings?
-
-Oxyde applies optimized defaults automatically:
-
-- WAL journal mode (10-20x faster writes)
-- NORMAL synchronous mode
-- 10MB cache size
-- 5 second busy timeout
 
 ## Errors
 

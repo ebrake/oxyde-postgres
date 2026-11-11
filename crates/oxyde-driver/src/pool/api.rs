@@ -1,10 +1,6 @@
 //! Pool lifecycle API: init, close, query backend.
 
-use sqlx::{
-    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
-    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::info;
@@ -30,17 +26,14 @@ async fn init_pool_inner(
     settings: PoolSettings,
     overwrite: bool,
 ) -> Result<()> {
-    info!(
-        "Initializing pool '{}' with URL {} (overwrite={})",
-        name, url, overwrite
-    );
+    info!("Initializing pool '{}' (overwrite={})", name, overwrite);
 
     validate_settings(&settings)?;
 
     let Some(backend) = backend_from_url(url) else {
-        return Err(DriverError::ConnectionError(format!(
-            "Unsupported database URL: {url}"
-        )));
+        return Err(DriverError::ConnectionError(
+            "Unsupported database URL scheme; expected postgres:// or postgresql://".to_string(),
+        ));
     };
 
     let pool = match backend {
@@ -53,74 +46,23 @@ async fn init_pool_inner(
                 .map(DbPool::Postgres)
                 .map_err(|e| DriverError::ConnectionError(format!("Failed to connect: {e}")))?
         }
-        DatabaseBackend::MySql => {
-            let connect_opts = build_mysql_connect_options(url, &settings)?;
-            let pool_opts = apply_common_settings_mysql(MySqlPoolOptions::new(), &settings);
-            pool_opts
-                .connect_with(connect_opts)
-                .await
-                .map(DbPool::MySql)
-                .map_err(|e| DriverError::ConnectionError(format!("Failed to connect: {e}")))?
-        }
-        DatabaseBackend::Sqlite => {
-            // Clone PRAGMA settings for use in after_connect closure
-            let journal_mode_opt = settings.sqlite_journal_mode.clone();
-            let synchronous_opt = settings.sqlite_synchronous.clone();
-            let cache_size_opt = settings.sqlite_cache_size;
-            let busy_timeout_opt = settings.sqlite_busy_timeout;
-
-            let mut options = apply_common_settings_sqlite(SqlitePoolOptions::new(), &settings);
-
-            // Apply PRAGMA settings to each connection in the pool
-            options = options.after_connect(move |conn, _meta| {
-                let journal_mode = journal_mode_opt.clone();
-                let synchronous = synchronous_opt.clone();
-                let cache_size = cache_size_opt;
-                let busy_timeout = busy_timeout_opt;
-
-                Box::pin(async move {
-                    // journal_mode and synchronous are persistent (saved to DB file)
-                    if let Some(mode) = journal_mode {
-                        let pragma = format!("PRAGMA journal_mode = {mode}");
-                        sqlx::query(&pragma).execute(&mut *conn).await?;
-                    }
-
-                    if let Some(sync) = synchronous {
-                        let pragma = format!("PRAGMA synchronous = {sync}");
-                        sqlx::query(&pragma).execute(&mut *conn).await?;
-                    }
-
-                    // cache_size and busy_timeout are per-connection (must be set for each connection)
-                    if let Some(size) = cache_size {
-                        let pragma = format!("PRAGMA cache_size = {size}");
-                        sqlx::query(&pragma).execute(&mut *conn).await?;
-                    }
-
-                    if let Some(timeout) = busy_timeout {
-                        let pragma = format!("PRAGMA busy_timeout = {timeout}");
-                        sqlx::query(&pragma).execute(&mut *conn).await?;
-                    }
-
-                    Ok(())
-                })
-            });
-
-            // Parse URL and enable automatic database file creation
-            let connect_opts = SqliteConnectOptions::from_str(url)
-                .map_err(|e| DriverError::ConnectionError(format!("Invalid SQLite URL: {e}")))?
-                .create_if_missing(true);
-
-            let pool = options
-                .connect_with(connect_opts)
-                .await
-                .map_err(|e| DriverError::ConnectionError(format!("Failed to connect: {e}")))?;
-
-            info!("SQLite pool created with PRAGMA settings (create_if_missing=true)");
-
-            DbPool::Sqlite(pool)
-        }
     };
 
+    let DbPool::Postgres(pg_pool) = &pool;
+    let version =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int4")
+            .fetch_one(pg_pool)
+            .await;
+    let version_result = match version {
+        Ok(version) => validate_server_version(version),
+        Err(error) => Err(DriverError::ConnectionError(format!(
+            "Cannot determine PostgreSQL server version: {error}"
+        ))),
+    };
+    if let Err(error) = version_result {
+        pg_pool.close().await;
+        return Err(error);
+    }
     let handle = PoolHandle::new(backend, pool);
 
     if overwrite {
@@ -179,15 +121,20 @@ pub async fn pool_backend(name: &str) -> Result<DatabaseBackend> {
 }
 
 fn backend_from_url(url: &str) -> Option<DatabaseBackend> {
-    if url.starts_with("postgres") {
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         Some(DatabaseBackend::Postgres)
-    } else if url.starts_with("mysql") {
-        Some(DatabaseBackend::MySql)
-    } else if url.starts_with("sqlite") {
-        Some(DatabaseBackend::Sqlite)
     } else {
         None
     }
+}
+
+fn validate_server_version(version: i32) -> Result<()> {
+    if version < 180_000 {
+        return Err(DriverError::ConnectionError(format!(
+            "PostgreSQL 18 or newer is required; server_version_num is {version}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_settings(settings: &PoolSettings) -> Result<()> {
@@ -203,56 +150,6 @@ fn validate_settings(settings: &PoolSettings) -> Result<()> {
 }
 
 fn apply_common_settings_pg(mut options: PgPoolOptions, settings: &PoolSettings) -> PgPoolOptions {
-    if let Some(max) = settings.max_connections {
-        options = options.max_connections(max);
-    }
-    if let Some(min) = settings.min_connections {
-        options = options.min_connections(min);
-    }
-    if let Some(timeout) = settings.acquire_timeout {
-        options = options.acquire_timeout(timeout);
-    }
-    if let Some(timeout) = settings.idle_timeout {
-        options = options.idle_timeout(timeout);
-    }
-    if let Some(lifetime) = settings.max_lifetime {
-        options = options.max_lifetime(lifetime);
-    }
-    if let Some(test_before) = settings.test_before_acquire {
-        options = options.test_before_acquire(test_before);
-    }
-    options
-}
-
-fn apply_common_settings_mysql(
-    mut options: MySqlPoolOptions,
-    settings: &PoolSettings,
-) -> MySqlPoolOptions {
-    if let Some(max) = settings.max_connections {
-        options = options.max_connections(max);
-    }
-    if let Some(min) = settings.min_connections {
-        options = options.min_connections(min);
-    }
-    if let Some(timeout) = settings.acquire_timeout {
-        options = options.acquire_timeout(timeout);
-    }
-    if let Some(timeout) = settings.idle_timeout {
-        options = options.idle_timeout(timeout);
-    }
-    if let Some(lifetime) = settings.max_lifetime {
-        options = options.max_lifetime(lifetime);
-    }
-    if let Some(test_before) = settings.test_before_acquire {
-        options = options.test_before_acquire(test_before);
-    }
-    options
-}
-
-fn apply_common_settings_sqlite(
-    mut options: SqlitePoolOptions,
-    settings: &PoolSettings,
-) -> SqlitePoolOptions {
     if let Some(max) = settings.max_connections {
         options = options.max_connections(max);
     }
@@ -300,32 +197,6 @@ fn build_pg_connect_options(url: &str, settings: &PoolSettings) -> Result<PgConn
     Ok(opts)
 }
 
-fn build_mysql_connect_options(url: &str, settings: &PoolSettings) -> Result<MySqlConnectOptions> {
-    let mut opts = MySqlConnectOptions::from_str(url)
-        .map_err(|e| DriverError::ConnectionError(format!("Invalid MySQL URL: {e}")))?;
-
-    if let Some(mode) = &settings.ssl_mode {
-        opts = opts.ssl_mode(parse_mysql_ssl_mode(mode)?);
-    }
-    if let Some(path) = &settings.ssl_root_cert {
-        opts = opts.ssl_ca(PathBuf::from(path));
-    }
-    if let Some(path) = &settings.ssl_client_cert {
-        opts = opts.ssl_client_cert(PathBuf::from(path));
-    }
-    if let Some(path) = &settings.ssl_client_key {
-        opts = opts.ssl_client_key(PathBuf::from(path));
-    }
-    if let Some(charset) = &settings.mysql_charset {
-        opts = opts.charset(charset);
-    }
-    if let Some(collation) = &settings.mysql_collation {
-        opts = opts.collation(collation);
-    }
-
-    Ok(opts)
-}
-
 fn parse_pg_ssl_mode(mode: &str) -> Result<PgSslMode> {
     match mode.to_lowercase().replace('-', "_").as_str() {
         "disable" => Ok(PgSslMode::Disable),
@@ -341,16 +212,34 @@ fn parse_pg_ssl_mode(mode: &str) -> Result<PgSslMode> {
     }
 }
 
-fn parse_mysql_ssl_mode(mode: &str) -> Result<MySqlSslMode> {
-    match mode.to_lowercase().replace('-', "_").as_str() {
-        "disabled" => Ok(MySqlSslMode::Disabled),
-        "preferred" => Ok(MySqlSslMode::Preferred),
-        "required" => Ok(MySqlSslMode::Required),
-        "verify_ca" => Ok(MySqlSslMode::VerifyCa),
-        "verify_identity" => Ok(MySqlSslMode::VerifyIdentity),
-        _ => Err(DriverError::InvalidPoolSettings(format!(
-            "Invalid MySQL SSL mode: '{mode}'. \
-             Expected: disabled, preferred, required, verify-ca, verify-identity"
-        ))),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn minimum_server_version_is_postgres_18() {
+        for version in [120_000, 160_015, 170_999, 179_999] {
+            assert!(validate_server_version(version)
+                .unwrap_err()
+                .to_string()
+                .contains("PostgreSQL 18"));
+        }
+        for version in [180_000, 180_001, 190_000] {
+            assert!(validate_server_version(version).is_ok());
+        }
+    }
+    #[test]
+    fn only_exact_postgres_url_schemes_are_supported() {
+        for url in ["postgres://localhost/db", "postgresql://localhost/db"] {
+            assert_eq!(backend_from_url(url), Some(DatabaseBackend::Postgres));
+        }
+        for url in [
+            "sqlite::memory:",
+            "mysql://localhost/db",
+            "postgresjunk://localhost/db",
+            "postgresqlx://localhost/db",
+            "postgres",
+        ] {
+            assert_eq!(backend_from_url(url), None);
+        }
     }
 }

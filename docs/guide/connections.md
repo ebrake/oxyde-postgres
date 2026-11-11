@@ -1,6 +1,6 @@
 # Database Connections
 
-Oxyde provides multiple ways to manage database connections.
+Oxyde for PostgreSQL requires **PostgreSQL 18 or newer**. The Rust core checks `server_version_num` before registering a new pool. All APIs use PostgreSQL connection pools; both URL schemes below are accepted.
 
 ## Quick Start
 
@@ -23,23 +23,6 @@ await db.close()
 |----------|------------|
 | PostgreSQL | `postgresql://user:pass@host:5432/database` |
 | PostgreSQL | `postgres://user:pass@host:5432/database` |
-| SQLite (file) | `sqlite:///path/to/file.db` |
-| SQLite (memory) | `sqlite:///:memory:` |
-| MySQL | `mysql://user:pass@host:3306/database` |
-
-!!! note "SQLite File Paths"
-    SQLite relative paths (like `sqlite:///app.db`) are resolved from the **current working directory**, not from the config file location. For portable projects, use absolute paths:
-
-    ```python
-    # oxyde_config.py
-    from pathlib import Path
-
-    BASE_DIR = Path(__file__).parent
-
-    DATABASES = {
-        "default": f"sqlite:///{BASE_DIR}/app.db"
-    }
-    ```
 
 ## High-Level API
 
@@ -57,7 +40,7 @@ await db.init(default="postgresql://localhost/mydb")
 await db.init(
     default="postgresql://localhost/main",
     analytics="postgresql://localhost/analytics",
-    cache="sqlite:///:memory:",
+    cache="postgresql://localhost/app",
 )
 
 # With custom settings
@@ -82,7 +65,7 @@ This rolls back any active transactions before closing.
 Context manager for scripts and tests:
 
 ```python
-async with db.connect("sqlite:///:memory:") as conn:
+async with db.connect("postgresql://localhost/app") as conn:
     users = await User.objects.all()
 # Connection closed automatically
 ```
@@ -90,7 +73,7 @@ async with db.connect("sqlite:///:memory:") as conn:
 With custom name:
 
 ```python
-async with db.connect("sqlite:///test.db", name="test") as conn:
+async with db.connect("postgresql://localhost/app", name="test") as conn:
     users = await User.objects.all(using="test")
 ```
 
@@ -166,13 +149,12 @@ settings = PoolSettings(
 
 ### TLS Settings
 
-Configure TLS for PostgreSQL and MySQL connections:
+Configure TLS for PostgreSQL connections:
 
 ```python
 settings = PoolSettings(
     # TLS mode (controls both requirement and certificate verification)
     #   PG:    "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
-    #   MySQL: "disabled", "preferred", "required", "verify-ca", "verify-identity"
     ssl_mode="require",
 
     # CA certificate (for verify-ca / verify-full modes)
@@ -185,7 +167,7 @@ settings = PoolSettings(
 ```
 
 !!! note "TLS without certificate verification"
-    Use `ssl_mode="require"` (PG) or `ssl_mode="required"` (MySQL) to encrypt the connection without verifying the server certificate. This is common for managed databases (AWS RDS, Supabase, Neon) that use self-signed certificates.
+    Use `ssl_mode="verify-full"` to verify the server certificate and hostname, with `ssl_root_cert` when a custom CA is needed. `ssl_mode="require"` encrypts without verifying the certificate.
 
 ### PostgreSQL Settings
 
@@ -212,37 +194,6 @@ memory proportional to that result. Later reads reuse the connection's type
 cache. Metadata loading never replays the original query or mutation; a metadata
 failure after an autocommit mutation can occur after the write has committed.
 
-### MySQL Settings
-
-```python
-settings = PoolSettings(
-    mysql_charset="utf8mb4",            # Character set (default: utf8mb4)
-    mysql_collation="utf8mb4_unicode_ci",
-)
-```
-
-### SQLite Settings
-
-SQLite-specific PRAGMA settings (applied automatically):
-
-```python
-settings = PoolSettings(
-    # WAL mode for better concurrent writes (10-20x faster)
-    sqlite_journal_mode="WAL",
-
-    # Balance between speed and safety
-    sqlite_synchronous="NORMAL",
-
-    # Cache size in pages (~10MB)
-    sqlite_cache_size=10000,
-
-    # Lock timeout in milliseconds
-    sqlite_busy_timeout=5000,
-)
-```
-
-Default settings are optimized for most use cases.
-
 ## Schema Management
 
 Create or drop all registered model tables programmatically — no migration files needed. Useful for tests, scripts, and rapid prototyping.
@@ -257,7 +208,7 @@ await create_tables(database)
 await drop_tables(database)
 ```
 
-`create_tables()` generates dialect-aware DDL via the migration diff engine and executes it. `drop_tables()` uses `CASCADE` on PostgreSQL and `SET FOREIGN_KEY_CHECKS = 0` on MySQL to handle foreign key dependencies.
+`create_tables()` generates dialect-aware DDL via the migration diff engine and executes it. `drop_tables()` uses PostgreSQL `CASCADE` to handle foreign key dependencies.
 
 !!! tip "For production"
     Use [migrations](migrations.md) for production schema management. `create_tables()` / `drop_tables()` are best suited for tests and throwaway environments.
@@ -270,7 +221,7 @@ await drop_tables(database)
 await db.init(
     default="postgresql://localhost/main",
     analytics="postgresql://localhost/analytics",
-    legacy="mysql://localhost/old_system",
+    archive="postgresql://localhost/archive",
 )
 ```
 
@@ -351,7 +302,7 @@ except Exception as e:
 
 ```python
 async def main():
-    async with db.connect("sqlite:///app.db"):
+    async with db.connect("postgresql://localhost/app"):
         # Automatic cleanup on exit
         await run_app()
 ```
@@ -371,8 +322,6 @@ PoolSettings(max_connections=50, min_connections=10)
 # Background worker: fewer long connections
 PoolSettings(max_connections=10, min_connections=2)
 
-# SQLite: single connection is usually enough
-PoolSettings(max_connections=1)
 ```
 
 ### 4. Set Appropriate Timeouts
@@ -508,8 +457,8 @@ import pytest
 @pytest.fixture
 async def test_dbs():
     await db.init(
-        default="sqlite:///:memory:",
-        analytics="sqlite:///:memory:",
+        default="postgresql://localhost/app",
+        analytics="postgresql://localhost/app",
     )
     yield
     await db.close()

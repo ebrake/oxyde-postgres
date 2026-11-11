@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import msgpack
 import pytest
 
 from oxyde import Field, Model

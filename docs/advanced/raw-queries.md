@@ -77,8 +77,6 @@ print(f"Params: {params}")
 
 # With specific dialect
 sql, params = query.sql(dialect="postgres")
-sql, params = query.sql(dialect="sqlite")
-sql, params = query.sql(dialect="mysql")
 ```
 
 ## Common Use Cases
@@ -113,11 +111,6 @@ results = await execute_raw("""
     WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $1)
 """, [search_term])
 
-# SQLite JSON functions
-results = await execute_raw("""
-    SELECT * FROM products
-    WHERE json_extract(metadata, '$.featured') = 1
-""")
 ```
 
 ### Complex Joins
@@ -181,28 +174,6 @@ Uses `$1`, `$2`, etc.:
 ```python
 results = await execute_raw(
     "SELECT * FROM users WHERE age >= $1 AND status = $2",
-    [18, "active"]
-)
-```
-
-### SQLite
-
-Uses `?` placeholders:
-
-```python
-results = await execute_raw(
-    "SELECT * FROM users WHERE age >= ? AND status = ?",
-    [18, "active"]
-)
-```
-
-### MySQL
-
-Uses `?` placeholders:
-
-```python
-results = await execute_raw(
-    "SELECT * FROM users WHERE age >= ? AND status = ?",
     [18, "active"]
 )
 ```
@@ -317,22 +288,6 @@ async def get_user_activity_report(user_id: int):
     """, [user_id])
 ```
 
-### 4. Test Across Databases
-
-```python
-def get_date_trunc_sql(field: str, unit: str, dialect: str) -> str:
-    """Generate date truncation SQL for different dialects."""
-    if dialect == "postgres":
-        return f"DATE_TRUNC('{unit}', {field})"
-    elif dialect == "sqlite":
-        if unit == "day":
-            return f"DATE({field})"
-        elif unit == "month":
-            return f"DATE({field}, 'start of month')"
-    elif dialect == "mysql":
-        return f"DATE_FORMAT({field}, '%Y-%m-01')"
-```
-
 ## Limitations
 
 ### No Automatic Type Conversion
@@ -384,7 +339,7 @@ async def execute_raw(
     Execute raw SQL query.
 
     Args:
-        sql: SQL with placeholders ($1/$2 for Postgres, ? for SQLite/MySQL)
+        sql: SQL with PostgreSQL placeholders ($1, $2, ...)
         params: Query parameters (use these to prevent SQL injection!)
         using: Connection alias (default: "default")
         client: Explicit client (AsyncDatabase or AsyncTransaction)
