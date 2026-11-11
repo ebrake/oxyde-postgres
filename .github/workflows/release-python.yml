@@ -75,6 +75,7 @@ jobs:
       url: https://pypi.org/project/oxyde-postgres/
     permissions:
       id-token: write  # For trusted publishing
+      contents: read
 
     steps:
       - uses: actions/checkout@v6.0.2
