@@ -114,13 +114,10 @@ jobs:
           name: python-dist
           path: dist
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v3.0.0
-        with:
-          files: dist/*
-          body_path: docs/changelog.md
-          tag_name: v${{ inputs.version }}
-          target_commitish: ${{ github.sha }}
-          name: Oxyde for PostgreSQL ${{ inputs.version }}
-          draft: false
-          make_latest: true
+      - name: Complete the existing combined release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ inputs.version }}
+        run: |
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest
