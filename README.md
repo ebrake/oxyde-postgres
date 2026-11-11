@@ -15,7 +15,7 @@ Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.
 - Rust SQL generation, connection pooling, and execution, with Python 3.15 wheel support.
 - Cache-disabled unnamed statements for PostgreSQL/PgBouncer, including cold custom-type decoding without replaying queries.
 
-The initial fork release is **0.1.0**. [First-release notes](docs/changelog.md) list every addition and its source.
+The initial fork release is **0.1.0**. [First-release notes](https://github.com/ebrake/oxyde-postgres/blob/main/docs/changelog.md) list every addition and its source.
 
 ## Installation
 
@@ -65,8 +65,8 @@ async def main():
 asyncio.run(main())
 ```
 
-For managed schema changes, run `oxyde init`, `oxyde makemigrations`, and `oxyde migrate`. See the [documentation](docs/index.md), [connection guide](docs/guide/connections.md), and [contributor guide](.github/CONTRIBUTING.md).
+For managed schema changes, run `oxyde init`, `oxyde makemigrations`, and `oxyde migrate`. See the [documentation](https://github.com/ebrake/oxyde-postgres/blob/main/docs/index.md), [connection guide](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/connections.md), and [contributor guide](https://github.com/ebrake/oxyde-postgres/blob/main/.github/CONTRIBUTING.md).
 
 ## Credit and license
 
-Oxyde for PostgreSQL is based on [Oxyde](https://github.com/mr-fatalyst/oxyde), created by Nikita Ryzhenkov and its contributors. The original MIT [license](LICENSE) is preserved. The vendored SQLx PostgreSQL driver retains its MIT and Apache-2.0 licenses.
+Oxyde for PostgreSQL is based on [Oxyde](https://github.com/mr-fatalyst/oxyde), created by Nikita Ryzhenkov and its contributors. The original MIT [license](https://github.com/ebrake/oxyde-postgres/blob/main/LICENSE) is preserved. The vendored SQLx PostgreSQL driver retains its MIT and Apache-2.0 licenses.
