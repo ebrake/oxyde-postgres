@@ -16,6 +16,7 @@ fn sample_field(name: &str) -> FieldDef {
         nullable: false,
         primary_key: false,
         unique: false,
+        nulls_not_distinct: false,
         default: None,
         auto_increment: false,
         max_length: None,
@@ -35,6 +36,7 @@ fn sample_table() -> TableDef {
                 nullable: false,
                 primary_key: true,
                 unique: true,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -47,6 +49,7 @@ fn sample_table() -> TableDef {
             name: "users_email_idx".into(),
             fields: vec!["email".into()],
             unique: true,
+            nulls_not_distinct: false,
             method: Some("btree".into()),
             where_clause: None,
         }],
@@ -101,6 +104,7 @@ fn enum_table(values: &[&str]) -> TableDef {
                 nullable: false,
                 primary_key: true,
                 unique: false,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -114,6 +118,7 @@ fn enum_table(values: &[&str]) -> TableDef {
                 nullable: false,
                 primary_key: false,
                 unique: false,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -136,6 +141,111 @@ fn test_snapshot_serialization_roundtrip() {
     let json = snapshot.to_json().unwrap();
     let deserialized = Snapshot::from_json(&json).unwrap();
     assert_eq!(snapshot, deserialized);
+}
+
+#[test]
+fn nulls_not_distinct_serde_backwards_compatibility() {
+    let field_json = serde_json::json!({
+        "name": "email", "column_type": {"kind": "string"},
+        "db_type": null, "nullable": true, "primary_key": false, "unique": true,
+        "default": null, "auto_increment": false, "max_length": null,
+        "max_digits": null, "decimal_places": null,
+    });
+    let index_json = serde_json::json!({
+        "name": "ux_email", "fields": ["email"], "unique": true, "method": null,
+    });
+    let mut field: FieldDef = serde_json::from_value(field_json.clone()).unwrap();
+    let mut index: IndexDef = serde_json::from_value(index_json.clone()).unwrap();
+    assert!(!field.nulls_not_distinct);
+    assert!(!index.nulls_not_distinct);
+    assert_eq!(serde_json::to_value(&field).unwrap(), field_json);
+    assert_eq!(serde_json::to_value(&index).unwrap(), index_json);
+    for enabled in [true, false] {
+        field.nulls_not_distinct = enabled;
+        index.nulls_not_distinct = enabled;
+        let field_value = serde_json::to_value(&field).unwrap();
+        let index_value = serde_json::to_value(&index).unwrap();
+        if enabled {
+            assert_eq!(field_value["nulls_not_distinct"], true);
+            assert_eq!(index_value["nulls_not_distinct"], true);
+        } else {
+            assert!(field_value.get("nulls_not_distinct").is_none());
+            assert!(index_value.get("nulls_not_distinct").is_none());
+        }
+        assert_eq!(
+            serde_json::from_value::<FieldDef>(field_value).unwrap(),
+            field
+        );
+        assert_eq!(
+            serde_json::from_value::<IndexDef>(index_value).unwrap(),
+            index
+        );
+    }
+    let mut explicit_false = field_json;
+    explicit_false["nulls_not_distinct"] = false.into();
+    assert!(
+        !serde_json::from_value::<FieldDef>(explicit_false)
+            .unwrap()
+            .nulls_not_distinct
+    );
+    let mut explicit_false = index_json;
+    explicit_false["nulls_not_distinct"] = false.into();
+    assert!(
+        !serde_json::from_value::<IndexDef>(explicit_false)
+            .unwrap()
+            .nulls_not_distinct
+    );
+}
+
+#[test]
+fn index_nulls_not_distinct_change_recreates_index() {
+    for enabled in [true, false] {
+        let mut old_table = sample_table();
+        old_table.indexes[0].nulls_not_distinct = !enabled;
+        let mut new_table = old_table.clone();
+        new_table.indexes[0].nulls_not_distinct = enabled;
+        assert!(!old_table.indexes[0].semantically_eq(&new_table.indexes[0]));
+        let mut old = Snapshot::new();
+        old.add_table(old_table);
+        let mut new = Snapshot::new();
+        new.add_table(new_table);
+        let ops = compute_diff(&old, &new).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(
+            matches!(&ops[0], MigrationOp::DropIndex { index_def: Some(index), .. }
+            if index.nulls_not_distinct != enabled)
+        );
+        assert!(matches!(&ops[1], MigrationOp::CreateIndex { index, .. }
+            if index.nulls_not_distinct == enabled));
+    }
+}
+
+#[test]
+fn field_nulls_not_distinct_change_alters_only_unique_columns() {
+    for unique in [false, true] {
+        for enabled in [true, false] {
+            let mut old_table = sample_table();
+            old_table.fields[1].unique = unique;
+            old_table.fields[1].nulls_not_distinct = !enabled;
+            let mut new_table = old_table.clone();
+            new_table.fields[1].nulls_not_distinct = enabled;
+            let mut old = Snapshot::new();
+            old.add_table(old_table);
+            let mut new = Snapshot::new();
+            new.add_table(new_table);
+            let ops = compute_diff(&old, &new).unwrap();
+            if unique {
+                assert_eq!(ops.len(), 1);
+                assert!(
+                    matches!(&ops[0], MigrationOp::AlterColumn { old_field, new_field, .. }
+                    if old_field.nulls_not_distinct != enabled && new_field.nulls_not_distinct == enabled)
+                );
+                assert_eq!(ops[0].to_sql(Dialect::Postgres).unwrap().len(), 2);
+            } else {
+                assert!(ops.is_empty());
+            }
+        }
+    }
 }
 
 #[test]
@@ -312,6 +422,7 @@ fn test_compute_diff_adds_postgres_enum_value_before_dependent_ddl() {
         name: "posts_archived_idx".into(),
         fields: vec!["status".into()],
         unique: false,
+        nulls_not_distinct: false,
         method: Some("btree".into()),
         where_clause: Some("status = 'archived'".into()),
     });
@@ -370,6 +481,7 @@ fn test_postgres_create_table_with_fk_as_alter() {
             nullable: false,
             primary_key: true,
             unique: false,
+            nulls_not_distinct: false,
             default: None,
             auto_increment: false,
             max_length: None,
@@ -444,6 +556,7 @@ fn test_compute_diff_detects_alter_column() {
                 nullable: false,
                 primary_key: true,
                 unique: false,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: true,
                 max_length: None,
@@ -457,6 +570,7 @@ fn test_compute_diff_detects_alter_column() {
                 nullable: false,
                 primary_key: false,
                 unique: true,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -483,6 +597,7 @@ fn test_compute_diff_detects_alter_column() {
                 nullable: false,
                 primary_key: true,
                 unique: false,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: true,
                 max_length: None,
@@ -496,6 +611,7 @@ fn test_compute_diff_detects_alter_column() {
                 nullable: true,                       // Changed nullable
                 primary_key: false,
                 unique: true,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -542,6 +658,7 @@ fn test_postgres_alter_column_unique_constraint() {
         nullable: false,
         primary_key: false,
         unique: false,
+        nulls_not_distinct: false,
         default: None,
         auto_increment: false,
         max_length: None,
@@ -555,6 +672,7 @@ fn test_postgres_alter_column_unique_constraint() {
         nullable: false,
         primary_key: false,
         unique: true, // Changed to unique
+        nulls_not_distinct: false,
         default: None,
         auto_increment: false,
         max_length: None,
@@ -663,6 +781,7 @@ fn test_compute_diff_drops_column_dependencies_before_the_column() {
         name: "ix_users_age".into(),
         fields: vec!["age".into()],
         unique: false,
+        nulls_not_distinct: false,
         method: None,
         where_clause: None,
     });
@@ -959,6 +1078,7 @@ fn test_compute_diff_creates_referenced_index_before_fk() {
         name: "ux_parent_code".into(),
         fields: vec!["code".into()],
         unique: true,
+        nulls_not_distinct: false,
         method: None,
         where_clause: None,
     });
@@ -1004,6 +1124,7 @@ fn test_compute_diff_detects_index_changes() {
         name: "users_name_idx".into(), // New index
         fields: vec!["name".into()],
         unique: false,
+        nulls_not_distinct: false,
         method: None,
         where_clause: None,
     });
@@ -1092,6 +1213,7 @@ fn test_create_drop_index_sql() {
             name: "users_email_idx".into(),
             fields: vec!["email".into()],
             unique: true,
+            nulls_not_distinct: false,
             method: Some("btree".into()),
             where_clause: None,
         },
@@ -1112,6 +1234,7 @@ fn test_create_drop_index_sql() {
             name: "users_email_idx".into(),
             fields: vec!["email".into()],
             unique: true,
+            nulls_not_distinct: false,
             method: None,
             where_clause: None,
         }),
@@ -1194,6 +1317,7 @@ fn test_compute_diff_emits_create_tables_in_topological_order() {
                 nullable: false,
                 primary_key: true,
                 unique: true,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -1247,6 +1371,7 @@ fn test_compute_diff_rejects_cyclic_foreign_keys() {
                 nullable: false,
                 primary_key: true,
                 unique: true,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -1305,6 +1430,7 @@ fn test_compute_diff_emits_drop_tables_in_reverse_topological_order() {
                 nullable: false,
                 primary_key: true,
                 unique: true,
+                nulls_not_distinct: false,
                 default: None,
                 auto_increment: false,
                 max_length: None,
@@ -1349,6 +1475,7 @@ fn cyclic_table(name: &str, fk_refs: &[(&str, &str)]) -> TableDef {
         nullable: false,
         primary_key: true,
         unique: true,
+        nulls_not_distinct: false,
         default: None,
         auto_increment: false,
         max_length: None,
@@ -1364,6 +1491,7 @@ fn cyclic_table(name: &str, fk_refs: &[(&str, &str)]) -> TableDef {
             nullable: true,
             primary_key: false,
             unique: false,
+            nulls_not_distinct: false,
             default: None,
             auto_increment: false,
             max_length: None,

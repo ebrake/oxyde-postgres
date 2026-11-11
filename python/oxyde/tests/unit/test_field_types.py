@@ -24,6 +24,7 @@ class TestOxydeFieldInfoInit:
         assert field.db_index_name is None
         assert field.db_index_method is None
         assert field.db_unique is False
+        assert field.db_nulls_distinct is None
         assert field.db_column is None
         assert field.db_type is None
         assert field.db_default is None
@@ -54,6 +55,42 @@ class TestOxydeFieldInfoInit:
         """Test OxydeFieldInfo with db_unique=True."""
         field = OxydeFieldInfo(db_unique=True)
         assert field.db_unique is True
+
+    @pytest.mark.parametrize("nulls_distinct", [None, True, False])
+    def test_unique_nulls_distinct(self, nulls_distinct):
+        field = Field(db_unique=True, db_nulls_distinct=nulls_distinct)
+        assert field.db_nulls_distinct is nulls_distinct
+
+        class UniqueNulls(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(
+                default=None, db_unique=True, db_nulls_distinct=nulls_distinct
+            )
+
+            class Meta:
+                is_table = True
+
+        assert (
+            UniqueNulls._db_meta.field_metadata["email"].nulls_distinct
+            is nulls_distinct
+        )
+
+    @pytest.mark.parametrize(
+        "options",
+        [{}, {"db_index": True}, {"db_pk": True}, {"db_pk": True, "db_unique": True}],
+    )
+    def test_nulls_not_distinct_requires_unique_non_pk_column(self, options):
+        with pytest.raises(
+            ValueError, match="db_nulls_distinct=False requires db_unique=True"
+        ):
+
+            class InvalidNulls(Model):
+                value: str | None = Field(
+                    default=None, db_nulls_distinct=False, **options
+                )
+
+                class Meta:
+                    is_table = True
 
     def test_column_name_override(self):
         """Test OxydeFieldInfo with db_column override."""

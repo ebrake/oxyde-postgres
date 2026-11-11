@@ -321,6 +321,11 @@ class MigrationContext:
             new_field["default"] = changes["default"]
         if "unique" in changes:
             new_field["unique"] = changes["unique"]
+        if "nulls_not_distinct" in changes:
+            if changes["nulls_not_distinct"]:
+                new_field["nulls_not_distinct"] = True
+            else:
+                new_field.pop("nulls_not_distinct", None)
         if "max_length" in changes:
             new_field["max_length"] = changes["max_length"]
         if "max_digits" in changes:

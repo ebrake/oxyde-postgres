@@ -15,7 +15,7 @@ Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.
 - Rust SQL generation, connection pooling, and execution, with Python 3.15 wheel support.
 - Cache-disabled unnamed statements for PostgreSQL/PgBouncer, including cold custom-type decoding without replaying queries.
 
-Version **0.2.0** upgrades SQLx to 0.9.0, SeaQuery to 1.0.2, and the Python dependencies. [Release notes](https://github.com/ebrake/oxyde-postgres/blob/main/docs/changelog.md) list the changes and the original fork additions.
+Version **0.2.1** adds PostgreSQL `NULLS NOT DISTINCT` for unique columns and indexes, with reversible migrations. [Release notes](https://github.com/ebrake/oxyde-postgres/blob/main/docs/changelog.md) list the changes and the original fork additions.
 
 ## Installation
 

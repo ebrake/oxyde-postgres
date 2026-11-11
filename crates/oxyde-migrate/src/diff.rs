@@ -653,7 +653,10 @@ pub fn compute_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> 
 
                     let nullable_changed = old_field.nullable != new_field.nullable;
                     let default_changed = old_field.default != new_field.default;
-                    let unique_changed = old_field.unique != new_field.unique;
+                    let unique_changed = old_field.unique != new_field.unique
+                        || (old_field.unique
+                            && new_field.unique
+                            && old_field.nulls_not_distinct != new_field.nulls_not_distinct);
                     let constraints_changed = old_field.max_length != new_field.max_length
                         || old_field.max_digits != new_field.max_digits
                         || old_field.decimal_places != new_field.decimal_places;
