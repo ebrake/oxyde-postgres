@@ -80,6 +80,11 @@ Source: [oxyde-core PR #2](https://github.com/rclayer/oxyde-core/pull/2), includ
 
 Cold custom-type results buffer until execution completes, which can increase latency and memory use for large result sets. See [connection settings](guide/connections.md).
 
+### Coordinated publishing
+
+- Publish both PyPI projects at the same version through their dedicated trusted-publishing workflows.
+- Use one GitHub `v0.1.0` release containing the Python package, native core wheels for every supported platform, and both source distributions. Publish the core first, then the dependent Python package, and make the combined GitHub release public when both complete.
+
 ### License preservation
 
 - Preserve upstream Oxyde’s complete MIT license and original `Copyright (c) 2025 Nikita Ryzhenkov` notice unchanged, with author credit in package metadata and the README.

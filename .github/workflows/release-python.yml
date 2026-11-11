@@ -1,10 +1,6 @@
-name: Release oxyde-postgres
+name: Publish Python and complete combined release
 
 on:
-  push:
-    tags:
-      - 'v*'
-      - '!core-v*'  # Exclude core releases
   workflow_dispatch:
     inputs:
       version:
@@ -122,12 +118,8 @@ jobs:
         with:
           files: dist/*
           body_path: docs/changelog.md
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
-
-  # Deploy docs for minor/major releases
-  docs:
-    name: Deploy docs
-    needs: [publish]
-    uses: ./.github/workflows/docs.yml
-    with:
-      version: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+          tag_name: v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Oxyde for PostgreSQL ${{ inputs.version }}
+          draft: false
+          make_latest: true

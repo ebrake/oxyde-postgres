@@ -1,9 +1,9 @@
-name: Release oxyde-postgres-core
+name: Release Oxyde for PostgreSQL
 
 on:
   push:
     tags:
-      - 'core-v*'
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
@@ -20,8 +20,28 @@ jobs:
   build-sdist:
     name: Build source distribution
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v6.0.2
+
+      - name: Validate release version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PYTHON'
+          import os, tomllib
+          from pathlib import Path
+          core = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          orm = tomllib.loads(Path("python/pyproject.toml").read_text())["project"]["version"]
+          requested = os.environ.get("REQUESTED_VERSION") or os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          if requested != core or core != orm:
+              raise SystemExit(f"Release {requested} does not match core={core}, ORM={orm}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"version={core}\ntag=v{core}", file=output)
+          PYTHON
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1.51.0
@@ -167,11 +187,12 @@ jobs:
         run: uv publish --trusted-publishing always dist/*
 
   release:
-    name: Create GitHub Release
-    needs: publish
+    name: Stage combined release and publish Python package
+    needs: [publish, build-sdist]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
 
     steps:
       - uses: actions/checkout@v6.0.2
@@ -187,4 +208,14 @@ jobs:
         with:
           files: dist/*
           body_path: docs/changelog.md
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('core-v{0}', inputs.version) || github.ref_name }}
+          tag_name: ${{ needs.build-sdist.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Oxyde for PostgreSQL ${{ needs.build-sdist.outputs.version }}
+          draft: true
+
+      - name: Publish Python package and complete combined release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build-sdist.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build-sdist.outputs.version }}
+        run: gh workflow run release-python.yml --ref "$RELEASE_TAG" -f version="$RELEASE_VERSION"

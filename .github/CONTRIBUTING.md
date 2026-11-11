@@ -317,6 +317,6 @@ IR payload should stay under 10KB for best performance. Large bulk operations ma
 
 ## Release preparation
 
-The initial release is 0.1.0 for both `oxyde-postgres-core` and `oxyde-postgres`. Publish the core (`core-v0.1.0`) before the Python distribution (`v0.1.0`), which depends on it. Configure PyPI publishing and repository hosting for the new project before pushing release tags. The full first-release body is maintained in `docs/changelog.md`.
+The initial release is 0.1.0 for both `oxyde-postgres-core` and `oxyde-postgres`. Push a single `v0.1.0` tag (or dispatch `release-core.yml` with version `0.1.0`). The coordinated release builds and publishes the native core first, stages one GitHub release with its wheels, then dispatches `release-python.yml` to publish the Python package and complete that same release. Configure PyPI publishing and repository hosting for the new project before pushing release tags. The full first-release body is maintained in `docs/changelog.md`.
 
 On macOS, select the virtual environment's interpreter when running Rust tests: `PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --workspace --no-default-features`. Native extension builds retain the extension-module feature.
