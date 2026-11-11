@@ -15,11 +15,9 @@ Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.
 - Rust SQL generation, connection pooling, and execution, with Python 3.15 wheel support.
 - Cache-disabled unnamed statements for PostgreSQL/PgBouncer, including cold custom-type decoding without replaying queries.
 
-The initial fork release is **0.1.0**, currently in preparation. [First-release notes](docs/changelog.md) list every addition and its source.
+The initial fork release is **0.1.0**. [First-release notes](docs/changelog.md) list every addition and its source.
 
 ## Installation
-
-After the first release is published:
 
 ```bash
 pip install oxyde-postgres

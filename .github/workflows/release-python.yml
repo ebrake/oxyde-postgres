@@ -32,7 +32,10 @@ jobs:
 
       - name: Build package
         working-directory: python
-        run: uv build
+        run: uv build --no-sources
+
+      - name: Verify licenses and metadata
+        run: python scripts/check_release_artifacts.py python/dist --package oxyde-postgres
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7.0.1
@@ -95,11 +98,7 @@ jobs:
         run: ls -la dist/
 
       - name: Publish to PyPI
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
-        run: uv publish dist/*
-        # Alternative with trusted publishing (no token needed):
-        # run: uv publish dist/* --trusted-publishing always
+        run: uv publish --trusted-publishing always dist/*
 
   # Optional: Create GitHub release
   release:

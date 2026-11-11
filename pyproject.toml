@@ -7,7 +7,8 @@ name = "oxyde-postgres-core"
 version = "0.1.0"
 description = "PostgreSQL 18+ Rust core for Oxyde for PostgreSQL"
 readme = "crates/oxyde-core-py/README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE", "vendor/sqlx-postgres/LICENSE-MIT", "vendor/sqlx-postgres/LICENSE-APACHE"]
 requires-python = ">=3.10"
 authors = [
     {name = "Nikita Ryzhenkov", email = "nikita.ryzhenkoff@gmail.com"}

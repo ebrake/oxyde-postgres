@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — first fork release (unreleased)
+## 0.1.0 — first fork release (2026-11-11)
 
 Based on upstream [Oxyde](https://github.com/mr-fatalyst/oxyde) at `26f3e9d470134d218ca70051fb48627e90fd6d6e` (upstream Python 0.8.0 / core 0.7.1). This release combines the following additions; overlapping fixes are included once.
 
@@ -79,6 +79,12 @@ Source: [oxyde-core PR #2](https://github.com/rclayer/oxyde-core/pull/2), includ
 - Add regressions for wire message ordering, DDL, custom types, transaction visibility, cancellation, and catalog failure after `INSERT RETURNING` without duplicate writes.
 
 Cold custom-type results buffer until execution completes, which can increase latency and memory use for large result sets. See [connection settings](guide/connections.md).
+
+### License preservation
+
+- Preserve upstream Oxyde’s complete MIT license and original `Copyright (c) 2025 Nikita Ryzhenkov` notice unchanged, with author credit in package metadata and the README.
+- Include the original MIT text in both Python wheels and both source distributions, and include the vendored SQLx MIT/Apache notices in native wheels as well as native source distributions.
+- Check release artifacts for the complete license texts, copyright notice, author credit, package identity, and version before publishing.
 
 ### Initial validation
 
