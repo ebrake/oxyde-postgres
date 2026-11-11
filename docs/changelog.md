@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2 — complete generated stubs (2026-11-11)
+
+- Preserve public constants, typed declarations, supporting classes, `__all__`,
+  and intentional reexports when a generated stub shadows a model module.
+- Collect imports guarded by `TYPE_CHECKING`, including aliases and
+  `typing_extensions`, and render Python 3.15 native lazy imports as ordinary
+  imports in portable stubs.
+- Preserve typing factories, functional enums, implicit type aliases, explicit
+  `TypeAlias` declarations, and PEP 695 `type` statements as type declarations.
+- Avoid duplicate bindings when functions, classes, or imports are reassigned
+  through wrappers. Merge repeated imports and keep star imports separate.
+- Retain the ALL_CAPS constant reexport convention while excluding runtime
+  classes, functions, and modules. Avoid unnecessary skeleton imports for local
+  declarations and follow private signature dependencies with identifier sets.
+- Validation: 1,346 Python tests and 180 Rust tests passed; generated-stub checks
+  passed with mypy, pyright, and ty. Six Python 3.15 native lazy-import tests,
+  all pre-commit hooks, and the original reproduction cases passed.
+
 ## 0.2.1 — NULLS NOT DISTINCT (2026-11-11)
 
 - Support PostgreSQL `NULLS NOT DISTINCT` for unique indexes with

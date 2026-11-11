@@ -383,6 +383,47 @@ def _stub_class_def(class_def: ast.ClassDef) -> str:
     return ast.unparse(node_copy)
 
 
+_TYPING_MODULES = {"typing", "typing_extensions"}
+_MISSING = object()
+_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _import_origins(imports: list[ast.Import | ast.ImportFrom]) -> dict[str, str]:
+    """Resolve imported bindings, preserving relative module prefixes."""
+    origins: dict[str, str] = {}
+    for node in imports:
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            if isinstance(node, ast.ImportFrom):
+                module = "." * node.level + (node.module or "")
+                origin = module + ("" if module.endswith(".") else ".") + alias.name
+                bound = alias.asname or alias.name
+            else:
+                bound = alias.asname or alias.name.split(".")[0]
+                origin = alias.name if alias.asname else bound
+            origins[bound] = origin
+    return origins
+
+
+def _qualified_origin(value: ast.expr, origins: dict[str, str]) -> str | None:
+    if isinstance(value, ast.Name):
+        return origins.get(value.id)
+    if isinstance(value, ast.Attribute):
+        parent = _qualified_origin(value.value, origins)
+        if parent is not None:
+            return f"{parent}.{value.attr}"
+    return None
+
+
+def _is_typing_name(origin: str | None, name: str) -> bool:
+    return origin in {f"{module}.{name}" for module in _TYPING_MODULES}
+
+
+def _is_type_checking_guard(test: ast.expr, origins: dict[str, str]) -> bool:
+    return _is_typing_name(_qualified_origin(test, origins), "TYPE_CHECKING")
+
+
 def _extract_top_level_copyable(
     tree: ast.Module,
 ) -> tuple[list[ast.Import | ast.ImportFrom], list[str], list[ast.ClassDef]]:
@@ -396,19 +437,275 @@ def _extract_top_level_copyable(
     - ``ClassDef``: returned as raw AST nodes. The caller stubs model classes
       via the generator and copies supporting classes (enums used as column
       types, helper classes referenced by custom methods) via
-      ``_stub_class_def`` when the generated body references them — a ``.pyi``
-      shadows the module entirely, so an unreferenced name would otherwise
-      break both the stub and user imports of that class.
-    - Top-level assignments (constants) are intentionally skipped.
+      ``_stub_class_def`` when public or referenced by the generated body.
+    Imports in ``TYPE_CHECKING`` blocks are unconditional in the stub. Module
+    assignments and exports are handled by ``_module_export_inventory``.
     """
-    imports: list[ast.Import | ast.ImportFrom] = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-        and not (isinstance(node, ast.ImportFrom) and node.module == "__future__")
-    ]
+    imports: list[ast.Import | ast.ImportFrom] = []
+    origins = _import_origins(
+        [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    )
+
+    def collect_imports(body: list[ast.stmt]) -> None:
+        for node in body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                if not (
+                    isinstance(node, ast.ImportFrom) and node.module == "__future__"
+                ):
+                    imports.append(node)
+            elif isinstance(node, ast.If) and _is_type_checking_guard(
+                node.test, origins
+            ):
+                collect_imports(node.body)
+
+    collect_imports(tree.body)
     class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef)]
     return imports, _stub_function_defs(tree.body), class_defs
+
+
+def _union(types: set[str]) -> str:
+    return " | ".join(sorted(types)) if types and "Any" not in types else "Any"
+
+
+def _assignment_type(value: ast.expr | None) -> str:
+    """Infer literal types without evaluating source; dynamic values use Any."""
+    if isinstance(value, ast.Constant):
+        if value.value is None:
+            return "None"
+        if type(value.value) in (bool, int, float, complex, str, bytes):
+            return type(value.value).__name__
+    if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.UAdd, ast.USub)):
+        if isinstance(value.operand, ast.Constant) and type(value.operand.value) in (
+            int,
+            float,
+            complex,
+        ):
+            return type(value.operand.value).__name__
+    if isinstance(value, (ast.List, ast.Set)):
+        element = _union({_assignment_type(item) for item in value.elts})
+        container = "list" if isinstance(value, ast.List) else "set"
+        return f"{container}[{element}]"
+    if isinstance(value, ast.Tuple):
+        tuple_types = ", ".join(_assignment_type(item) for item in value.elts) or "()"
+        return f"tuple[{tuple_types}]"
+    if isinstance(value, ast.Dict):
+        key_type = _union({_assignment_type(key) for key in value.keys})
+        value_type = _union({_assignment_type(item) for item in value.values})
+        return f"dict[{key_type}, {value_type}]"
+    return "Any"
+
+
+def _literal_export_names(value: ast.expr | None) -> list[str] | None:
+    if isinstance(value, (ast.List, ast.Tuple)):
+        names = [
+            item.value
+            for item in value.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        ]
+        return names if len(names) == len(value.elts) else None
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        left = _literal_export_names(value.left)
+        right = _literal_export_names(value.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+class _ModuleExports(NamedTuple):
+    names: set[str]
+    declarations: dict[str, str]
+    all_declaration: str | None
+    local: set[str]
+
+
+_TYPE_FACTORIES = {
+    *(
+        f"{module}.{name}"
+        for module in _TYPING_MODULES
+        for name in (
+            "TypeVar",
+            "ParamSpec",
+            "TypeVarTuple",
+            "NewType",
+            "TypeAliasType",
+            "NamedTuple",
+            "TypedDict",
+        )
+    ),
+    *(f"enum.{name}" for name in ("Enum", "IntEnum", "StrEnum", "Flag", "IntFlag")),
+}
+_BUILTIN_TYPES = {
+    "bool",
+    "bytes",
+    "complex",
+    "dict",
+    "float",
+    "frozenset",
+    "int",
+    "list",
+    "object",
+    "set",
+    "str",
+    "tuple",
+    "type",
+}
+
+
+def _is_type_expression(value: ast.expr, type_names: set[str]) -> bool:
+    if isinstance(value, ast.Name):
+        return value.id in type_names
+    if isinstance(value, ast.Attribute):
+        return _is_type_expression(value.value, type_names)
+    if isinstance(value, ast.Constant):
+        return value.value is None
+    if isinstance(value, ast.Subscript):
+        return _is_type_expression(value.value, type_names)
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+        return _is_type_expression(value.left, type_names) and _is_type_expression(
+            value.right, type_names
+        )
+    return False
+
+
+def _module_export_inventory(
+    tree: ast.Module,
+    imports: list[ast.Import | ast.ImportFrom],
+    origins: dict[str, str],
+    module: types.ModuleType | None,
+) -> _ModuleExports:
+    """Inventory declarations and intentional reexports before pruning names.
+
+    Besides __all__ and redundant aliases, imported public CONSTANT_NAMES are
+    treated as reexports, a common convention in model modules. Other imports
+    remain dependencies rather than expanding the module's public interface.
+    """
+    names: set[str] = set()
+    declarations: dict[str, str] = {}
+    definitions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    type_names = (
+        _BUILTIN_TYPES
+        | set(origins)
+        | {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    )
+    all_names: list[str] | None = None
+    has_all = False
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
+                has_all = True
+                all_names = _literal_export_names(node.value)
+                continue
+            for target in targets:
+                for binding in ast.walk(target):
+                    if not isinstance(binding, ast.Name) or not isinstance(
+                        binding.ctx, ast.Store
+                    ):
+                        continue
+                    name = binding.id
+                    if name in definitions or name in origins:
+                        continue
+                    annotation = (
+                        ast.unparse(node.annotation)
+                        if isinstance(node, ast.AnnAssign)
+                        else _assignment_type(node.value)
+                        if isinstance(target, ast.Name)
+                        else "Any"
+                    )
+                    if annotation in ("Final", "typing.Final"):
+                        annotation = f"{annotation}[{_assignment_type(node.value)}]"
+                    declaration = f"{name}: {annotation}"
+                    if isinstance(target, ast.Name) and node.value is not None:
+                        if isinstance(node, ast.AnnAssign) and _is_typing_name(
+                            _qualified_origin(node.annotation, origins), "TypeAlias"
+                        ):
+                            declaration += f" = {ast.unparse(node.value)}"
+                        elif isinstance(node, ast.Assign) and (
+                            isinstance(node.value, ast.Call)
+                            and _qualified_origin(node.value.func, origins)
+                            in _TYPE_FACTORIES
+                            or isinstance(node.value, (ast.Subscript, ast.BinOp))
+                            and _is_type_expression(node.value, type_names)
+                        ):
+                            declaration = f"{name} = {ast.unparse(node.value)}"
+                    declarations[name] = declaration
+                    if not name.startswith("_"):
+                        names.add(name)
+        elif isinstance(node, ast.TypeAlias):
+            name = node.name.id
+            if name not in definitions and name not in origins:
+                declarations[name] = ast.unparse(node)
+                if not name.startswith("_"):
+                    names.add(name)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == "__all__":
+                extra = _literal_export_names(node.value)
+                all_names = (
+                    all_names + extra
+                    if all_names is not None
+                    and extra is not None
+                    and isinstance(node.op, ast.Add)
+                    else None
+                )
+        elif (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == "__all__"
+        ):
+            call = node.value
+            if (
+                all_names is not None
+                and isinstance(call.func, ast.Attribute)
+                and len(call.args) == 1
+            ):
+                if call.func.attr == "extend":
+                    extra = _literal_export_names(call.args[0])
+                    all_names = all_names + extra if extra is not None else None
+                elif (
+                    call.func.attr == "append"
+                    and isinstance(call.args[0], ast.Constant)
+                    and isinstance(call.args[0].value, str)
+                ):
+                    all_names.append(call.args[0].value)
+                else:
+                    all_names = None
+        elif isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+            names.add(node.name)
+
+    names.update(all_names or [])
+    for node in imports:
+        for alias in node.names:
+            bound = alias.asname or alias.name.split(".")[0]
+            value = getattr(module, bound, _MISSING)
+            if alias.asname == alias.name or (
+                not has_all
+                and not bound.startswith("_")
+                and not _is_typing_name(origins.get(bound), "TYPE_CHECKING")
+                and bound.isupper()
+                and not (
+                    inspect.isclass(value)
+                    or inspect.isfunction(value)
+                    or inspect.isbuiltin(value)
+                    or inspect.ismodule(value)
+                )
+            ):
+                names.add(bound)
+    all_declaration = None
+    if has_all:
+        all_declaration = (
+            f"__all__ = {all_names!r}"
+            if all_names is not None
+            else "__all__: list[str]"
+        )
+    return _ModuleExports(
+        names, declarations, all_declaration, definitions | declarations.keys()
+    )
 
 
 # Names the generated stub skeleton may reference, grouped by stdlib module.
@@ -427,7 +724,10 @@ def _is_name_used(name: str, body: str) -> bool:
 
 
 def _assemble_imports(
-    user_imports: list[ast.Import | ast.ImportFrom], body: str
+    user_imports: list[ast.Import | ast.ImportFrom],
+    body: str,
+    exports: set[str] | None = None,
+    local: set[str] | None = None,
 ) -> list[str]:
     """Build the stub import block: skeleton imports plus surviving user imports.
 
@@ -436,14 +736,32 @@ def _assemble_imports(
     still needs (cross-module FK types, custom-method signatures, decorators);
     unused names and duplicates of skeleton names are dropped — on a name
     collision the skeleton import wins, since the generated code references the
-    skeleton's meaning of that name. Stdlib ``from`` imports are merged with the
-    skeleton block so each module is imported once.
+    skeleton's meaning of that name. All ``from`` imports are merged by module;
+    star imports remain separate because they cannot share an import statement.
     """
-    stdlib_from: dict[str, set[str]] = {}
+    exports = exports or set()
+    local = local or set()
+    user_from_names = {
+        (node.module, alias.name)
+        for node in user_imports
+        if isinstance(node, ast.ImportFrom) and node.level == 0
+        for alias in node.names
+        if alias.asname is None or alias.asname == alias.name
+    }
+    from_groups: dict[tuple[int, str | None], dict[str, ast.alias]] = {}
     for module, names in _STUB_HEADER_IMPORTS:
-        used = {name for name in names if _is_name_used(name, body)}
+        used = {
+            name: ast.alias(name=name, asname=name if name in exports else None)
+            for name in sorted(names)
+            if name not in local
+            and (
+                _is_name_used(name, body)
+                or name in exports
+                and (module, name) in user_from_names
+            )
+        }
         if used:
-            stdlib_from[module] = used
+            from_groups[(0, module)] = used
 
     provided: set[str] = {
         "FlatValuesListQuery",
@@ -453,35 +771,53 @@ def _assemble_imports(
         "ValuesListQuery",
         "ValuesQuery",
     }
-    provided.update(*stdlib_from.values())
+    provided.update(*(group.keys() for group in from_groups.values()))
 
-    other_lines: list[str] = []
+    plain: dict[str, ast.alias] = {}
+    star_modules: set[tuple[int, str | None]] = set()
     for node in user_imports:
-        kept = [
-            alias
-            for alias in node.names
-            if (bound := alias.asname or alias.name.split(".")[0]) not in provided
-            and _is_name_used(bound, body)
-        ]
-        if not kept:
-            continue
+        for alias in node.names:
+            if alias.name == "*" and isinstance(node, ast.ImportFrom):
+                star_modules.add((node.level, node.module))
+                continue
+            bound = alias.asname or alias.name.split(".")[0]
+            if bound in provided or not (
+                _is_name_used(bound, body) or bound in exports
+            ):
+                continue
+            alias = copy.deepcopy(alias)
+            if bound in exports and alias.asname is None and "." not in alias.name:
+                alias.asname = alias.name
+            if isinstance(node, ast.ImportFrom):
+                from_groups.setdefault((node.level, node.module), {})[bound] = alias
+            else:
+                plain[bound] = alias
+
+    import_nodes: list[ast.Import | ast.ImportFrom] = [
+        ast.ImportFrom(module=module, names=list(aliases.values()), level=level)
+        for (level, module), aliases in from_groups.items()
+    ]
+    import_nodes.extend(
+        ast.ImportFrom(module=module, names=[ast.alias(name="*")], level=level)
+        for level, module in star_modules
+    )
+    import_nodes.extend(ast.Import(names=[alias]) for alias in plain.values())
+    stdlib_lines: list[str] = []
+    other_lines: list[str] = []
+    for node in import_nodes:
+        setattr(node, "is_lazy", False)
+        line = ast.unparse(node)
         if (
             isinstance(node, ast.ImportFrom)
             and node.level == 0
             and node.module is not None
             and node.module.split(".")[0] in sys.stdlib_module_names
-            and all(alias.asname is None for alias in kept)
         ):
-            stdlib_from.setdefault(node.module, set()).update(a.name for a in kept)
-            continue
-        node_copy = copy.deepcopy(node)
-        node_copy.names = [copy.deepcopy(alias) for alias in kept]
-        other_lines.append(ast.unparse(node_copy))
+            stdlib_lines.append(line)
+        else:
+            other_lines.append(line)
 
-    lines = [
-        f"from {module} import {', '.join(sorted(names))}"
-        for module, names in sorted(stdlib_from.items())
-    ]
+    lines = sorted(stdlib_lines)
     if lines:
         lines.append("")
     # Parenthesized because the one-line form exceeds the 88-char line limit
@@ -1073,18 +1409,17 @@ class {model_name}Manager(QueryManager[{model_name}]):
 def _build_stub(file_path: Path, models: list[type[Model]]) -> str:
     """Build .pyi stub content for a source file that contains Model classes.
 
-    Policy: the .pyi covers models plus top-level functions (as stubs). From
-    the source we also keep the imports still referenced by the generated body
-    (cross-module FK types, custom-method signatures, decorators) and copy the
-    supporting top-level classes the body references — most importantly enums
-    used as column types, which appear throughout the generated filter/create
-    signatures. Unreferenced classes and top-level constants are not
-    propagated.
+    The stub shadows the whole module: preserve its public declarations and
+    reexports, along with private dependencies required by their signatures.
+    Runtime assignment expressions become typed declarations.
     """
     source = file_path.read_text()
     tree = ast.parse(source)
 
     user_imports, function_stubs, class_defs = _extract_top_level_copyable(tree)
+    origins = _import_origins(user_imports)
+    module = sys.modules.get(models[0].__module__) if models else None
+    exports = _module_export_inventory(tree, user_imports, origins, module)
 
     model_names = {m.__name__ for m in models}
     custom_methods_by_model: dict[str, list[str]] = {
@@ -1094,6 +1429,8 @@ def _build_stub(file_path: Path, models: list[type[Model]]) -> str:
     }
 
     body_parts: list[str] = []
+    if exports.all_declaration is not None:
+        body_parts.extend([exports.all_declaration, ""])
     for function_stub in function_stubs:
         body_parts.append(function_stub)
         body_parts.append("")
@@ -1109,22 +1446,27 @@ def _build_stub(file_path: Path, models: list[type[Model]]) -> str:
         body_parts.append("")
     core_body = "\n".join(body_parts)
 
-    # Copy supporting classes the body references. Iterated to a fixpoint:
-    # a kept class may itself reference another top-level class (an enum used
-    # in a dataclass field, a base class).
+    # Include public classes/constants and follow private dependencies to a
+    # fixpoint (e.g. a public helper whose annotation uses a private enum).
     support_defs = [node for node in class_defs if node.name not in model_names]
     support_stubs: dict[str, str] = {}
-    search_space = core_body
+    declarations: dict[str, str] = {}
+    used = set(_IDENT_RE.findall(core_body))
     changed = True
     while changed:
         changed = False
         for node in support_defs:
             if node.name in support_stubs:
                 continue
-            if _is_name_used(node.name, search_space):
+            if node.name in exports.names or node.name in used:
                 stub_src = _stub_class_def(node)
                 support_stubs[node.name] = stub_src
-                search_space = f"{search_space}\n{stub_src}"
+                used.update(_IDENT_RE.findall(stub_src))
+                changed = True
+        for name, declaration in exports.declarations.items():
+            if name not in declarations and (name in exports.names or name in used):
+                declarations[name] = declaration
+                used.update(_IDENT_RE.findall(declaration))
                 changed = True
 
     support_parts: list[str] = []
@@ -1132,13 +1474,13 @@ def _build_stub(file_path: Path, models: list[type[Model]]) -> str:
         if node.name in support_stubs:
             support_parts.append(support_stubs[node.name])
             support_parts.append("")
-    body = "\n".join([*support_parts, core_body])
+    body = "\n".join([*declarations.values(), "", *support_parts, core_body])
 
     parts: list[str] = [
         "# Auto-generated by oxyde generate-stubs",
         "# DO NOT EDIT - This file will be overwritten",
         "",
-        *_assemble_imports(user_imports, body),
+        *_assemble_imports(user_imports, body, exports.names, exports.local),
         "",
         body,
     ]

@@ -34,10 +34,14 @@ FIXTURES: list[tuple[str, str, str, str]] = [
     ("edges/reserved_names", "edges/reserved_names", "module", "usage.py"),
     ("edges/generics_in_field", "edges/generics_in_field", "module", "usage.py"),
     ("edges/enums", "edges/enums", "module", "usage.py"),
+    ("edges/module_exports", "edges/module_exports", "module", "usage.py"),
+    ("edges/explicit_all", "edges/explicit_all", "module", "usage.py"),
+    ("edges/type_checking", "edges/type_checking", "module", "usage.py"),
+    ("edges/type_level", "edges/type_level", "module", "usage.py"),
 ]
 
 
-def _run_mypy(target: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run_mypy(target: Path | list[Path], cwd: Path) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "MYPYPATH": OXYDE_PARENT}
     return subprocess.run(
         [
@@ -47,7 +51,7 @@ def _run_mypy(target: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
             "--no-incremental",
             "--explicit-package-bases",
             "--show-error-codes",
-            str(target),
+            *map(str, [target] if isinstance(target, Path) else target),
         ],
         capture_output=True,
         text=True,
@@ -64,6 +68,7 @@ def _stub_targets(work_dir: Path, usage_file: str) -> list[Path]:
 
 
 def _run_pyright(targets: list[Path], cwd: Path) -> subprocess.CompletedProcess[str]:
+    assert PYRIGHT_EXE is not None
     (cwd / "pyrightconfig.json").write_text(
         json.dumps({"typeCheckingMode": "standard", "extraPaths": [OXYDE_PARENT]})
     )
@@ -78,6 +83,7 @@ def _run_pyright(targets: list[Path], cwd: Path) -> subprocess.CompletedProcess[
 def _run_ty(
     targets: list[Path], cwd: Path, *, concise: bool = False
 ) -> subprocess.CompletedProcess[str]:
+    assert TY_EXE is not None
     return subprocess.run(
         [
             TY_EXE,
@@ -110,10 +116,7 @@ def test_mypy_accepts_generated_stubs(
 ) -> None:
     source_dir = FIXTURES_DIR / fixture_dir
     work_dir = generate_stubs(source_dir, model_module)
-    usage_path = work_dir / usage_file
-    assert usage_path.exists(), f"usage fixture missing: {usage_path}"
-
-    result = _run_mypy(usage_path, work_dir)
+    result = _run_mypy(_stub_targets(work_dir, usage_file), work_dir)
     assert result.returncode == 0, (
         f"mypy failed for fixture '{fixture_dir}':\n"
         f"--- STDOUT ---\n{result.stdout}\n"
@@ -199,6 +202,61 @@ def test_mypy_accepts_model_source(
         f"--- STDOUT ---\n{result.stdout}\n"
         f"--- STDERR ---\n{result.stderr}"
     )
+
+
+@pytest.mark.skipif(sys.version_info < (3, 15), reason="requires native lazy imports")
+@pytest.mark.parametrize("checker", ["mypy", "pyright", "ty"])
+def test_native_lazy_imports_generate_portable_stubs(
+    checker: str, tmp_path: Path, generate_stubs
+) -> None:
+    source_dir = tmp_path / "lazy_source"
+    source_dir.mkdir()
+    (source_dir / "module.py").write_text(
+        "from __future__ import annotations\n"
+        "from oxyde import Field, Model\n"
+        "lazy import sibling\n"
+        "lazy from sibling import Related, DEFAULT_INTERVAL\n"
+        "class Entry(Model):\n"
+        "    id: int | None = Field(default=None, db_pk=True)\n"
+        "    def related(self) -> Related | None:\n"
+        "        return None\n"
+        "    class Meta:\n"
+        "        is_table = True\n"
+        "def helper(value: sibling.Related) -> Related:\n"
+        "    return value\n"
+    )
+    (source_dir / "sibling.py").write_text(
+        "DEFAULT_INTERVAL: int = 30\n"
+        "class Related:\n"
+        "    def label(self) -> str:\n"
+        "        return 'related'\n"
+    )
+    (source_dir / "usage.py").write_text(
+        "from typing import assert_type\n"
+        "from module import DEFAULT_INTERVAL, Entry, helper\n"
+        "from sibling import Related\n"
+        "interval: int = DEFAULT_INTERVAL\n"
+        "def check(entry: Entry, related: Related) -> None:\n"
+        "    assert_type(entry.related(), Related | None)\n"
+        "    assert_type(helper(related), Related)\n"
+    )
+    work_dir = generate_stubs(source_dir, "module")
+    stub = (work_dir / "module.pyi").read_text()
+    assert "lazy " not in stub
+    assert "from sibling import Related, DEFAULT_INTERVAL as DEFAULT_INTERVAL" in stub
+    assert "import sibling" in stub
+    targets = _stub_targets(work_dir, "usage.py")
+    if checker == "mypy":
+        result = _run_mypy(targets, work_dir)
+    elif checker == "pyright":
+        if PYRIGHT_EXE is None:
+            pytest.skip("pyright is not installed")
+        result = _run_pyright(targets, work_dir)
+    else:
+        if TY_EXE is None:
+            pytest.skip("ty is not installed")
+        result = _run_ty(targets, work_dir)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # --- Negative tests: wrong usage MUST be rejected. -------------------------

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import sys
+import types
 from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
@@ -12,6 +14,7 @@ import pytest
 from oxyde import Field, Model
 from oxyde.codegen.stub_generator import (
     _assemble_imports,
+    _build_stub,
     _extract_custom_methods,
     _extract_top_level_copyable,
     _generate_create_params,
@@ -124,6 +127,47 @@ class TestExtractTopLevelCopyable:
         assert len(functions) == 1
         assert [node.name for node in classes] == ["Color"]
 
+    @pytest.mark.parametrize(
+        ("source", "guard"),
+        [
+            ("from typing import TYPE_CHECKING", "TYPE_CHECKING"),
+            ("import typing", "typing.TYPE_CHECKING"),
+            ("import typing as t", "t.TYPE_CHECKING"),
+            ("import typing_extensions", "typing_extensions.TYPE_CHECKING"),
+            ("from typing import TYPE_CHECKING as TC", "TC"),
+            ("from typing_extensions import TYPE_CHECKING as TC", "TC"),
+        ],
+    )
+    def test_type_checking_imports_collected(self, source, guard):
+        tree = ast.parse(
+            f"{source}\nif {guard}:\n"
+            "    from .users import User as Owner\n"
+            "    import decimal as numbers\n"
+            "else:\n"
+            "    from runtime_only import Fallback\n"
+            "if runtime_condition:\n"
+            "    from unrelated import Other\n"
+            "def helper():\n"
+            "    from local import Local\n"
+        )
+        imports, _, _ = _extract_top_level_copyable(tree)
+        assert [ast.unparse(node) for node in imports] == [
+            source,
+            "from .users import User as Owner",
+            "import decimal as numbers",
+        ]
+
+    @pytest.mark.parametrize(
+        "source",
+        ["from .typing import TYPE_CHECKING", "from other import TYPE_CHECKING"],
+    )
+    def test_unrelated_type_checking_names_are_not_guards(self, source):
+        tree = ast.parse(
+            f"{source}\nif TYPE_CHECKING:\n    from hidden import Hidden\n"
+        )
+        imports, _, _ = _extract_top_level_copyable(tree)
+        assert [ast.unparse(node) for node in imports] == [source]
+
 
 class TestStubClassDef:
     """Test stubbing of supporting top-level classes (enums, helpers)."""
@@ -210,6 +254,351 @@ class TestAssembleImports:
         lines = _assemble_imports(imports, body)
         typing_lines = [ln for ln in lines if ln.startswith("from typing import")]
         assert typing_lines == ["from typing import Any, ClassVar, overload"]
+
+    def test_explicit_reexports_and_star_imports_survive(self):
+        imports = self._imports(
+            "from .constants import EXPORTED\n"
+            "from datetime import datetime\n"
+            "from .helpers import Helper as Helper\n"
+            "from .other import *\n"
+        )
+        lines = _assemble_imports(imports, "", {"EXPORTED", "Helper", "datetime"})
+        assert "from .constants import EXPORTED as EXPORTED" in lines
+        assert "from datetime import datetime as datetime" in lines
+        assert "from .helpers import Helper as Helper" in lines
+        assert "from .other import *" in lines
+
+    @pytest.mark.parametrize(
+        ("source", "body", "expected"),
+        [
+            (
+                "from datetime import *\n",
+                "value: datetime",
+                ["from datetime import *", "from datetime import datetime"],
+            ),
+            (
+                "from .a import Foo\nfrom typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING:\n    from .a import Foo, Bar\n",
+                "value: Foo | Bar",
+                ["from .a import Foo, Bar"],
+            ),
+            (
+                "from third_party import Foo\nfrom third_party import Foo, Bar\n",
+                "value: Foo | Bar",
+                ["from third_party import Foo, Bar"],
+            ),
+            (
+                "import package as pkg\nimport package as pkg\n",
+                "value: pkg.Foo",
+                ["import package as pkg"],
+            ),
+            (
+                "from . import Foo\nfrom . import Foo, Bar\n",
+                "value: Foo | Bar",
+                ["from . import Foo, Bar"],
+            ),
+        ],
+    )
+    def test_imports_merged_without_combining_stars(self, source, body, expected):
+        lines = _assemble_imports(self._imports(source), body)
+        for line in expected:
+            assert lines.count(line) == 1
+        ast.parse("\n".join([*lines, body]))
+        if any(" import Foo" in line for line in expected):
+            assert sum(" import Foo" in line for line in lines) == 1
+
+    def test_reexport_does_not_force_an_unrelated_skeleton_import(self):
+        imports = self._imports("from .constants import UUID\n")
+        lines = _assemble_imports(imports, "", {"UUID"})
+        assert "from .constants import UUID as UUID" in lines
+        assert not any(line.startswith("from uuid import") for line in lines)
+        ast.parse("\n".join(lines))
+
+    @pytest.mark.parametrize(
+        "source", ["import sibling", "from sibling import Related"]
+    )
+    def test_lazy_flag_cleared_on_copy(self, source, monkeypatch):
+        imports = self._imports(source)
+        setattr(imports[0], "is_lazy", True)
+        unparse = ast.unparse
+
+        def check_eager(node):
+            assert getattr(node, "is_lazy") is False
+            return unparse(node)
+
+        monkeypatch.setattr(ast, "unparse", check_eager)
+        _assemble_imports(imports, "value: sibling.Related | Related")
+        assert getattr(imports[0], "is_lazy") is True
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 15), reason="requires native lazy imports"
+    )
+    def test_native_lazy_imports_render_as_ordinary_imports(self):
+        imports = self._imports(
+            "lazy import sibling\nlazy from sibling import Related\n"
+        )
+        lines = _assemble_imports(imports, "value: sibling.Related | Related")
+        assert "import sibling" in lines
+        assert "from sibling import Related" in lines
+        assert all(not line.startswith("lazy ") for line in lines)
+
+
+class TestModuleExports:
+    @staticmethod
+    def _stub(tmp_path, source):
+        path = tmp_path / "module.py"
+        path.write_text(source)
+        stub = _build_stub(path, [])
+        ast.parse(stub)
+        return stub
+
+    @pytest.mark.parametrize(
+        ("source", "declaration"),
+        [
+            ("from typing import TypeVar\nT = TypeVar('T')", "T = TypeVar('T')"),
+            ("import typing as t\nT = t.TypeVar('T')", "T = t.TypeVar('T')"),
+            ("from typing_extensions import TypeVar as TV\nT = TV('T')", "T = TV('T')"),
+            ("from typing import ParamSpec\nP = ParamSpec('P')", "P = ParamSpec('P')"),
+            (
+                "from typing import TypeVarTuple\nTs = TypeVarTuple('Ts')",
+                "Ts = TypeVarTuple('Ts')",
+            ),
+            (
+                "from typing import NewType\nId = NewType('Id', int)",
+                "Id = NewType('Id', int)",
+            ),
+            (
+                "from typing_extensions import TypeAliasType\nIds = TypeAliasType('Ids', list[int])",
+                "Ids = TypeAliasType('Ids', list[int])",
+            ),
+            (
+                "from typing import NamedTuple\nPair = NamedTuple('Pair', [('x', int)])",
+                "Pair = NamedTuple('Pair', [('x', int)])",
+            ),
+            (
+                "from typing import TypedDict\nRow = TypedDict('Row', {'id': int})",
+                "Row = TypedDict('Row', {'id': int})",
+            ),
+            (
+                "from enum import Enum\nStatus = Enum('Status', 'A B')",
+                "Status = Enum('Status', 'A B')",
+            ),
+            (
+                "from enum import Enum as E\nStatus = E('Status', 'A B')",
+                "Status = E('Status', 'A B')",
+            ),
+            (
+                "import enum as e\nStatus = e.Enum('Status', 'A B')",
+                "Status = e.Enum('Status', 'A B')",
+            ),
+            ("Ids = list[int]", "Ids = list[int]"),
+            ("Number = int | str | None", "Number = int | str | None"),
+            ("class Helper: pass\nHelpers = list[Helper]", "Helpers = list[Helper]"),
+            (
+                "from typing import TypeAlias\nJsonDict: TypeAlias = dict[str, int]",
+                "JsonDict: TypeAlias = dict[str, int]",
+            ),
+            (
+                "import typing_extensions as t\nJsonDict: t.TypeAlias = dict[str, int]",
+                "JsonDict: t.TypeAlias = dict[str, int]",
+            ),
+            ("type Ids = list[int]", "type Ids = list[int]"),
+            ("type Items[T] = list[T]", "type Items[T] = list[T]"),
+        ],
+    )
+    def test_type_level_declarations_preserved(self, tmp_path, source, declaration):
+        stub = self._stub(tmp_path, source + "\n")
+        assert declaration in stub
+        name = declaration.removeprefix("type ").split()[0].split(":")[0].split("[")[0]
+        assert f"{name}: Any" not in stub
+
+    @pytest.mark.parametrize("factory", ["IntEnum", "StrEnum", "Flag", "IntFlag"])
+    def test_enum_factories_preserved(self, tmp_path, factory):
+        stub = self._stub(
+            tmp_path,
+            f"from enum import {factory}\nStatus = {factory}('Status', 'A B')\n",
+        )
+        assert f"Status = {factory}('Status', 'A B')" in stub
+        assert f"from enum import {factory}" in stub
+
+    @pytest.mark.parametrize(
+        ("source", "expected", "absent"),
+        [
+            (
+                "import functools\ndef cached(x: int) -> int: return x\ncached = functools.cache(cached)\n",
+                "def cached(x: int) -> int:",
+                "cached: Any",
+            ),
+            (
+                "from functools import total_ordering\nclass Helper: pass\nHelper = total_ordering(Helper)\n",
+                "class Helper:",
+                "Helper: Any",
+            ),
+            (
+                "from helpers import Helper\nHelper = wrap(Helper)\ndef use(x: Helper) -> Helper: return x\n",
+                "from helpers import Helper",
+                "Helper: Any",
+            ),
+            (
+                "from .typing import TypeVar\nT = TypeVar('T')\n",
+                "T: Any",
+                "T = TypeVar",
+            ),
+            ("DATA = {'key': 1}\nVALUE = DATA['key']\n", "VALUE: Any", "VALUE = DATA"),
+            (
+                "LEFT = 1\nRIGHT = 2\nVALUE = LEFT | RIGHT\n",
+                "VALUE: Any",
+                "VALUE = LEFT",
+            ),
+        ],
+    )
+    def test_runtime_assignments_do_not_create_type_bindings(
+        self, tmp_path, source, expected, absent
+    ):
+        stub = self._stub(tmp_path, source)
+        assert expected in stub
+        assert absent not in stub
+
+    @pytest.mark.parametrize("name", ["time", "date", "datetime", "Decimal", "UUID"])
+    def test_local_declarations_do_not_force_skeleton_imports(self, tmp_path, name):
+        stub = self._stub(tmp_path, f"{name} = 5\n")
+        assert f"{name}: int" in stub
+        assert not any(
+            isinstance(node, ast.ImportFrom)
+            and any(alias.name == name for alias in node.names)
+            for node in ast.parse(stub).body
+        )
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "import typing as t\nif t.TYPE_CHECKING:\n    from .helpers import Helper\n",
+            "import typing_extensions\nif typing_extensions.TYPE_CHECKING:\n    from .helpers import Helper\n",
+            "from typing import TYPE_CHECKING as TC\nif TC:\n    from .helpers import Helper\n",
+        ],
+    )
+    def test_guarded_dependencies_survive_without_guard_reexports(
+        self, tmp_path, source
+    ):
+        stub = self._stub(tmp_path, source + "def use(x: Helper) -> Helper: return x\n")
+        assert "from .helpers import Helper" in stub
+        assert "TYPE_CHECKING" not in stub
+        assert "TC as TC" not in stub
+
+    def test_all_caps_reexports_exclude_runtime_types_and_callables(
+        self, tmp_path, monkeypatch
+    ):
+        class Entry(Model):
+            id: int = Field(db_pk=True)
+
+        module = types.ModuleType("stub_runtime")
+        module.__dict__.update(
+            UUID=UUID, CONST=1, FUNC=lambda: None, BUILTIN=len, MODULE=sys
+        )
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        monkeypatch.setattr(Entry, "__module__", module.__name__)
+        path = tmp_path / "module.py"
+        path.write_text(
+            "from uuid import UUID\n"
+            "from helpers import CONST, FUNC, BUILTIN, MODULE\n"
+            "def use(value: UUID) -> UUID: return value\n"
+            "class Entry(Model):\n    id: int\n"
+        )
+        stub = _build_stub(path, [Entry])
+        ast.parse(stub)
+        assert "from uuid import UUID\n" in stub
+        assert "UUID as UUID" not in stub
+        assert "from helpers import CONST as CONST" in stub
+        assert all(name not in stub for name in ("FUNC", "BUILTIN", "MODULE"))
+
+    def test_all_caps_reexports_fall_back_without_runtime_module(self, tmp_path):
+        stub = self._stub(tmp_path, "from constants import DEFAULT_INTERVAL\n")
+        assert "from constants import DEFAULT_INTERVAL as DEFAULT_INTERVAL" in stub
+
+    def test_constants_become_declarations_without_executable_values(self, tmp_path):
+        stub = self._stub(
+            tmp_path,
+            "from decimal import Decimal\n"
+            "from typing import Final\n"
+            "UNSPECIFIED_ENUM_VALUE = -1\n"
+            "ANNOTATED: Decimal = Decimal('0')\n"
+            "LIMIT: Final = 10\n"
+            "DYNAMIC = create_value()\n"
+            "_private = create_private_value()\n",
+        )
+        assert "UNSPECIFIED_ENUM_VALUE: int" in stub
+        assert "ANNOTATED: Decimal" in stub
+        assert "LIMIT: Final[int]" in stub
+        assert "DYNAMIC: Any" in stub
+        assert "create_value" not in stub
+        assert "create_private_value" not in stub
+        assert "from decimal import Decimal" in stub
+
+    @pytest.mark.parametrize(
+        ("value", "annotation"),
+        [
+            ("True", "bool"),
+            ("1.5", "float"),
+            ("1j", "complex"),
+            ("'text'", "str"),
+            ("b'bytes'", "bytes"),
+            ("None", "None"),
+            ("[1, 2]", "list[int]"),
+            ("[]", "list[Any]"),
+            ("{'a': 1}", "dict[str, int]"),
+            ("{1, 2}", "set[int]"),
+            ("(1, 'a')", "tuple[int, str]"),
+            ("()", "tuple[()]"),
+            ("factory()", "Any"),
+        ],
+    )
+    def test_literal_types(self, tmp_path, value, annotation):
+        stub = self._stub(tmp_path, f"VALUE = {value}\n")
+        assert f"VALUE: {annotation}" in stub
+
+    def test_all_preserved_and_aliased_imports_exported(self, tmp_path):
+        stub = self._stub(
+            tmp_path,
+            "from .constants import Original as ExportedName, UNUSED\n"
+            "__all__ = ['ExportedName']\n"
+            "__all__ += ['_hidden']\n"
+            "__all__.extend(['Helper'])\n"
+            "__all__.append('VALUE')\n"
+            "_hidden: int = compute()\n"
+            "VALUE = 1\n"
+            "class Helper: pass\n",
+        )
+        assert "__all__ = ['ExportedName', '_hidden', 'Helper', 'VALUE']" in stub
+        assert "from .constants import Original as ExportedName" in stub
+        assert "_hidden: int" in stub
+        assert "UNUSED" not in stub
+
+    def test_public_classes_and_private_dependencies_preserved(self, tmp_path):
+        stub = self._stub(
+            tmp_path,
+            "from .constants import DEFAULT_INTERVAL, helper\n"
+            "class _PrivateBase: pass\n"
+            "class PublicHelper(_PrivateBase):\n"
+            "    def value(self) -> int: return 1\n"
+            "class _Unused: pass\n",
+        )
+        assert "class PublicHelper(_PrivateBase):" in stub
+        assert "class _PrivateBase:" in stub
+        assert "class _Unused:" not in stub
+        assert "from .constants import DEFAULT_INTERVAL as DEFAULT_INTERVAL" in stub
+        assert "import helper" not in stub
+
+    def test_private_alias_dependencies_in_forward_references_preserved(self, tmp_path):
+        stub = self._stub(
+            tmp_path,
+            "class _Helper: pass\n"
+            "class _Unused: pass\n"
+            "type _Items = list[_Helper]\n"
+            "def use(value: '_Items') -> '_Items': return value\n",
+        )
+        assert "type _Items = list[_Helper]" in stub
+        assert "class _Helper:" in stub
+        assert "class _Unused:" not in stub
 
 
 class TestGenerateFilterParams:
