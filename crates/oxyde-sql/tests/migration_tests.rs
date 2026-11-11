@@ -10,6 +10,7 @@ use oxyde_sql::{Dialect, Migration, MigrationOpExt};
 
 fn sample_field(name: &str) -> FieldDef {
     FieldDef {
+        replay_shape: Default::default(),
         name: name.to_string(),
         column_type: ColumnTypeSpec::String { length: None },
         db_type: None,
@@ -30,6 +31,7 @@ fn sample_table() -> TableDef {
         name: "users".into(),
         fields: vec![
             FieldDef {
+                replay_shape: Default::default(),
                 name: "id".into(),
                 column_type: ColumnTypeSpec::BigInteger,
                 db_type: None,
@@ -46,6 +48,7 @@ fn sample_table() -> TableDef {
             sample_field("email"),
         ],
         indexes: vec![IndexDef {
+            replay_shape: Default::default(),
             name: "users_email_idx".into(),
             fields: vec!["email".into()],
             unique: true,
@@ -77,6 +80,7 @@ fn sample_foreign_key(
     ref_columns: &[&str],
 ) -> ForeignKeyDef {
     ForeignKeyDef {
+        replay_shape: Default::default(),
         name: name.into(),
         columns: columns.iter().map(|column| (*column).into()).collect(),
         ref_table: ref_table.into(),
@@ -98,6 +102,7 @@ fn enum_table(values: &[&str]) -> TableDef {
         name: "posts".into(),
         fields: vec![
             FieldDef {
+                replay_shape: Default::default(),
                 name: "id".into(),
                 column_type: ColumnTypeSpec::BigInteger,
                 db_type: None,
@@ -112,6 +117,7 @@ fn enum_table(values: &[&str]) -> TableDef {
                 decimal_places: None,
             },
             FieldDef {
+                replay_shape: Default::default(),
                 name: "status".into(),
                 column_type: enum_spec(values),
                 db_type: None,
@@ -237,7 +243,7 @@ fn field_nulls_not_distinct_change_alters_only_unique_columns() {
             if unique {
                 assert_eq!(ops.len(), 1);
                 assert!(
-                    matches!(&ops[0], MigrationOp::AlterColumn { old_field, new_field, .. }
+                    matches!(&ops[0], MigrationOp::AlterColumn { old_field: Some(old_field), new_field: Some(new_field), .. }
                     if old_field.nulls_not_distinct != enabled && new_field.nulls_not_distinct == enabled)
                 );
                 assert_eq!(ops[0].to_sql(Dialect::Postgres).unwrap().len(), 2);
@@ -253,6 +259,7 @@ fn test_check_constraint_expression_change_generates_drop_and_add() {
     let mut old = Snapshot::new();
     let mut old_table = sample_table();
     old_table.checks.push(CheckDef {
+        replay_shape: Default::default(),
         name: "age_positive".into(),
         expression: "age >= 0".into(),
     });
@@ -261,6 +268,7 @@ fn test_check_constraint_expression_change_generates_drop_and_add() {
     let mut new = Snapshot::new();
     let mut new_table = sample_table();
     new_table.checks.push(CheckDef {
+        replay_shape: Default::default(),
         name: "age_positive".into(),
         expression: "age > 0".into(),
     });
@@ -419,6 +427,7 @@ fn test_compute_diff_adds_postgres_enum_value_before_dependent_ddl() {
 
     let mut new_table = enum_table(&["draft", "published", "archived"]);
     new_table.indexes.push(IndexDef {
+        replay_shape: Default::default(),
         name: "posts_archived_idx".into(),
         fields: vec!["status".into()],
         unique: false,
@@ -475,6 +484,7 @@ fn test_postgres_create_table_with_fk_as_alter() {
     let table = TableDef {
         name: "posts".into(),
         fields: vec![FieldDef {
+            replay_shape: Default::default(),
             name: "id".into(),
             column_type: ColumnTypeSpec::BigInteger,
             db_type: None,
@@ -490,6 +500,7 @@ fn test_postgres_create_table_with_fk_as_alter() {
         }],
         indexes: vec![],
         foreign_keys: vec![ForeignKeyDef {
+            replay_shape: Default::default(),
             name: "fk_posts_author".into(),
             columns: vec!["author_id".into()],
             ref_table: "users".into(),
@@ -550,6 +561,7 @@ fn test_compute_diff_detects_alter_column() {
         name: "users".into(),
         fields: vec![
             FieldDef {
+                replay_shape: Default::default(),
                 name: "id".into(),
                 column_type: ColumnTypeSpec::BigInteger,
                 db_type: None,
@@ -564,6 +576,7 @@ fn test_compute_diff_detects_alter_column() {
                 decimal_places: None,
             },
             FieldDef {
+                replay_shape: Default::default(),
                 name: "email".into(),
                 column_type: ColumnTypeSpec::String { length: None },
                 db_type: Some("VARCHAR(100)".into()),
@@ -591,6 +604,7 @@ fn test_compute_diff_detects_alter_column() {
         name: "users".into(),
         fields: vec![
             FieldDef {
+                replay_shape: Default::default(),
                 name: "id".into(),
                 column_type: ColumnTypeSpec::BigInteger,
                 db_type: None,
@@ -605,6 +619,7 @@ fn test_compute_diff_detects_alter_column() {
                 decimal_places: None,
             },
             FieldDef {
+                replay_shape: Default::default(),
                 name: "email".into(),
                 column_type: ColumnTypeSpec::String { length: None },
                 db_type: Some("VARCHAR(255)".into()), // Changed db_type
@@ -633,8 +648,8 @@ fn test_compute_diff_detects_alter_column() {
     match &ops[0] {
         MigrationOp::AlterColumn {
             table,
-            old_field,
-            new_field,
+            old_field: Some(old_field),
+            new_field: Some(new_field),
             ..
         } => {
             assert_eq!(table, "users");
@@ -652,6 +667,7 @@ fn test_compute_diff_detects_alter_column() {
 fn test_postgres_alter_column_unique_constraint() {
     // Test adding unique constraint
     let old_field = FieldDef {
+        replay_shape: Default::default(),
         name: "email".into(),
         column_type: ColumnTypeSpec::String { length: None },
         db_type: None,
@@ -666,6 +682,7 @@ fn test_postgres_alter_column_unique_constraint() {
         decimal_places: None,
     };
     let new_field = FieldDef {
+        replay_shape: Default::default(),
         name: "email".into(),
         column_type: ColumnTypeSpec::String { length: None },
         db_type: None,
@@ -681,9 +698,11 @@ fn test_postgres_alter_column_unique_constraint() {
     };
 
     let sql = MigrationOp::AlterColumn {
+        column: None,
+        changes: None,
         table: "users".into(),
-        old_field: old_field.clone(),
-        new_field: new_field.clone(),
+        old_field: Some(Box::new(old_field.clone())),
+        new_field: Some(Box::new(new_field.clone())),
         table_fields: None,
         table_indexes: None,
         table_foreign_keys: None,
@@ -706,9 +725,11 @@ fn test_postgres_alter_column_unique_constraint() {
 
     // Test removing unique constraint
     let sql = MigrationOp::AlterColumn {
+        column: None,
+        changes: None,
         table: "users".into(),
-        old_field: new_field,
-        new_field: old_field,
+        old_field: Some(Box::new(new_field)),
+        new_field: Some(Box::new(old_field)),
         table_fields: None,
         table_indexes: None,
         table_foreign_keys: None,
@@ -778,6 +799,7 @@ fn test_compute_diff_drops_column_dependencies_before_the_column() {
     let parent = table_with_fields("parents", &["id"]);
     let mut old_users = table_with_fields("users", &["id", "age"]);
     old_users.indexes.push(IndexDef {
+        replay_shape: Default::default(),
         name: "ix_users_age".into(),
         fields: vec!["age".into()],
         unique: false,
@@ -792,6 +814,7 @@ fn test_compute_diff_drops_column_dependencies_before_the_column() {
         &["id"],
     ));
     old_users.checks.push(CheckDef {
+        replay_shape: Default::default(),
         name: "chk_users_age".into(),
         expression: "age IS NOT NULL".into(),
     });
@@ -1075,6 +1098,7 @@ fn test_compute_diff_creates_referenced_index_before_fk() {
     ));
     let mut new_parent = parent;
     new_parent.indexes.push(IndexDef {
+        replay_shape: Default::default(),
         name: "ux_parent_code".into(),
         fields: vec!["code".into()],
         unique: true,
@@ -1121,6 +1145,7 @@ fn test_compute_diff_detects_index_changes() {
     let mut table = sample_table();
     table.indexes.clear(); // Remove index
     table.indexes.push(IndexDef {
+        replay_shape: Default::default(),
         name: "users_name_idx".into(), // New index
         fields: vec!["name".into()],
         unique: false,
@@ -1210,6 +1235,7 @@ fn test_create_drop_index_sql() {
     let sql = MigrationOp::CreateIndex {
         table: "users".into(),
         index: IndexDef {
+            replay_shape: Default::default(),
             name: "users_email_idx".into(),
             fields: vec!["email".into()],
             unique: true,
@@ -1231,6 +1257,7 @@ fn test_create_drop_index_sql() {
         table: "users".into(),
         name: "users_email_idx".into(),
         index_def: Some(IndexDef {
+            replay_shape: Default::default(),
             name: "users_email_idx".into(),
             fields: vec!["email".into()],
             unique: true,
@@ -1300,6 +1327,7 @@ fn test_compute_diff_emits_create_tables_in_topological_order() {
         let mut fks = Vec::new();
         if let Some(r) = ref_table {
             fks.push(ForeignKeyDef {
+                replay_shape: Default::default(),
                 name: format!("fk_{name}_{r}"),
                 columns: vec![format!("{}_id", r)],
                 ref_table: r.to_string(),
@@ -1311,6 +1339,7 @@ fn test_compute_diff_emits_create_tables_in_topological_order() {
         TableDef {
             name: name.to_string(),
             fields: vec![FieldDef {
+                replay_shape: Default::default(),
                 name: "id".into(),
                 column_type: ColumnTypeSpec::BigInteger,
                 db_type: None,
@@ -1365,6 +1394,7 @@ fn test_compute_diff_rejects_cyclic_foreign_keys() {
         TableDef {
             name: name.to_string(),
             fields: vec![FieldDef {
+                replay_shape: Default::default(),
                 name: "id".into(),
                 column_type: ColumnTypeSpec::BigInteger,
                 db_type: None,
@@ -1380,6 +1410,7 @@ fn test_compute_diff_rejects_cyclic_foreign_keys() {
             }],
             indexes: vec![],
             foreign_keys: vec![ForeignKeyDef {
+                replay_shape: Default::default(),
                 name: format!("fk_{name}_{ref_table}"),
                 columns: vec![format!("{}_id", ref_table)],
                 ref_table: ref_table.to_string(),
@@ -1413,6 +1444,7 @@ fn test_compute_diff_emits_drop_tables_in_reverse_topological_order() {
         let mut fks = Vec::new();
         if let Some(r) = ref_table {
             fks.push(ForeignKeyDef {
+                replay_shape: Default::default(),
                 name: format!("fk_{name}_{r}"),
                 columns: vec![format!("{}_id", r)],
                 ref_table: r.to_string(),
@@ -1424,6 +1456,7 @@ fn test_compute_diff_emits_drop_tables_in_reverse_topological_order() {
         TableDef {
             name: name.to_string(),
             fields: vec![FieldDef {
+                replay_shape: Default::default(),
                 name: "id".into(),
                 column_type: ColumnTypeSpec::BigInteger,
                 db_type: None,
@@ -1469,6 +1502,7 @@ fn test_compute_diff_emits_drop_tables_in_reverse_topological_order() {
 // Used by the cyclic-schema tests below.
 fn cyclic_table(name: &str, fk_refs: &[(&str, &str)]) -> TableDef {
     let mut fields = vec![FieldDef {
+        replay_shape: Default::default(),
         name: "id".into(),
         column_type: ColumnTypeSpec::BigInteger,
         db_type: None,
@@ -1485,6 +1519,7 @@ fn cyclic_table(name: &str, fk_refs: &[(&str, &str)]) -> TableDef {
     let mut foreign_keys = Vec::new();
     for (col, ref_table) in fk_refs {
         fields.push(FieldDef {
+            replay_shape: Default::default(),
             name: (*col).to_string(),
             column_type: ColumnTypeSpec::BigInteger,
             db_type: None,
@@ -1499,6 +1534,7 @@ fn cyclic_table(name: &str, fk_refs: &[(&str, &str)]) -> TableDef {
             decimal_places: None,
         });
         foreign_keys.push(ForeignKeyDef {
+            replay_shape: Default::default(),
             name: format!("fk_{name}_{col}"),
             columns: vec![(*col).to_string()],
             ref_table: (*ref_table).to_string(),

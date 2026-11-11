@@ -107,6 +107,7 @@ fn _oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(execute::explain, m)?)?;
 
     // Migration functions
+    m.add_class::<migration::SchemaReplay>()?;
     m.add_function(wrap_pyfunction!(migration::migration_compute_diff, m)?)?;
     m.add_function(wrap_pyfunction!(migration::migration_to_sql, m)?)?;
 

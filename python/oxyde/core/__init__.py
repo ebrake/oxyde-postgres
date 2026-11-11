@@ -7,7 +7,7 @@ The Rust core provides:
     - Connection pool management (init_pool, close_pool)
     - Query execution (execute, execute_in_transaction)
     - Transaction control (begin/commit/rollback, savepoints)
-    - Migration utilities (compute_diff, to_sql)
+    - Migration utilities (SchemaReplay, compute_diff, to_sql)
 
 Architecture:
     Python Query → IR dict → msgpack bytes → Rust → SQL → Database
@@ -45,6 +45,7 @@ Submodules:
 
 from . import ir
 from .wrapper import (
+    SchemaReplay,
     begin_transaction,
     close_all_pools,
     close_pool,
@@ -86,5 +87,6 @@ __all__ = [
     "explain_query",
     "migration_compute_diff",
     "migration_to_sql",
+    "SchemaReplay",
     "ir",
 ]

@@ -50,7 +50,7 @@ class MigrationContext:
             db_alias: Database alias for execute mode (deprecated, use db_conn)
             dialect: Database dialect (postgres)
             db_conn: Database connection (for execute mode)
-            schema_state: Current schema state for migration replay
+            schema_state: Schema state, updated after each operation for SQL resolution
         """
         self._mode = mode
         self._db_alias = db_alias
@@ -59,6 +59,10 @@ class MigrationContext:
 
         validate_dialect(self._dialect)
         self._db_conn = db_conn
+        if schema_state is None and mode == "execute":
+            from oxyde.migrations.replay import SchemaState
+
+            schema_state = SchemaState()
         self._schema_state = schema_state
         self._operations: list[dict[str, Any]] = []
         self._raw_sql_seen = False
@@ -131,6 +135,8 @@ class MigrationContext:
 
         if self._mode == "collect":
             self._operations.append(op)
+        else:
+            self._execute_operation(op)
 
     def require_manual(self, message: str) -> None:
         if self._mode == "execute":
@@ -276,72 +282,45 @@ class MigrationContext:
             self._operations.append(op)
             return
 
-        # For execute mode, build Rust-compatible format with old_field/new_field
-        old_field = None
+        from oxyde.migrations.replay import SchemaState
 
-        if self._schema_state:
-            table_schema = self._schema_state.tables.get(table)
-            if table_schema:
-                # Find old field definition
-                for field in table_schema["fields"]:
-                    if field["name"] == field_name:
-                        old_field = dict(field)
-                        break
-
-        if old_field is None:
-            # Fallback: create minimal field definition
-            old_field = {
-                "name": field_name,
-                "column_type": changes.get("column_type", {"kind": "unknown"}),
-                "db_type": None,
-                "nullable": True,
-                "primary_key": False,
-                "unique": False,
-                "default": None,
-                "auto_increment": False,
-            }
-
-        # Build new_field by applying changes to old_field
-        new_field = dict(old_field)
-        if "column_type" in changes:
-            new_field["column_type"] = changes["column_type"]
-        # Legacy keys from old migration files — drop stale column_type so
-        # normalization re-derives it from the legacy name
-        if "type" in changes:
-            new_field["python_type"] = changes["type"]
-            new_field.pop("column_type", None)
-        if "python_type" in changes:
-            new_field["python_type"] = changes["python_type"]
-            new_field.pop("column_type", None)
-        if "db_type" in changes:
-            new_field["db_type"] = changes["db_type"]
-        if "nullable" in changes:
-            new_field["nullable"] = changes["nullable"]
-        if "default" in changes:
-            new_field["default"] = changes["default"]
-        if "unique" in changes:
-            new_field["unique"] = changes["unique"]
-        if "nulls_not_distinct" in changes:
-            if changes["nulls_not_distinct"]:
-                new_field["nulls_not_distinct"] = True
-            else:
-                new_field.pop("nulls_not_distinct", None)
-        if "max_length" in changes:
-            new_field["max_length"] = changes["max_length"]
-        if "max_digits" in changes:
-            new_field["max_digits"] = changes["max_digits"]
-        if "decimal_places" in changes:
-            new_field["decimal_places"] = changes["decimal_places"]
-
-        # Build Rust-compatible operation
-        op = {
-            "type": "alter_column",
-            "table": table,
-            "old_field": old_field,
-            "new_field": new_field,
-        }
-
-        self._execute_operation(op)
+        state = self._schema_state
+        table_schema = state.tables.get(table, {}) if state is not None else {}
+        if not any(f["name"] == field_name for f in table_schema.get("fields", [])):
+            state = SchemaState()
+            state.apply_operation(
+                {
+                    "type": "create_table",
+                    "table": {
+                        "name": table,
+                        "fields": [
+                            {
+                                "name": field_name,
+                                "column_type": changes.get(
+                                    "column_type", {"kind": "unknown"}
+                                ),
+                                "db_type": None,
+                                "nullable": True,
+                                "primary_key": False,
+                                "unique": False,
+                                "default": None,
+                                "auto_increment": False,
+                            }
+                        ],
+                    },
+                }
+            )
+        assert state is not None
+        self._execute_operation(
+            state.resolve_operation(
+                {
+                    "type": "alter_column",
+                    "table": table,
+                    "column": field_name,
+                    "changes": changes,
+                }
+            )
+        )
 
     # ========================================================================
     # Index operations
@@ -521,11 +500,15 @@ class MigrationContext:
         # column_type. Single legacy funnel for the execute path.
         from oxyde.migrations.utils import normalize_op_fields
 
+        replay_op = op
         op = normalize_op_fields(op)
 
         # Convert operation to SQL using Rust
         operations_json = json.dumps([op])
         sql_statements = migration_to_sql(operations_json, self._dialect)
+
+        if self._schema_state is not None:
+            self._schema_state.apply_operation(replay_op)
 
         # Execute each SQL statement
         for sql in sql_statements:

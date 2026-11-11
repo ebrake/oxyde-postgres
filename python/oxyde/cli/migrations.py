@@ -399,6 +399,7 @@ def sqlmigrate(
     """
     from oxyde.core import migration_to_sql
     from oxyde.migrations.context import MigrationContext
+    from oxyde.migrations.executor import replay_migrations_up_to
     from oxyde.migrations.utils import load_migration_module
 
     # Load config
@@ -431,8 +432,18 @@ def sqlmigrate(
             typer.echo("-- No operations (empty migration)")
             return
 
+        # Resolve each operation against preceding migrations and earlier
+        # operations in this migration (including renames and column edits).
+        state = replay_migrations_up_to(
+            config.migrations_dir, migration_path, include_target=False
+        )
+        resolved = []
+        for op in operations:
+            resolved.append(state.resolve_operation(op))
+            state.apply_operation(op)
+
         # Convert operations to SQL
-        operations_json = json.dumps(operations)
+        operations_json = json.dumps(resolved)
         sql_statements = migration_to_sql(operations_json, config.dialect)
 
         # Print SQL

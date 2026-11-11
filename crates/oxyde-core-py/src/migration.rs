@@ -63,3 +63,40 @@ pub(crate) fn migration_to_sql(operations_json: &str, dialect: &str) -> PyResult
         .to_sql(dialect_enum)
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Migration error: {e}")))
 }
+
+/// Stateful, database-free schema replay shared by Python and Rust callers.
+#[pyclass]
+pub(crate) struct SchemaReplay {
+    state: oxyde_migrate::Snapshot,
+}
+
+#[pymethods]
+impl SchemaReplay {
+    #[new]
+    fn new() -> Self {
+        Self {
+            state: oxyde_migrate::Snapshot::new(),
+        }
+    }
+
+    fn apply(&mut self, op_json: &str) -> PyResult<()> {
+        let op = serde_json::from_str(op_json)
+            .map_err(|e| PyValueError::new_err(format!("Failed to parse operation: {e}")))?;
+        oxyde_migrate::apply_operation(&mut self.state, &op)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn resolve(&self, op_json: &str) -> PyResult<String> {
+        let op = serde_json::from_str(op_json)
+            .map_err(|e| PyValueError::new_err(format!("Failed to parse operation: {e}")))?;
+        let op = oxyde_migrate::resolve_operation(&self.state, &op)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        serde_json::to_string(&op).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn snapshot_json(&self) -> PyResult<String> {
+        self.state
+            .to_json()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}

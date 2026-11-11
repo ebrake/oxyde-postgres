@@ -237,7 +237,9 @@ fn added_or_altered_column(op: &MigrationOp) -> Option<(&str, &str)> {
     match op {
         MigrationOp::AddColumn { table, field } => Some((table, &field.name)),
         MigrationOp::AlterColumn {
-            table, new_field, ..
+            table,
+            new_field: Some(new_field),
+            ..
         } => Some((table, &new_field.name)),
         _ => None,
     }
@@ -470,7 +472,9 @@ fn order_generated_operations(operations: Vec<MigrationOp>) -> Result<Vec<Migrat
                 add_column_drop_dependencies(&mut prerequisites, &operations, after, table, field);
             }
             MigrationOp::AlterColumn {
-                table, old_field, ..
+                table,
+                old_field: Some(old_field),
+                ..
             } => {
                 add_column_drop_dependencies(
                     &mut prerequisites,
@@ -537,6 +541,14 @@ fn order_generated_operations(operations: Vec<MigrationOp>) -> Result<Vec<Migrat
 /// operations contain a dependency cycle that prevents a linear migration.
 /// Foreign-key cycles wholly among unchanged tables remain irrelevant.
 pub fn compute_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> {
+    let mut old = old.clone();
+    let mut new = new.clone();
+    old.clear_replay_shapes();
+    new.clear_replay_shapes();
+    compute_canonical_diff(&old, &new)
+}
+
+fn compute_canonical_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> {
     let mut ops = Vec::new();
     // The differ has both schema snapshots, so it can stage dependency
     // operations, including relationships that span tables, without changing
@@ -668,9 +680,11 @@ pub fn compute_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> 
                         || constraints_changed
                     {
                         column_changes.push(MigrationOp::AlterColumn {
+                            column: None,
+                            changes: None,
                             table: name.clone(),
-                            old_field: old_field.clone(),
-                            new_field: new_field.clone(),
+                            old_field: Some(Box::new(old_field.clone())),
+                            new_field: Some(Box::new(new_field.clone())),
                             table_fields: None,
                             table_indexes: None,
                             table_foreign_keys: None,

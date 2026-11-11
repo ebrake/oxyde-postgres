@@ -30,6 +30,8 @@ from oxyde.migrations.replay import SchemaState, replay_migrations
 from oxyde.migrations.utils import load_migration_module
 from oxyde.models.registry import clear_registry
 
+from .replay_parity import assert_migration_parity
+
 ALL_DIALECTS = ["postgres"]
 POSTGRES_DIALECTS = ["postgres"]
 PARTIAL_INDEX_DIALECTS = ["postgres"]
@@ -68,6 +70,9 @@ def _run_pipeline(
     filepath = generate_migration_file(ops, migrations_dir=tmp_path, name=name)
     module = load_migration_module(filepath)
     assert module is not None
+    replayed = assert_migration_parity(module, old)
+    from types import SimpleNamespace
+    assert_migration_parity(SimpleNamespace(upgrade=module.downgrade), replayed)
 
     up_ctx = MigrationContext(mode="collect", dialect=dialect)
     module.upgrade(up_ctx)
@@ -223,6 +228,7 @@ class TestEnumPipeline:
             migrations_dir=tmp_path,
             name="alter_publish_state",
         )
+        assert_migration_parity(load_migration_module(filepath), old)
         content = filepath.read_text()
 
         assert "Manual enum migration required for publish_state_enum" in content
@@ -411,9 +417,13 @@ class TestNullsDistinctPipeline:
         )
         module = load_migration_module(path)
         assert module is not None
+        assert_migration_parity(module, old)
+        from types import SimpleNamespace
+        assert_migration_parity(SimpleNamespace(upgrade=module.downgrade), new)
 
         state = SchemaState()
-        state.tables = deepcopy(old["tables"])
+        for table in deepcopy(old["tables"]).values():
+            state.apply_operation({"type": "create_table", "table": table})
         up = MigrationContext(mode="execute", schema_state=state)
         module.upgrade(up)
         assert len(up._sql_statements) == (2 if old_unique and new_unique else 1)
@@ -427,7 +437,8 @@ class TestNullsDistinctPipeline:
             json.loads(migration_compute_diff(json.dumps(replayed), json.dumps(new)))
             == []
         )
-        state.tables = deepcopy(replayed["tables"])
+        for table in deepcopy(replayed["tables"]).values():
+            state.apply_operation({"type": "create_table", "table": table})
         down = MigrationContext(mode="execute", schema_state=state)
         module.downgrade(down)
         assert len(down._sql_statements) == (2 if old_unique and new_unique else 1)

@@ -107,7 +107,17 @@ def _write_migration(
 
     ops_json = migration_compute_diff(json.dumps(old), json.dumps(new))
     ops = json.loads(ops_json)
-    return generate_migration_file(ops, migrations_dir=tmp_path, name=name)
+    path = generate_migration_file(ops, migrations_dir=tmp_path, name=name)
+    from types import SimpleNamespace
+
+    from oxyde.migrations.utils import load_migration_module
+    from oxyde.tests.unit.replay_parity import assert_migration_parity
+
+    module = load_migration_module(path)
+    assert module is not None
+    replayed = assert_migration_parity(module, old)
+    assert_migration_parity(SimpleNamespace(upgrade=module.downgrade), replayed)
+    return path
 
 
 class TestNullsDistinctE2E:

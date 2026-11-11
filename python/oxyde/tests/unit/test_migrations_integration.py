@@ -26,6 +26,15 @@ from oxyde.migrations.replay import (
 )
 from oxyde.migrations.tracker import get_migration_files, get_pending_migrations
 
+from .replay_parity import assert_fixture_histories
+
+
+@pytest.fixture(autouse=True)
+def _check_migration_fixture_parity(tmp_path):
+    yield
+    assert_fixture_histories(tmp_path)
+
+
 # =============================================================================
 # Generator Tests
 # =============================================================================
@@ -261,7 +270,7 @@ class TestMigrationReplay:
         """Test replaying drop_table operation."""
 
         state = SchemaState()
-        state.tables["old_table"] = {"name": "old_table", "fields": [], "indexes": []}
+        state.apply_operation({"type": "create_table", "table": {"name": "old_table", "fields": [], "indexes": []}})
 
         state.apply_operation({"type": "drop_table", "name": "old_table"})
 
@@ -271,11 +280,11 @@ class TestMigrationReplay:
         """Test replaying add_column operation."""
 
         state = SchemaState()
-        state.tables["users"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "users",
             "fields": [{"name": "id", "column_type": {"kind": "big_integer"}}],
             "indexes": [],
-        }
+        }})
 
         state.apply_operation(
             {
@@ -292,14 +301,14 @@ class TestMigrationReplay:
         """Test replaying drop_column operation."""
 
         state = SchemaState()
-        state.tables["users"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "users",
             "fields": [
                 {"name": "id", "column_type": {"kind": "big_integer"}},
                 {"name": "legacy", "column_type": {"kind": "text"}},
             ],
             "indexes": [],
-        }
+        }})
 
         state.apply_operation(
             {
@@ -317,7 +326,7 @@ class TestMigrationReplay:
         """Test replaying rename_table operation."""
 
         state = SchemaState()
-        state.tables["old_name"] = {"name": "old_name", "fields": [], "indexes": []}
+        state.apply_operation({"type": "create_table", "table": {"name": "old_name", "fields": [], "indexes": []}})
 
         state.apply_operation(
             {
@@ -335,11 +344,11 @@ class TestMigrationReplay:
         """Test replaying rename_column operation."""
 
         state = SchemaState()
-        state.tables["users"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "users",
             "fields": [{"name": "old_col", "column_type": {"kind": "text"}}],
             "indexes": [],
-        }
+        }})
 
         state.apply_operation(
             {
@@ -358,7 +367,7 @@ class TestMigrationReplay:
         """Test replaying create_index operation."""
 
         state = SchemaState()
-        state.tables["users"] = {"name": "users", "fields": [], "indexes": []}
+        state.apply_operation({"type": "create_table", "table": {"name": "users", "fields": [], "indexes": []}})
 
         state.apply_operation(
             {
@@ -375,11 +384,11 @@ class TestMigrationReplay:
         """Test replaying drop_index operation."""
 
         state = SchemaState()
-        state.tables["users"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "users",
             "fields": [],
             "indexes": [{"name": "idx_email", "fields": ["email"]}],
-        }
+        }})
 
         state.apply_operation(
             {
@@ -395,11 +404,11 @@ class TestMigrationReplay:
         """Test converting state to snapshot format."""
 
         state = SchemaState()
-        state.tables["users"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "users",
             "fields": [{"name": "id", "column_type": {"kind": "big_integer"}}],
             "indexes": [],
-        }
+        }})
 
         snapshot = state.to_snapshot()
 

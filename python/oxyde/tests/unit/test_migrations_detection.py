@@ -633,15 +633,16 @@ class TestSchemaDiff:
     def test_detect_alter_max_digits(self):
         """Test detecting max_digits changes during alter_column replay."""
         state = SchemaState()
-        state.tables["widgets"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "widgets",
             "fields": [
                 {
                     "name": "price",
+                    "column_type": {"kind": "decimal"},
                     "max_digits": 10,
                 }
             ],
-        }
+        }})
 
         state.apply_operation(
             {
@@ -658,15 +659,16 @@ class TestSchemaDiff:
     def test_detect_alter_decimal_places(self):
         """Test detecting decimal_places changes during alter_column replay."""
         state = SchemaState()
-        state.tables["widgets"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "widgets",
             "fields": [
                 {
                     "name": "price",
+                    "column_type": {"kind": "decimal"},
                     "decimal_places": 2,
                 }
             ],
-        }
+        }})
 
         state.apply_operation(
             {
@@ -686,15 +688,16 @@ class TestSchemaDiff:
         ctx.alter_column("widgets", "name", max_length=255)
 
         state = SchemaState()
-        state.tables["widgets"] = {
+        state.apply_operation({"type": "create_table", "table": {
             "name": "widgets",
             "fields": [
                 {
                     "name": "name",
+                    "column_type": {"kind": "string"},
                     "max_length": 100,
                 }
             ],
-        }
+        }})
 
         for op in ctx.get_collected_operations():
             state.apply_operation(op)

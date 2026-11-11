@@ -998,6 +998,7 @@ name = "oxyde-migrate"
 version = "0.2.3"
 dependencies = [
  "oxyde-codec",
+ "serde_json",
 ]
 
 [[package]]

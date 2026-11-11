@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 oxyde-codec = { path = "../oxyde-codec" }
+serde_json.workspace = true

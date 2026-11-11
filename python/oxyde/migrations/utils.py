@@ -132,6 +132,10 @@ def normalize_op_fields(op: dict) -> dict:
             op[key] = normalize_field_dict(op[key])
     if isinstance(op.get("table_fields"), list):
         op["table_fields"] = [normalize_field_dict(f) for f in op["table_fields"]]
+    if op.get("type") == "add_enum_value" and isinstance(op.get("fields"), list):
+        op["fields"] = [
+            {**ref, "field": normalize_field_dict(ref["field"])} for ref in op["fields"]
+        ]
     return op
 
 
@@ -143,3 +147,7 @@ def _iter_field_dicts(op: dict) -> Iterator[dict]:
         if isinstance(op.get(key), dict):
             yield op[key]
     yield from op.get("table_fields") or []
+    if op.get("type") == "add_enum_value":
+        for ref in op.get("fields") or []:
+            if isinstance(ref.get("field"), dict):
+                yield ref["field"]

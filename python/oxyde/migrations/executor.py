@@ -290,12 +290,6 @@ async def apply_migrations(
                 # Execute collected SQL (wrapped in transaction for postgres)
                 await ctx._execute_collected_sql()
 
-                # Update schema state with this migration's operations
-                ctx_collect = MigrationContext(mode="collect")
-                module.upgrade(ctx_collect)
-                for op in ctx_collect.get_collected_operations():
-                    schema_state.apply_operation(op)
-
             # Record migration as applied
             await record_migration(migration_name, db_alias)
             applied_migrations.append(migration_name)

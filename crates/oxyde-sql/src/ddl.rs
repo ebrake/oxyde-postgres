@@ -286,86 +286,90 @@ impl MigrationOpExt for MigrationOp {
                 table,
                 old_field,
                 new_field,
-                table_fields: _,
-                table_indexes: _,
-                table_foreign_keys: _,
-                table_checks: _,
-            } => match dialect {
-                Dialect::Postgres => {
-                    let mut stmts = Vec::new();
-                    let old_sql_type = crate::spec_sql::resolve_spec_type(
-                        &old_field.column_type,
-                        old_field.db_type.as_deref(),
-                        dialect,
-                        old_field.primary_key,
-                    );
-                    let new_sql_type = crate::spec_sql::resolve_spec_type(
-                        &new_field.column_type,
-                        new_field.db_type.as_deref(),
-                        dialect,
-                        new_field.primary_key,
-                    );
+                ..
+            } => {
+                let (Some(old_field), Some(new_field)) = (old_field, new_field) else {
+                    return Err(MigrateError::MigrationError(
+                        "alter_column changes must be resolved against schema state before SQL rendering".into(),
+                    ));
+                };
+                match dialect {
+                    Dialect::Postgres => {
+                        let mut stmts = Vec::new();
+                        let old_sql_type = crate::spec_sql::resolve_spec_type(
+                            &old_field.column_type,
+                            old_field.db_type.as_deref(),
+                            dialect,
+                            old_field.primary_key,
+                        );
+                        let new_sql_type = crate::spec_sql::resolve_spec_type(
+                            &new_field.column_type,
+                            new_field.db_type.as_deref(),
+                            dialect,
+                            new_field.primary_key,
+                        );
 
-                    if old_sql_type != new_sql_type {
-                        // ::text bridge — universal cast path (PG has no implicit text → enum).
-                        stmts.push(format!(
+                        if old_sql_type != new_sql_type {
+                            // ::text bridge — universal cast path (PG has no implicit text → enum).
+                            stmts.push(format!(
                             "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" TYPE {} USING \"{}\"::text::{}",
                             table, new_field.name, new_sql_type, new_field.name, new_sql_type
                         ));
-                    }
+                        }
 
-                    if old_field.nullable != new_field.nullable {
-                        let null_action = if new_field.nullable {
-                            "DROP NOT NULL"
-                        } else {
-                            "SET NOT NULL"
-                        };
-                        stmts.push(format!(
-                            "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" {}",
-                            table, new_field.name, null_action
-                        ));
-                    }
-
-                    if old_field.default != new_field.default {
-                        if let Some(default) = &new_field.default {
+                        if old_field.nullable != new_field.nullable {
+                            let null_action = if new_field.nullable {
+                                "DROP NOT NULL"
+                            } else {
+                                "SET NOT NULL"
+                            };
                             stmts.push(format!(
-                                "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" SET DEFAULT {}",
-                                table, new_field.name, default
-                            ));
-                        } else {
-                            stmts.push(format!(
-                                "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" DROP DEFAULT",
-                                table, new_field.name
+                                "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" {}",
+                                table, new_field.name, null_action
                             ));
                         }
-                    }
 
-                    if old_field.unique != new_field.unique
-                        || (old_field.unique
-                            && new_field.unique
-                            && old_field.nulls_not_distinct != new_field.nulls_not_distinct)
-                    {
-                        if old_field.unique {
-                            stmts.push(format!(
-                                "ALTER TABLE \"{}\" DROP CONSTRAINT \"{}_{}_key\"",
-                                table, table, new_field.name
-                            ));
+                        if old_field.default != new_field.default {
+                            if let Some(default) = &new_field.default {
+                                stmts.push(format!(
+                                    "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" SET DEFAULT {}",
+                                    table, new_field.name, default
+                                ));
+                            } else {
+                                stmts.push(format!(
+                                    "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" DROP DEFAULT",
+                                    table, new_field.name
+                                ));
+                            }
                         }
-                        if new_field.unique {
-                            stmts.push(format!(
-                                "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}_{}_key\" {} (\"{}\")",
-                                table,
-                                table,
-                                new_field.name,
-                                unique_clause(new_field),
-                                new_field.name
-                            ));
-                        }
-                    }
 
-                    Ok(stmts)
+                        if old_field.unique != new_field.unique
+                            || (old_field.unique
+                                && new_field.unique
+                                && old_field.nulls_not_distinct != new_field.nulls_not_distinct)
+                        {
+                            if old_field.unique {
+                                stmts.push(format!(
+                                    "ALTER TABLE \"{}\" DROP CONSTRAINT \"{}_{}_key\"",
+                                    table, table, new_field.name
+                                ));
+                            }
+                            if new_field.unique {
+                                stmts.push(format!(
+                                    "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}_{}_key\" {} (\"{}\")",
+                                    table,
+                                    table,
+                                    new_field.name,
+                                    unique_clause(new_field),
+                                    new_field.name
+                                ));
+                            }
+                        }
+
+                        Ok(stmts)
+                    }
                 }
-            },
+            }
 
             MigrationOp::CreateIndex { table, index } => {
                 Ok(vec![build_create_index(table, index, dialect)?])

@@ -50,6 +50,7 @@ fn dialect_name(dialect: Dialect) -> &'static str {
 
 fn field(name: &str, column_type: S) -> FieldDef {
     FieldDef {
+        replay_shape: Default::default(),
         name: name.into(),
         column_type,
         db_type: None,
@@ -134,6 +135,7 @@ fn table(name: &str, fields: Vec<FieldDef>) -> TableDef {
 
 fn index(name: &str, fields: &[&str]) -> IndexDef {
     IndexDef {
+        replay_shape: Default::default(),
         name: name.into(),
         fields: fields.iter().map(|f| (*f).into()).collect(),
         unique: false,
@@ -152,6 +154,7 @@ fn fk(
     on_update: Option<&str>,
 ) -> ForeignKeyDef {
     ForeignKeyDef {
+        replay_shape: Default::default(),
         name: name.into(),
         columns: columns.iter().map(|c| (*c).into()).collect(),
         ref_table: ref_table.into(),
@@ -163,6 +166,7 @@ fn fk(
 
 fn check(name: &str, expression: &str) -> CheckDef {
     CheckDef {
+        replay_shape: Default::default(),
         name: name.into(),
         expression: expression.into(),
     }
@@ -414,9 +418,13 @@ fn alter_column() {
     let ops = [
         // type change: int → str(50)
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "users".into(),
-            old_field: field("age", S::BigInteger),
-            new_field: field("age", S::String { length: None }).max_len(50),
+            old_field: Some(Box::new(field("age", S::BigInteger))),
+            new_field: Some(Box::new(
+                field("age", S::String { length: None }).max_len(50),
+            )),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,
@@ -424,9 +432,13 @@ fn alter_column() {
         },
         // NOT NULL → NULL
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "users".into(),
-            old_field: field("bio", S::String { length: None }),
-            new_field: field("bio", S::String { length: None }).nullable(),
+            old_field: Some(Box::new(field("bio", S::String { length: None }))),
+            new_field: Some(Box::new(
+                field("bio", S::String { length: None }).nullable(),
+            )),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,
@@ -434,9 +446,13 @@ fn alter_column() {
         },
         // set default
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "users".into(),
-            old_field: field("status", S::String { length: None }),
-            new_field: field("status", S::String { length: None }).default_sql("'active'"),
+            old_field: Some(Box::new(field("status", S::String { length: None }))),
+            new_field: Some(Box::new(
+                field("status", S::String { length: None }).default_sql("'active'"),
+            )),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,
@@ -444,9 +460,11 @@ fn alter_column() {
         },
         // drop default
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "users".into(),
-            old_field: field("rank", S::BigInteger).default_sql("0"),
-            new_field: field("rank", S::BigInteger),
+            old_field: Some(Box::new(field("rank", S::BigInteger).default_sql("0"))),
+            new_field: Some(Box::new(field("rank", S::BigInteger))),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,
@@ -454,9 +472,13 @@ fn alter_column() {
         },
         // add unique
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "users".into(),
-            old_field: field("email", S::String { length: None }),
-            new_field: field("email", S::String { length: None }).unique(),
+            old_field: Some(Box::new(field("email", S::String { length: None }))),
+            new_field: Some(Box::new(
+                field("email", S::String { length: None }).unique(),
+            )),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,
@@ -464,9 +486,13 @@ fn alter_column() {
         },
         // drop unique
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "users".into(),
-            old_field: field("phone", S::String { length: None }).unique(),
-            new_field: field("phone", S::String { length: None }),
+            old_field: Some(Box::new(
+                field("phone", S::String { length: None }).unique(),
+            )),
+            new_field: Some(Box::new(field("phone", S::String { length: None }))),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,
@@ -481,6 +507,7 @@ fn alter_column() {
 #[test]
 fn index_ops() {
     let unique_composite = IndexDef {
+        replay_shape: Default::default(),
         name: "ux_users_email_tenant".into(),
         fields: vec!["email".into(), "tenant_id".into()],
         unique: true,
@@ -489,6 +516,7 @@ fn index_ops() {
         where_clause: None,
     };
     let gin = IndexDef {
+        replay_shape: Default::default(),
         name: "ix_users_tags_gin".into(),
         fields: vec!["tags".into()],
         unique: false,
@@ -497,6 +525,7 @@ fn index_ops() {
         where_clause: None,
     };
     let hash = IndexDef {
+        replay_shape: Default::default(),
         name: "ix_users_email_hash".into(),
         fields: vec!["email".into()],
         unique: false,
@@ -534,6 +563,7 @@ fn index_ops() {
 #[test]
 fn index_partial() {
     let partial = IndexDef {
+        replay_shape: Default::default(),
         name: "ix_users_active_email".into(),
         fields: vec!["email".into()],
         unique: true,
@@ -609,9 +639,11 @@ fn alter_column_nulls_not_distinct() {
     ]
     .into_iter()
     .map(|(old_field, new_field)| MigrationOp::AlterColumn {
+        column: None,
+        changes: None,
         table: "users".into(),
-        old_field,
-        new_field,
+        old_field: Some(Box::new(old_field)),
+        new_field: Some(Box::new(new_field)),
         table_fields: None,
         table_indexes: None,
         table_foreign_keys: None,
@@ -818,12 +850,14 @@ fn alter_column_enum() {
     let ops = [
         // TEXT → enum (upgrade path)
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "posts".into(),
-            old_field: field("status", S::Text),
-            new_field: field(
+            old_field: Some(Box::new(field("status", S::Text))),
+            new_field: Some(Box::new(field(
                 "status",
                 enum_spec("post_status_enum", &["draft", "published"]),
-            ),
+            ))),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,
@@ -831,9 +865,14 @@ fn alter_column_enum() {
         },
         // enum → TEXT (user dropped the enum annotation)
         MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
             table: "posts".into(),
-            old_field: field("kind", enum_spec("post_kind_enum", &["news", "blog"])),
-            new_field: field("kind", S::Text),
+            old_field: Some(Box::new(field(
+                "kind",
+                enum_spec("post_kind_enum", &["news", "blog"]),
+            ))),
+            new_field: Some(Box::new(field("kind", S::Text))),
             table_fields: None,
             table_indexes: None,
             table_foreign_keys: None,

@@ -1,20 +1,15 @@
-//! Schema diff computation.
+//! Schema diff computation and in-memory migration replay.
 //!
-//! This crate owns exactly one responsibility: comparing two schema
-//! snapshots and producing the list of migration operations.
-//!
-//! ```text
-//! Snapshot (old) + Snapshot (new) → compute_diff() → Vec<MigrationOp>
-//! ```
-//!
-//! The contract types (`Snapshot`, `TableDef`, `MigrationOp`, ...) live in
-//! `oxyde-codec` — they are serialized across the Python boundary. SQL
-//! rendering for the produced operations lives in `oxyde-sql`
-//! (`migration_to_sql` / `MigrationOpExt`). This crate sees no SQL at all.
+//! Contract types (`Snapshot`, `TableDef`, `MigrationOp`, ...) live in
+//! `oxyde-codec`. This crate compares snapshots and applies operations to
+//! schema state. SQL rendering lives in `oxyde-sql`; replay has no SQL or
+//! database dependencies.
 
 mod diff;
+pub mod replay;
 
 pub use diff::compute_diff;
+pub use replay::{apply_operation, resolve_operation};
 
 // Contract types re-exported for convenience (canonical home: oxyde-codec).
 pub use oxyde_codec::{
