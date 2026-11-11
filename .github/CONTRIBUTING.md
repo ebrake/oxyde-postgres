@@ -323,4 +323,6 @@ If publishing is blocked after all builds succeed, dispatch `release-core.yml` f
 
 With explicit release-owner authorization, set `allow_missing_macos=true` on a recovery dispatch to publish the completed Linux and Windows builds while macOS wheels are unavailable. The source distribution and every Linux and Windows build must still pass at the exact release tag, and all downloaded artifacts must pass validation. The default remains the complete platform matrix.
 
+To add macOS ARM64 wheels to an existing release, build and test them from its published source distribution, upload them to that GitHub release, then dispatch `release-core.yml` from `main` with `append_macos_arm64=true`, the existing `version`, and `wheel_sha256` containing a JSON object of verified wheel filenames and SHA-256 digests. This mode checks out the release tag, checks every wheel's digest, metadata, and licenses, and publishes only those wheels through the existing trusted publisher. It keeps the release public and skips the normal build and Python-package release jobs.
+
 On macOS, select the virtual environment's interpreter when running Rust tests: `PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --workspace --no-default-features`. Native extension builds retain the extension-module feature.

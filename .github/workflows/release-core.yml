@@ -16,6 +16,13 @@ on:
         description: 'Explicitly allow recovery publication with Linux and Windows builds only'
         type: boolean
         default: false
+      append_macos_arm64:
+        description: 'Publish verified macOS ARM64 wheels already attached to an existing release'
+        type: boolean
+        default: false
+      wheel_sha256:
+        description: 'For append mode, JSON object mapping wheel filenames to verified SHA-256 digests'
+        required: false
 
 permissions:
   contents: read
@@ -27,6 +34,7 @@ env:
 jobs:
   build-sdist:
     name: Build source distribution
+    if: ${{ !inputs.append_macos_arm64 }}
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -108,7 +116,7 @@ jobs:
   build-wheels:
     name: Build ${{ matrix.platform.target }} wheels
     needs: [build-sdist]
-    if: inputs.artifacts_run_id == ''
+    if: ${{ !inputs.append_macos_arm64 && inputs.artifacts_run_id == '' }}
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -278,3 +286,57 @@ jobs:
           RELEASE_TAG: ${{ needs.build-sdist.outputs.tag }}
           RELEASE_VERSION: ${{ needs.build-sdist.outputs.version }}
         run: gh workflow run release-python.yml --ref "$RELEASE_TAG" -f version="$RELEASE_VERSION"
+
+  append-macos-arm64:
+    name: Publish additional macOS ARM64 wheels
+    if: ${{ inputs.append_macos_arm64 }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/oxyde-postgres-core/
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: v${{ inputs.version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.0.0
+
+      - name: Verify and download additional wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          WHEEL_SHA256: ${{ inputs.wheel_sha256 }}
+        run: |
+          python - <<'PYTHON'
+          import hashlib, json, os, re, subprocess, sys, tomllib
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from check_release_artifacts import validate_artifact
+          version = os.environ["RELEASE_VERSION"]
+          configured = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          if version != configured:
+              raise SystemExit("Requested version must match the existing release tag")
+          expected = json.loads(os.environ["WHEEL_SHA256"])
+          if not isinstance(expected, dict) or not expected:
+              raise SystemExit("A nonempty verified wheel digest manifest is required")
+          pattern = rf"oxyde_postgres_core-{re.escape(version)}-cp\d+-cp\d+t?-macosx_\d+_\d+_arm64\.whl"
+          for name, digest in expected.items():
+              if not re.fullmatch(pattern, name) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                  raise SystemExit("Only macOS ARM64 core wheels with verified SHA-256 digests are allowed")
+          directory = Path("dist")
+          directory.mkdir()
+          for name, digest in expected.items():
+              subprocess.run(["gh", "release", "download", f"v{version}", "--repo", os.environ["GITHUB_REPOSITORY"], "--pattern", name, "--dir", str(directory)], check=True)
+              wheel = directory / name
+              if hashlib.sha256(wheel.read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f"Wheel digest mismatch: {name}")
+              validate_artifact(wheel, "oxyde-postgres-core", version)
+              print(f"Verified additional wheel: {name}")
+          PYTHON
+
+      - name: Publish additional wheels to PyPI
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*.whl
