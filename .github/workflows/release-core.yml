@@ -97,6 +97,12 @@ jobs:
           sccache: 'true'
           manylinux: ${{ matrix.platform.manylinux }}
 
+      - name: Verify native wheel import
+        if: runner.os == 'Windows' || matrix.platform.target == 'aarch64-apple-darwin'
+        run: |
+          python -m pip install --no-deps --no-index --find-links dist oxyde-postgres-core
+          python -c "import _oxyde_core"
+
       - name: Set up Python 3.14t (macOS/Windows)
         if: runner.os != 'Linux'
         uses: actions/setup-python@v6.2.0

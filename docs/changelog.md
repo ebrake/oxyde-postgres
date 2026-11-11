@@ -12,6 +12,7 @@ Based on upstream [Oxyde](https://github.com/mr-fatalyst/oxyde) at `26f3e9d47013
 - Package the fork as **oxyde-postgres 0.1.0** and **oxyde-postgres-core 0.1.0**, retaining the `oxyde` imports, `_oxyde_core` native module, and `oxyde` CLI.
 - Move smoke, integration, migration, lifecycle, and driver tests to disposable PostgreSQL 18 databases/schemas. CI targets PostgreSQL 18 and Python 3.10/3.15.
 - Update documentation, examples, metadata, and release workflows for this fork, preserving upstream authorship and licenses.
+- Disable Cargo symbol stripping in development and release profiles to avoid unloadable macOS native modules (`mis-aligned LINKEDIT string pool`) with the pinned Rust toolchain. Verify native wheel imports on macOS ARM64 and Windows in the release workflow.
 - Put native package metadata at the workspace root and explicitly include the patched SQLx sources and licenses in source releases, so source installs preserve the driver fixes.
 
 ### Transaction nesting depth
@@ -84,5 +85,5 @@ Cold custom-type results buffer until execution completes, which can increase la
 - Python 3.13: 1,226 tests passed, including all 47 generated-stub type-check tests; two PostgreSQL fixture/feature cases are skipped.
 - Rust: 173 workspace tests and 16 explicitly enabled PostgreSQL driver tests passed. The latter include PostgreSQL 18 operation, pre-18 rejection, failed-overwrite preservation, and all seven unnamed-statement regressions.
 - All repository pre-commit checks pass, including Ruff, mypy, Rust formatting, cargo check, Clippy, and file checks. Documentation builds in strict mode.
-- Built both Python distributions and a CPython 3.15 native wheel from the extracted source archive; installed the wheels in a fresh Python 3.15 environment and verified a PostgreSQL array round trip.
+- Built both Python distributions and a CPython 3.15 release wheel from the extracted source archive; installed the wheels in a fresh Python 3.15 environment and verified a PostgreSQL array round trip.
 - Python LSP diagnostics were checked against the upstream checkout; existing typing/native-extension diagnostics remain. Rust LSP diagnostics were unavailable on this host; Cargo compilation and Clippy passed.

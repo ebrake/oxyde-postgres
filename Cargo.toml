@@ -46,3 +46,11 @@ struct_excessive_bools = "allow"
 
 [patch.crates-io]
 sqlx-postgres = { path = "vendor/sqlx-postgres" }
+
+# Avoid malformed Mach-O extension modules with the pinned Rust/macOS linker.
+# Keep debug information stripping out of Cargo's native library build path.
+[profile.release]
+strip = "none"
+
+[profile.dev]
+strip = "none"
