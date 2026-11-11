@@ -13,7 +13,7 @@ env:
 jobs:
   # Detect which parts of the codebase changed
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       rust: ${{ steps.filter.outputs.rust || github.event.forced }}
       python: ${{ steps.filter.outputs.python || github.event.forced }}
@@ -38,7 +38,7 @@ jobs:
 
   # Run pre-commit hooks (linting for both Rust and Python)
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -68,7 +68,7 @@ jobs:
   test-rust:
     needs: [changes, lint]
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:18-alpine
@@ -118,7 +118,7 @@ jobs:
   test-python:
     needs: [changes, lint]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ['3.13', '3.15']

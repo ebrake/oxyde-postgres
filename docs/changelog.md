@@ -15,6 +15,8 @@
 
 - Validation: 180 Rust tests and 1,257 Python tests passed (two expected skips), including PostgreSQL 18 constraint enforcement, migration upgrades/rollbacks, and existing snapshot compatibility. Required lint/type checks, strict documentation build, and package license/metadata checks passed.
 
+- Pin Linux CI and release hosts to Ubuntu 24.04 LTS; Linux wheel builds use the existing manylinux/musllinux containers.
+
 ## 0.2.0 — dependency refresh and Python 3.13 minimum (2026-11-11)
 
 ### Compatibility
