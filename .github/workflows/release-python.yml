@@ -44,6 +44,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14', '3.15']
 
@@ -63,7 +64,17 @@ jobs:
 
       - name: Install package
         run: |
-          pip install dist/*.whl
+          # PyPI's package index can briefly lag behind successful core uploads.
+          for attempt in {1..12}; do
+            if python -m pip install --no-cache-dir dist/*.whl; then
+              break
+            fi
+            if [[ "$attempt" == 12 ]]; then
+              exit 1
+            fi
+            echo "Waiting for the newly published core to reach the package index"
+            sleep 15
+          done
           python -c "import oxyde, _oxyde_core; print(oxyde.__version__)"
 
   publish:
