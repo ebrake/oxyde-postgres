@@ -318,6 +318,49 @@ def _has_overload_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> boo
     return False
 
 
+def _is_generator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Find yields in the function body, excluding nested scopes."""
+    stack: list[ast.AST] = list(node.body)
+    while stack:
+        child = stack.pop()
+        if isinstance(child, (ast.Yield, ast.YieldFrom)):
+            return True
+        if isinstance(
+            child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+        ):
+            continue
+        stack.extend(ast.iter_child_nodes(child))
+    return False
+
+
+def _stub_function(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Copy a function's declaration, replacing its body with ``...``."""
+    body: list[ast.stmt] = [ast.Expr(value=ast.Constant(value=Ellipsis))]
+    if isinstance(node, ast.AsyncFunctionDef) and _is_generator(node):
+        # An ellipsis body would make checkers misclassify this as a coroutine.
+        fields = {
+            field: copy.deepcopy(getattr(node, field))
+            for field in node._fields
+            if field != "body"
+        }
+        return ast.copy_location(ast.FunctionDef(body=body, **fields), node)
+    node_copy = copy.deepcopy(node)
+    node_copy.body = body
+    return node_copy
+
+
+def _overloaded_names(body: list[ast.stmt]) -> set[str]:
+    """Names whose implementations must be omitted from a stub body."""
+    return {
+        node.name
+        for node in body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and _has_overload_decorator(node)
+    }
+
+
 def _stub_function_defs(body: list[ast.stmt]) -> list[str]:
     """Turn the function definitions of an AST body into stub sources.
 
@@ -326,21 +369,14 @@ def _stub_function_defs(body: list[ast.stmt]) -> list[str]:
     ``@overload``-decorated variants are kept; the implementation (PEP 484
     requires one in a ``.py`` file but forbids it in a ``.pyi``) is dropped.
     """
-    overloaded_names: set[str] = {
-        node.name
-        for node in body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and _has_overload_decorator(node)
-    }
+    overloaded_names = _overloaded_names(body)
 
     functions: list[str] = []
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name in overloaded_names and not _has_overload_decorator(node):
                 continue
-            node_copy = copy.deepcopy(node)
-            node_copy.body = [ast.Expr(value=ast.Constant(value=Ellipsis))]
-            functions.append(ast.unparse(node_copy))
+            functions.append(ast.unparse(_stub_function(node)))
     return functions
 
 
@@ -352,21 +388,14 @@ def _stubbed_class_body(body: list[ast.stmt]) -> list[ast.stmt]:
     Literal narrowing), and dataclass/plain-class attribute defaults are almost
     always literals. Overload implementations are dropped as at top level.
     """
-    overloaded_names: set[str] = {
-        node.name
-        for node in body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and _has_overload_decorator(node)
-    }
+    overloaded_names = _overloaded_names(body)
 
     out: list[ast.stmt] = []
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name in overloaded_names and not _has_overload_decorator(node):
                 continue
-            node_copy = copy.deepcopy(node)
-            node_copy.body = [ast.Expr(value=ast.Constant(value=Ellipsis))]
-            out.append(node_copy)
+            out.append(_stub_function(node))
         elif isinstance(node, ast.ClassDef):
             class_copy = copy.deepcopy(node)
             class_copy.body = _stubbed_class_body(class_copy.body) or [ast.Pass()]
@@ -1150,7 +1179,9 @@ class {model_name}Query(Query[{model_name}]):
         ...
 """
 
-    # Generate Manager class
+    # The Manager's create deliberately narrows **data to known model fields.
+    # Its ty suppression uses the current rule name as of ty 0.0.100, renamed
+    # from invalid-method-override to incompatible-method-override.
     manager_class = f"""
 class {model_name}Manager(QueryManager[{model_name}]):
     \"\"\"Type-safe Manager for {model_name} model.\"\"\"
@@ -1375,6 +1406,7 @@ class {model_name}Manager(QueryManager[{model_name}]):
         instance: {model_name} | None = None,
         client: Any | None = None,
         using: str | None = None,
+        _skip_hooks: bool = False,
 {create_params}
     ) -> {model_name}:
         \"\"\"Create new object.\"\"\"

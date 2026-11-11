@@ -13,6 +13,7 @@ from module import Item
 
 
 async def wrong() -> None:
+    await Item.objects.create(not_a_field=1)  # type-error
     await Item.objects.filter(name=5).all()  # type-error
     await Item.objects.filter(qty__gte="high").all()  # type-error
     await Item.objects.filter(qty__in="abc").all()  # type-error

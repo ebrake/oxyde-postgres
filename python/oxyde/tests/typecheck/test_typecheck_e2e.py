@@ -28,6 +28,7 @@ FIXTURES: list[tuple[str, str, str, str]] = [
     ("edges/helpers_only", "edges/helpers_only", "module", "usage.py"),
     ("edges/mixed_module", "edges/mixed_module", "module", "usage.py"),
     ("edges/toplevel_overload", "edges/toplevel_overload", "module", "usage.py"),
+    ("edges/async_generators", "edges/async_generators", "module", "usage.py"),
     ("edges/forward_ref", "edges/forward_ref", "module", "usage.py"),
     ("edges/forward_ref_cross", "edges/forward_ref_cross", "module", "usage.py"),
     ("edges/inheritance_chain", "edges/inheritance_chain", "module", "usage.py"),
@@ -81,7 +82,11 @@ def _run_pyright(targets: list[Path], cwd: Path) -> subprocess.CompletedProcess[
 
 
 def _run_ty(
-    targets: list[Path], cwd: Path, *, concise: bool = False
+    targets: list[Path],
+    cwd: Path,
+    *,
+    concise: bool = False,
+    extra_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     assert TY_EXE is not None
     return subprocess.run(
@@ -95,11 +100,48 @@ def _run_ty(
             OXYDE_PARENT,
             "--extra-search-path",
             ".",
+            *(extra_args or []),
             *map(str, targets),
         ],
         capture_output=True,
         text=True,
         cwd=cwd,
+    )
+
+
+@pytest.mark.skipif(TY_EXE is None, reason="ty is not installed")
+@pytest.mark.parametrize(
+    ("fixture_dir", "model_module"),
+    [(f[1], f[2]) for f in FIXTURES],
+    ids=[f[0] for f in FIXTURES],
+)
+def test_ty_stub_suppressions_are_current(
+    fixture_dir: str, model_module: str, generate_stubs
+) -> None:
+    """The ty suppressions must work without mypy ignores and use current rules."""
+    work_dir = generate_stubs(FIXTURES_DIR / fixture_dir, model_module)
+    targets = sorted(work_dir.glob("*.pyi"))
+    if fixture_dir == "edges/helpers_only" and not targets:
+        pytest.skip("helpers-only fixture has no models or generated stubs")
+    assert targets, f"no stubs generated for fixture '{fixture_dir}'"
+    result = _run_ty(
+        targets,
+        work_dir,
+        extra_args=[
+            "-c",
+            "analysis.respect-type-ignore-comments=false",
+            "--error",
+            "ignore-comment-unknown-rule",
+            "--error",
+            "renamed-rule-in-ignore-comment",
+            "--error",
+            "unused-ignore-comment",
+        ],
+    )
+    assert result.returncode == 0, (
+        f"ty suppression check failed for fixture '{fixture_dir}':\n"
+        f"--- STDOUT ---\n{result.stdout}\n"
+        f"--- STDERR ---\n{result.stderr}"
     )
 
 

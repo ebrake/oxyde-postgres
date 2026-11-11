@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3 — async generator stubs and manager create (2026-11-11)
+
+- Emit async generators as plain `def` declarations returning their annotated
+  generator type, preserving `@asynccontextmanager` and `async for` compatibility
+  in top-level functions, supporting classes, and custom model methods.
+- Preserve decorators, signatures, and PEP 695 type parameters. Keep ordinary
+  coroutines asynchronous and exclude yields in nested scopes from detection.
+- Include the keyword-only `_skip_hooks: bool = False` parameter in generated
+  manager `create` signatures while retaining typed field narrowing, so unknown
+  field names remain errors.
+- Check generated stubs with mypy, pyright, and ty, including strict ty suppression
+  validation with type-ignore comments disabled. The supported ty rule name is
+  `incompatible-method-override` as of the pinned ty 0.0.100.
+- Validation: 1,050 unit tests passed; all generated-stub fixtures and negative
+  checks passed with mypy, pyright, and ty, including 15 strict suppression checks.
+
 ## 0.2.2 — complete generated stubs (2026-11-11)
 
 - Preserve public constants, typed declarations, supporting classes, `__all__`,

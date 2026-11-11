@@ -21,6 +21,7 @@ from oxyde.codegen.stub_generator import (
     _generate_filter_params,
     _get_python_type_name,
     _stub_class_def,
+    generate_model_stub,
 )
 
 
@@ -776,3 +777,122 @@ class TestExtractCustomMethods:
         assert len(renders) == 2
         assert all("@overload" in m for m in renders)
         assert any("def plain" in m for m in methods)
+
+
+class TestAsyncGeneratorStubs:
+    """Async generators must keep their synchronous calling convention in stubs."""
+
+    def test_async_context_manager(self):
+        tree = ast.parse(
+            "@asynccontextmanager\n"
+            "async def audited_mutation(actor: str) -> AsyncGenerator[None]:\n"
+            "    yield\n"
+        )
+        _, functions, _ = _extract_top_level_copyable(tree)
+        assert functions == [
+            "@asynccontextmanager\n"
+            "def audited_mutation(actor: str) -> AsyncGenerator[None]:\n"
+            "    ..."
+        ]
+        # Stubbing must not mutate the source AST.
+        assert isinstance(tree.body[0], ast.AsyncFunctionDef)
+        assert isinstance(tree.body[0].body[0], ast.Expr)
+        assert isinstance(tree.body[0].body[0].value, ast.Yield)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "return 1",
+            "async def nested():\n        yield 1\n    return 1",
+            "def nested():\n        yield 1\n    return 1",
+            "nested = lambda: (yield 1)\n    return 1",
+            "class Nested:\n        async def stream(self):\n            yield 1\n    return 1",
+        ],
+        ids=["plain", "nested_async", "nested_sync", "lambda", "class"],
+    )
+    def test_coroutine_stays_async(self, body):
+        tree = ast.parse(f"async def count() -> int:\n    {body}\n")
+        _, functions, _ = _extract_top_level_copyable(tree)
+        assert functions == ["async def count() -> int:\n    ..."]
+
+    @pytest.mark.parametrize("model_method", [False, True], ids=["support", "model"])
+    def test_async_generator_method(self, model_method):
+        tree = ast.parse(
+            "class EventFeed:\n"
+            "    async def __aiter__(self) -> AsyncIterator[Event]:\n"
+            "        if ready:\n"
+            "            yield event\n"
+        )
+        class_def = tree.body[0]
+        assert isinstance(class_def, ast.ClassDef)
+        if model_method:
+            stub = "\n".join(_extract_custom_methods(class_def))
+        else:
+            stub = _stub_class_def(class_def)
+        assert "def __aiter__(self) -> AsyncIterator[Event]:" in stub
+        assert "async def" not in stub
+        assert "yield" not in stub
+
+    def test_type_parameters_preserved(self):
+        tree = ast.parse(
+            "async def stream[T](x: T) -> AsyncIterator[T]:\n"
+            "    yield x\n"
+        )
+        _, functions, _ = _extract_top_level_copyable(tree)
+        assert functions == ["def stream[T](x: T) -> AsyncIterator[T]:\n    ..."]
+
+    def test_sync_generator_stays_sync(self):
+        tree = ast.parse("def stream() -> Iterator[int]:\n    yield from values\n")
+        _, functions, _ = _extract_top_level_copyable(tree)
+        assert functions == ["def stream() -> Iterator[int]:\n    ..."]
+
+    def test_async_overload_stays_async(self):
+        tree = ast.parse(
+            "@overload\n"
+            "async def stream(x: int) -> AsyncIterator[int]: ...\n"
+            "@overload\n"
+            "async def stream(x: str) -> AsyncIterator[str]: ...\n"
+            "async def stream(x):\n"
+            "    yield x\n"
+        )
+        _, functions, _ = _extract_top_level_copyable(tree)
+        assert len(functions) == 2
+        assert all(fn.startswith("@overload\nasync def stream") for fn in functions)
+
+
+class TestGenerateModelStub:
+    def test_create_skip_hooks_and_override_suppression(self):
+        class Event(Model):
+            id: int | None = Field(default=None, db_pk=True)
+
+            class Meta:
+                is_table = True
+
+        stub = generate_model_stub(Event)
+        tree = ast.parse(stub)
+        manager = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "EventManager"
+        )
+        create = next(
+            node
+            for node in manager.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "create"
+        )
+        params = dict(
+            zip(
+                (param.arg for param in create.args.kwonlyargs), create.args.kw_defaults
+            )
+        )
+        default = params["_skip_hooks"]
+        assert isinstance(default, ast.Constant)
+        assert default.value is False
+        skip_hooks = next(p for p in create.args.kwonlyargs if p.arg == "_skip_hooks")
+        assert skip_hooks.annotation is not None
+        assert ast.unparse(skip_hooks.annotation) == "bool"
+        assert create.args.kwarg is None
+        assert (
+            "async def create(  # type: ignore[override]"
+            "  # ty: ignore[incompatible-method-override]"
+        ) in stub
