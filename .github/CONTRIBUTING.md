@@ -321,4 +321,6 @@ Both `oxyde-postgres-core` and `oxyde-postgres` use version 0.2.2. Push a single
 
 If publishing is blocked after all builds succeed, dispatch `release-core.yml` from `main` with the same version and `artifacts_run_id` set to the earlier run. The workflow requires all eight build jobs to have succeeded at the exact release tag, then repeats artifact validation before publishing. This permits fixes to release validation without rebuilding or moving the tag.
 
+With explicit release-owner authorization, set `allow_missing_macos=true` on a recovery dispatch to publish the completed Linux and Windows builds while macOS wheels are unavailable. The source distribution and every Linux and Windows build must still pass at the exact release tag, and all downloaded artifacts must pass validation. The default remains the complete platform matrix.
+
 On macOS, select the virtual environment's interpreter when running Rust tests: `PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --workspace --no-default-features`. Native extension builds retain the extension-module feature.

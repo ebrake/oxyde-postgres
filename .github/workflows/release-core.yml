@@ -12,6 +12,10 @@ on:
       artifacts_run_id:
         description: 'Optional prior run with successful builds for this release tag'
         required: false
+      allow_missing_macos:
+        description: 'Explicitly allow recovery publication with Linux and Windows builds only'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -64,6 +68,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          ALLOW_MISSING_MACOS: ${{ inputs.allow_missing_macos }}
         run: |
           git fetch --depth=1 origin tag "$RELEASE_TAG"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACTS_RUN_ID" > prior-run.json
@@ -76,11 +81,13 @@ jobs:
           if run["head_sha"] != tag_sha or run["path"] != ".github/workflows/release-core.yml":
               raise SystemExit("Reusable artifacts must come from this workflow at the exact release tag")
           targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+          if os.environ.get("ALLOW_MISSING_MACOS") == "true":
+              targets = [target for target in targets if not target.endswith("apple-darwin")]
           expected = {"Build source distribution", *(f"Build {target} wheels" for target in targets)}
           successful = {job["name"] for job in json.loads(Path("prior-jobs.json").read_text())["jobs"] if job["conclusion"] == "success"}
           if expected - successful:
               raise SystemExit(f"Required builds did not succeed: {sorted(expected - successful)}")
-          print(f"Reusing eight successful build jobs at {tag_sha}")
+          print(f"Reusing {len(expected)} successful build jobs at {tag_sha}")
           PYTHON
 
       - name: Build sdist
