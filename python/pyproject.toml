@@ -1,6 +1,6 @@
 [project]
 name = "oxyde-postgres"
-version = "0.1.0"
+version = "0.1.0.post1"
 description = "Type-safe asynchronous ORM for PostgreSQL 18+ with a Rust core"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -29,7 +29,7 @@ dependencies = [
     "pydantic>=2.0",
     "msgpack>=1.0",
     "typer>=0.24",
-    "oxyde-postgres-core>=0.1.0,<0.2.0",
+    "oxyde-postgres-core>=0.1.0.post1,<0.2.0",
 ]
 
 [project.optional-dependencies]

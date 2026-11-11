@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "oxyde-postgres-core"
-version = "0.1.0"
+version = "0.1.0.post1"
 description = "PostgreSQL 18+ Rust core for Oxyde for PostgreSQL"
 readme = "crates/oxyde-core-py/README.md"
 license = "MIT"

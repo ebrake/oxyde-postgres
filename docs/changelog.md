@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0.post1 — package description corrections (2026-11-11)
+
+- Replace relative links in both PyPI package descriptions with absolute GitHub URLs for the repository, first-release notes, connection guide, documentation, contributor guide, and original MIT license.
+- Reject relative Markdown links in release artifact descriptions before publishing.
+- Correct release validation for Windows CRLF license files and complete the existing combined GitHub release without resending an older workflow commit as its target.
+- Keep runtime behavior and PostgreSQL 18 / Python 3.10 minimum versions unchanged.
+
 ## 0.1.0 — first fork release (2026-11-11)
 
 Based on upstream [Oxyde](https://github.com/mr-fatalyst/oxyde) at `26f3e9d470134d218ca70051fb48627e90fd6d6e` (upstream Python 0.8.0 / core 0.7.1). This release combines the following additions; overlapping fixes are included once.

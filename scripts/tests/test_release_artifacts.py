@@ -27,6 +27,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         version="0.1.0",
         author=True,
         windows_newlines=False,
+        description="",
     ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -34,6 +35,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         metadata = f"Name: {package}\nVersion: {version}\n"
         if author:
             metadata += "Author-email: Nikita Ryzhenkov <nikita.ryzhenkoff@gmail.com>\n"
+        metadata += "\n" + description
         files = {
             "package/PKG-INFO"
             if source
@@ -75,6 +77,32 @@ class ReleaseArtifactTests(unittest.TestCase):
                     "oxyde-postgres-core",
                     "0.1.0",
                 )
+
+    def test_relative_description_links_fail(self):
+        for source in (False, True):
+            for target in (
+                "../../README.md",
+                "../../docs/changelog.md",
+                "../../docs/guide/connections.md",
+            ):
+                with (
+                    self.subTest(source=source, target=target),
+                    self.assertRaisesRegex(ValueError, "relative description link"),
+                ):
+                    checker.validate_artifact(
+                        self.artifact(source=source, description=f"[Guide]({target})"),
+                        "oxyde-postgres-core",
+                        "0.1.0",
+                    )
+
+    def test_absolute_description_links_are_allowed(self):
+        checker.validate_artifact(
+            self.artifact(
+                description="[Oxyde for PostgreSQL](https://github.com/ebrake/oxyde-postgres)"
+            ),
+            "oxyde-postgres-core",
+            "0.1.0",
+        )
 
     def test_windows_line_endings_preserve_complete_license_text(self):
         for package in ("oxyde-postgres", "oxyde-postgres-core"):

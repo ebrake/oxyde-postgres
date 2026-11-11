@@ -67,6 +67,9 @@ def validate_artifact(path: Path, package: str, version: str) -> None:
             headers.get("Author", "")
         ):
             raise ValueError(f"{path.name}: original author credit is missing")
+        for target in re.findall(r"\]\(([^)\s]+)\)", str(headers.get_payload())):
+            if not target.startswith(("https://", "http://", "mailto:", "#")):
+                raise ValueError(f"{path.name}: relative description link: {target}")
     bundled = [
         value.replace(b"\r\n", b"\n").strip()
         for name, value in files.items()

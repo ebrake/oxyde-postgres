@@ -47,6 +47,17 @@ jobs:
               print(f"version={core}\ntag=v{core}", file=output)
           PYTHON
 
+      - name: Verify the source release tag
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
+        run: |
+          git fetch --depth=1 origin tag "$RELEASE_TAG"
+          if [[ -z "$ARTIFACTS_RUN_ID" && "$(git rev-parse HEAD)" != "$(git rev-parse "$RELEASE_TAG^{commit}")" ]]; then
+            echo "Build from the exact release tag before publishing"
+            exit 1
+          fi
+
       - name: Verify reusable builds belong to the release tag
         if: inputs.artifacts_run_id != ''
         env:
@@ -251,7 +262,9 @@ jobs:
           files: dist/*
           body_path: docs/changelog.md
           tag_name: ${{ needs.build-sdist.outputs.tag }}
-          target_commitish: ${{ github.sha }}
+          # The existing tag fixes the source commit. A branch target avoids
+          # GitHub's workflow-write restriction when main advances later.
+          target_commitish: ${{ github.event.repository.default_branch }}
           name: Oxyde for PostgreSQL ${{ needs.build-sdist.outputs.version }}
           draft: true
 
