@@ -78,7 +78,7 @@ Source: [oxyde-core PR #2](https://github.com/rclayer/oxyde-core/pull/2), includ
 - Never replay the original statement during metadata resolution, including after an autocommit write. A metadata failure can therefore be reported after a write has committed; callers must not blindly retry writes.
 - Add regressions for wire message ordering, DDL, custom types, transaction visibility, cancellation, and catalog failure after `INSERT RETURNING` without duplicate writes.
 
-Cold custom-type results buffer until execution completes, which can increase latency and memory use for large result sets. See [connection settings](guide/connections.md).
+Cold custom-type results buffer until execution completes, which can increase latency and memory use for large result sets. See [connection settings](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/connections.md).
 
 ### Coordinated publishing
 
