@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 — Rust schema replay (2026-11-11)
+
+- Replay migration schemas in Rust, sharing typed operations with schema diffing
+  and SQL generation. Read individual fields when resolving alterations, avoiding
+  serialization of the entire schema on every column change.
+- **Breaking:** `SchemaState.tables` is a read-only canonical snapshot view. Each
+  access returns a fresh dictionary; mutate state through `apply_operation`.
+  Legacy metadata and omitted-key provenance are no longer included in snapshots.
+- Replay histories strictly against the migration contract. Errors identify the
+  migration filename, operation number (starting at 1), and operation type, and
+  direct users to correct that historical file. Invalid operations previously
+  recorded with `--fake` must also be corrected before replay or squash.
+- Resolve `sqlmigrate` column alterations against history, sharing execute mode
+  fallback behavior for untracked columns. Previews without column alterations
+  no longer replay unrelated history.
+- Track schema changes during execution: renaming a table or column and then
+  altering it in the same migration now uses its current definition. For example,
+  making a renamed NOT NULL column nullable emits `ALTER ... DROP NOT NULL`;
+  0.2.x could omit that SQL.
+- Preserve declaration key order in diff operations and generated migration files.
+- Require `oxyde-postgres-core>=0.3.0,<0.4.0`. The core ABI remains version 1.
+
 ## 0.2.3 — async generator stubs and manager create (2026-11-11)
 
 - Emit async generators as plain `def` declarations returning their annotated

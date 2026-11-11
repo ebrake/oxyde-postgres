@@ -541,14 +541,6 @@ fn order_generated_operations(operations: Vec<MigrationOp>) -> Result<Vec<Migrat
 /// operations contain a dependency cycle that prevents a linear migration.
 /// Foreign-key cycles wholly among unchanged tables remain irrelevant.
 pub fn compute_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> {
-    let mut old = old.clone();
-    let mut new = new.clone();
-    old.clear_replay_shapes();
-    new.clear_replay_shapes();
-    compute_canonical_diff(&old, &new)
-}
-
-fn compute_canonical_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> {
     let mut ops = Vec::new();
     // The differ has both schema snapshots, so it can stage dependency
     // operations, including relationships that span tables, without changing

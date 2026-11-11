@@ -28,7 +28,11 @@ from pathlib import Path
 from oxyde.core import migration_compute_diff
 from oxyde.migrations.context import MigrationContext
 from oxyde.migrations.generator import generate_migration_file
-from oxyde.migrations.replay import SchemaState, _topological_sort_migrations
+from oxyde.migrations.replay import (
+    SchemaState,
+    _apply_module_ops,
+    _topological_sort_migrations,
+)
 from oxyde.migrations.utils import load_migration_module, op_uses_legacy_fields
 
 
@@ -73,8 +77,7 @@ def squash_migrations(
         operations = ctx.get_collected_operations()
         if any(op_uses_legacy_fields(op) for op in operations):
             legacy_files.append(file.name)
-        for op in operations:
-            state.apply_operation(op)
+        _apply_module_ops(state, file, operations)
 
     # Final schema → create ops via the Rust diff (empty → state):
     # CreateTable operations come out topologically sorted by FK deps.

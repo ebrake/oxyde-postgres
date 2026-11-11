@@ -50,7 +50,6 @@ fn dialect_name(dialect: Dialect) -> &'static str {
 
 fn field(name: &str, column_type: S) -> FieldDef {
     FieldDef {
-        replay_shape: Default::default(),
         name: name.into(),
         column_type,
         db_type: None,
@@ -135,7 +134,6 @@ fn table(name: &str, fields: Vec<FieldDef>) -> TableDef {
 
 fn index(name: &str, fields: &[&str]) -> IndexDef {
     IndexDef {
-        replay_shape: Default::default(),
         name: name.into(),
         fields: fields.iter().map(|f| (*f).into()).collect(),
         unique: false,
@@ -154,7 +152,6 @@ fn fk(
     on_update: Option<&str>,
 ) -> ForeignKeyDef {
     ForeignKeyDef {
-        replay_shape: Default::default(),
         name: name.into(),
         columns: columns.iter().map(|c| (*c).into()).collect(),
         ref_table: ref_table.into(),
@@ -166,7 +163,6 @@ fn fk(
 
 fn check(name: &str, expression: &str) -> CheckDef {
     CheckDef {
-        replay_shape: Default::default(),
         name: name.into(),
         expression: expression.into(),
     }
@@ -507,7 +503,6 @@ fn alter_column() {
 #[test]
 fn index_ops() {
     let unique_composite = IndexDef {
-        replay_shape: Default::default(),
         name: "ux_users_email_tenant".into(),
         fields: vec!["email".into(), "tenant_id".into()],
         unique: true,
@@ -516,7 +511,6 @@ fn index_ops() {
         where_clause: None,
     };
     let gin = IndexDef {
-        replay_shape: Default::default(),
         name: "ix_users_tags_gin".into(),
         fields: vec!["tags".into()],
         unique: false,
@@ -525,7 +519,6 @@ fn index_ops() {
         where_clause: None,
     };
     let hash = IndexDef {
-        replay_shape: Default::default(),
         name: "ix_users_email_hash".into(),
         fields: vec!["email".into()],
         unique: false,
@@ -563,7 +556,6 @@ fn index_ops() {
 #[test]
 fn index_partial() {
     let partial = IndexDef {
-        replay_shape: Default::default(),
         name: "ix_users_active_email".into(),
         fields: vec!["email".into()],
         unique: true,

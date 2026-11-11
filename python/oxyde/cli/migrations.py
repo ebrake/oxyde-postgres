@@ -14,6 +14,7 @@ from oxyde.cli.app import (
     require_databases,
 )
 from oxyde.migrations.config import import_models
+from oxyde.migrations.replay import MigrationReplayError
 
 
 @app.command()
@@ -78,6 +79,9 @@ def makemigrations(
             old_schema = replay_migrations(config.migrations_dir)
             migration_count = len(list(migrations_path.glob("[0-9]*.py")))
             typer.echo(f"   ✅ Replayed {migration_count} migration(s)")
+        except MigrationReplayError as e:
+            typer.secho(f"❌ {e}", fg=typer.colors.RED)
+            raise typer.Exit(1) from None
         except Exception as e:
             typer.secho(f"   ❌ Error replaying migrations: {e}", fg=typer.colors.RED)
             typer.echo("   Fix the broken migration(s) before running makemigrations.")
@@ -330,6 +334,9 @@ def migrate(
             for name in migrations:
                 typer.echo(f"   - {name}")
 
+    except MigrationReplayError as e:
+        typer.secho(f"❌ {e}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
     except Exception as e:
         typer.secho(f"❌ Error applying migrations: {e}", fg=typer.colors.RED)
         raise typer.Exit(1)
@@ -432,15 +439,26 @@ def sqlmigrate(
             typer.echo("-- No operations (empty migration)")
             return
 
-        # Resolve each operation against preceding migrations and earlier
-        # operations in this migration (including renames and column edits).
-        state = replay_migrations_up_to(
-            config.migrations_dir, migration_path, include_target=False
-        )
+        from oxyde.migrations.replay import resolve_alter_column
+        from oxyde.migrations.utils import normalize_op_fields
+
         resolved = []
-        for op in operations:
-            resolved.append(state.resolve_operation(op))
-            state.apply_operation(op)
+        if any(op["type"] == "alter_column" for op in operations):
+            state = replay_migrations_up_to(
+                config.migrations_dir, migration_path, include_target=False
+            )
+            for op in operations:
+                if op["type"] == "alter_column":
+                    resolved.append(
+                        resolve_alter_column(
+                            state, op["table"], op["column"], op.get("changes", {})
+                        )
+                    )
+                else:
+                    resolved.append(normalize_op_fields(op))
+                state.apply_operation(op)
+        else:
+            resolved = [normalize_op_fields(op) for op in operations]
 
         # Convert operations to SQL
         operations_json = json.dumps(resolved)
@@ -465,6 +483,9 @@ def sqlmigrate(
                 )
                 typer.echo()
 
+    except MigrationReplayError as e:
+        typer.secho(f"❌ {e}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
     except Exception as e:
         typer.secho(f"❌ Error generating SQL: {e}", fg=typer.colors.RED)
         raise typer.Exit(1)
@@ -518,6 +539,9 @@ def squash(
 
     try:
         result = squash_migrations(config.migrations_dir, name=name)
+    except MigrationReplayError as e:
+        typer.secho(f"❌ {e}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
     except Exception as e:
         typer.secho(f"❌ Squash failed: {e}", fg=typer.colors.RED)
         raise typer.Exit(1) from None

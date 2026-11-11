@@ -10,7 +10,6 @@ from typing import Any
 
 from oxyde.migrations.context import MigrationContext
 from oxyde.migrations.utils import (
-    _iter_field_dicts,
     load_migration_module,
     normalize_field_dict,
     normalize_op_fields,
@@ -18,61 +17,59 @@ from oxyde.migrations.utils import (
 )
 
 
-class SchemaState:
-    """Schema replay backed by Rust; Python normalizes legacy field types.
+class MigrationReplayError(ValueError):
+    """A historical operation cannot be replayed under the migration contract."""
 
-    ``tables`` is a decoded view cached until the next operation. Mutations must
-    go through ``apply_operation`` so the Rust state remains authoritative.
+
+class SchemaState:
+    """Rust-backed schema with Python normalization of legacy field types.
+
+    ``tables`` is a read-only snapshot view. Each access returns an independent,
+    canonical dictionary; use ``apply_operation`` to change the schema.
     """
 
     def __init__(self) -> None:
         from oxyde.core import SchemaReplay
 
+        if not isinstance(SchemaReplay, type):
+            raise RuntimeError(
+                "oxyde-postgres 0.3 requires oxyde-postgres-core>=0.3.0; "
+                "installed core lacks SchemaReplay"
+            )
         self._replay = SchemaReplay()
-        self._tables: dict[str, dict[str, Any]] | None = None
+        self._legacy: dict[tuple[str, str], dict[str, Any]] = {}
 
     @property
     def tables(self) -> dict[str, dict[str, Any]]:
-        if self._tables is None:
-            self._tables = json.loads(self._replay.snapshot_json())["tables"]
-            for table in self._tables.values():
-                for field in table["fields"]:
-                    if field.pop("__oxyde_legacy_field", False):
-                        field.pop("column_type", None)
-        return self._tables
+        tables: dict[str, dict[str, Any]] = self.to_snapshot()["tables"]
+        return tables
+
+    def get_field(self, table: str, column: str) -> dict[str, Any] | None:
+        """Read one canonical field without serializing the entire schema."""
+        raw = self._replay.field_json(table, column)
+        return json.loads(raw) if raw is not None else None
 
     def _normalize_operation(self, op: dict[str, Any]) -> dict[str, Any]:
-        # Mark synthesized types so the intermediate view keeps the historical
-        # field shape. Final snapshots always carry a normalized column_type.
-        op = deepcopy(op)
-        for field in _iter_field_dicts(op):
-            if "column_type" not in field:
-                field["__oxyde_legacy_field"] = True
-        op = normalize_op_fields(op)
-        if op.get("type") == "alter_column" and "column" in op:
-            changes = dict(op.get("changes", {}))
-            table = self.tables.get(op["table"], {})
-            current: dict[str, Any] | None = next(
-                (f for f in table.get("fields", []) if f["name"] == op["column"]), None
-            )
-            if current is not None:
-                legacy = "type" in changes or "python_type" in changes
-                if legacy or (
-                    "column_type" not in current and "column_type" not in changes
-                ):
-                    source = {**current, **changes}
+        op = normalize_op_fields(deepcopy(op))
+        if op.get("type") == "alter_column":
+            column = op.get("column") or op.get("old_field", {}).get("name")
+            changes = op.get("changes", {})
+            if "nulls_not_distinct" in changes:
+                changes["nulls_not_distinct"] = bool(changes["nulls_not_distinct"])
+            legacy = self._legacy.get((op["table"], column))
+            changes_type = "type" in changes or "python_type" in changes
+            if changes_type or (legacy is not None and "column_type" not in changes):
+                current = self.get_field(op["table"], column) or op.get("old_field")
+                if current is not None:
+                    source = {**current, **(legacy or {}), **changes}
                     if "type" in changes:
                         source["python_type"] = changes["type"]
                     if "python_type" in changes:
                         source["python_type"] = changes["python_type"]
                     source.pop("column_type", None)
                     changes["column_type"] = normalize_field_dict(source)["column_type"]
-                    changes["__oxyde_legacy_field"] = True
-                    if legacy:
-                        changes["python_type"] = source["python_type"]
-                elif "column_type" in changes:
-                    changes["__oxyde_legacy_field"] = False
-            op["changes"] = changes
+            if "changes" in op:
+                op["changes"] = changes
         return op
 
     def resolve_operation(self, op: dict[str, Any]) -> dict[str, Any]:
@@ -83,14 +80,115 @@ class SchemaState:
         return resolved
 
     def apply_operation(self, op: dict[str, Any]) -> None:
-        self._replay.apply(json.dumps(self._normalize_operation(op)))
-        self._tables = None
+        normalized = self._normalize_operation(op)
+        kind = op.get("type")
+        table: Any = op.get("table")
+        exists = False
+        if kind == "rename_table":
+            exists = self._replay.has_table(op["old_name"])
+        elif kind in ("rename_column", "alter_column"):
+            column = (
+                op.get("old_name")
+                or op.get("column")
+                or op.get("old_field", {}).get("name")
+            )
+            exists = self.get_field(table, column) is not None
+        self._replay.apply(json.dumps(normalized))
+        # Provenance is Python-only and changes only after successful Rust replay.
+        if kind == "create_table":
+            name = table["name"]
+            self._forget_table(name)
+            for field in table["fields"]:
+                self._remember_field(name, field)
+        elif kind == "drop_table":
+            self._forget_table(op["name"])
+        elif kind == "rename_table" and exists:
+            old, new = op["old_name"], op["new_name"]
+            fields = {
+                column: source
+                for (name, column), source in self._legacy.items()
+                if name == old
+            }
+            self._forget_table(old)
+            self._forget_table(new)
+            self._legacy.update(
+                {(new, column): source for column, source in fields.items()}
+            )
+        elif (
+            kind == "add_column"
+            and self.get_field(table, op["field"]["name"]) is not None
+        ):
+            self._remember_field(table, op["field"])
+        elif kind == "drop_column":
+            self._legacy.pop((table, op["field"]), None)
+        elif kind == "rename_column" and exists:
+            source = self._legacy.pop((table, op["old_name"]), None)
+            self._legacy.pop((table, op["new_name"]), None)
+            if source is not None:
+                self._legacy[(table, op["new_name"])] = source
+        elif kind == "alter_column" and exists:
+            column = op.get("column") or op["old_field"]["name"]
+            key = (table, column)
+            changes = op.get("changes", {})
+            if "type" in changes or "python_type" in changes:
+                source = dict(self._legacy.get(key, {}))
+                source["python_type"] = changes.get("python_type", changes.get("type"))
+                if "db_type" in changes:
+                    source["db_type"] = changes["db_type"]
+                self._legacy[key] = source
+            elif "column_type" in changes or "new_field" in op:
+                self._legacy.pop(key, None)
+            elif key in self._legacy and "db_type" in changes:
+                self._legacy[key]["db_type"] = changes["db_type"]
+
+    def _forget_table(self, table: str) -> None:
+        self._legacy = {
+            key: source for key, source in self._legacy.items() if key[0] != table
+        }
+
+    def _remember_field(self, table: str, field: dict[str, Any]) -> None:
+        key = (table, field["name"])
+        self._legacy.pop(key, None)
+        if "column_type" not in field:
+            self._legacy[key] = {
+                key: field[key] for key in ("python_type", "db_type") if key in field
+            }
 
     def to_snapshot(self) -> dict[str, Any]:
-        tables = deepcopy(self.tables)
-        for table in tables.values():
-            table["fields"] = [normalize_field_dict(f) for f in table["fields"]]
-        return {"version": 1, "tables": tables}
+        snapshot: dict[str, Any] = json.loads(self._replay.snapshot_json())
+        return snapshot
+
+
+def resolve_alter_column(
+    state: SchemaState, table: str, column: str, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve an alteration, sharing the execute-mode unknown-column fallback."""
+    op = {"type": "alter_column", "table": table, "column": column, "changes": changes}
+    if state.get_field(table, column) is None:
+        op["old_field"] = {
+            "name": column,
+            "column_type": changes.get("column_type", {"kind": "unknown"}),
+            "db_type": None,
+            "nullable": True,
+            "primary_key": False,
+            "unique": False,
+            "default": None,
+            "auto_increment": False,
+        }
+    return state.resolve_operation(op)
+
+
+def _apply_module_ops(
+    state: SchemaState, file: Path, ops: list[dict[str, Any]]
+) -> None:
+    for i, op in enumerate(ops, 1):
+        try:
+            state.apply_operation(op)
+        except Exception as err:
+            raise MigrationReplayError(
+                f"{file.name}: operation {i} ({op.get('type', '?')}): {err}. "
+                "Edit this historical migration file to correct the operation."
+            ) from err
 
 
 def _get_migration_dependency(module: Any) -> str | None:
@@ -201,10 +299,15 @@ def replay_migrations(migrations_dir: str = "migrations") -> dict[str, Any]:
                     FutureWarning,
                     stacklevel=2,
                 )
-            for op in operations:
-                state.apply_operation(op)
+            _apply_module_ops(state, file, operations)
 
     return state.to_snapshot()
 
 
-__all__ = ["SchemaState", "replay_migrations", "_topological_sort_migrations"]
+__all__ = [
+    "SchemaState",
+    "MigrationReplayError",
+    "resolve_alter_column",
+    "replay_migrations",
+    "_topological_sort_migrations",
+]

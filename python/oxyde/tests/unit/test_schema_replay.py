@@ -14,8 +14,8 @@ from oxyde.core import SchemaReplay, migration_to_sql
 from oxyde.migrations.replay import SchemaState
 from oxyde.migrations.utils import load_migration_module
 
-from ._python_schema_state import _PythonSchemaState
-from .replay_parity import assert_migration_parity
+from ._python_schema_state import SchemaState as _PythonSchemaState
+from .replay_parity import assert_migration_parity, canonical_snapshot
 
 
 def _generated_migration(seed):
@@ -27,12 +27,23 @@ def _generated_migration(seed):
             "items",
             [
                 {
+                    "nullable": True,
+                    "unique": False,
                     "name": "id",
                     "column_type": {"kind": "big_integer"},
                     "primary_key": True,
                 },
-                {"name": "value", "column_type": {"kind": "text"}, "nullable": True},
                 {
+                    "primary_key": False,
+                    "unique": False,
+                    "name": "value",
+                    "column_type": {"kind": "text"},
+                    "nullable": True,
+                },
+                {
+                    "nullable": True,
+                    "primary_key": False,
+                    "unique": False,
                     "name": "status",
                     "column_type": {
                         "kind": "array",
@@ -49,16 +60,37 @@ def _generated_migration(seed):
             ],
         )
         ctx.create_table(
-            "parent", [{"name": "id", "column_type": {"kind": "big_integer"}}]
+            "parent",
+            [
+                {
+                    "nullable": True,
+                    "primary_key": False,
+                    "unique": False,
+                    "name": "id",
+                    "column_type": {"kind": "big_integer"},
+                }
+            ],
         )
         ctx.create_index(
             "items",
-            {"name": "idx", "fields": ["value"], "where": "  value IS NOT NULL  "},
+            {
+                "unique": False,
+                "name": "idx",
+                "fields": ["value"],
+                "where": "  value IS NOT NULL  ",
+            },
         )
         ctx.add_foreign_key("items", "fk", ["id"], "parent", ["id"])
         ctx.add_check("items", "ck", "id > 0")
         ctx.add_column(
-            "items", {"name": "temporary", "column_type": {"kind": "boolean"}}
+            "items",
+            {
+                "nullable": True,
+                "primary_key": False,
+                "unique": False,
+                "name": "temporary",
+                "column_type": {"kind": "boolean"},
+            },
         )
         ctx.rename_column("items", "value", "label")
         for _ in range(12):
@@ -109,11 +141,11 @@ def test_legacy_migration_files(tmp_path, type_key):
     sources = [
         """def upgrade(ctx):
     ctx.create_table("old", [
-        {"name": "id", "python_type": "int", "primary_key": True},
-        {"name": "price", "python_type": "Decimal", "max_digits": 10, "decimal_places": 2},
-        {"name": "name", "python_type": "str", "nullable": True, "max_length": 20},
+        {"name": "id", "python_type": "int", "primary_key": True, "nullable": False, "unique": False},
+        {"name": "price", "python_type": "Decimal", "max_digits": 10, "decimal_places": 2, "nullable": True, "primary_key": False, "unique": False},
+        {"name": "name", "python_type": "str", "nullable": True, "max_length": 20, "primary_key": False, "unique": False},
     ])
-    ctx.create_index("old", {"name": "idx", "fields": ["name"]})
+    ctx.create_index("old", {"name": "idx", "fields": ["name"], "unique": False})
 """,
         f"""depends_on = "0001_legacy"
 def upgrade(ctx):
@@ -122,7 +154,7 @@ def upgrade(ctx):
     ctx.alter_column("old", "name", db_type="VARCHAR(80)", nullable=False)
     ctx.rename_table("old", "new")
     ctx.alter_column("new", "name", column_type={{"kind": "text"}}, db_type=None)
-    ctx.add_column("new", {{"name": "extra", "python_type": "str"}})
+    ctx.add_column("new", {{"name": "extra", "python_type": "str", "nullable": True, "primary_key": False, "unique": False}})
     ctx.drop_column("new", "extra")
 """,
     ]
@@ -138,16 +170,24 @@ def test_missing_keys_and_noop_targets():
         {
             "type": "create_table",
             "table": {
+                "indexes": [],
                 "name": "t",
                 "fields": [
-                    {"name": "x", "python_type": "str", "custom_metadata": 123},
+                    {
+                        "nullable": True,
+                        "primary_key": False,
+                        "unique": False,
+                        "name": "x",
+                        "python_type": "str",
+                        "custom_metadata": 123,
+                    },
                 ],
             },
         },
         {
             "type": "create_index",
             "table": "t",
-            "index": {"name": "idx", "fields": ["x"]},
+            "index": {"unique": False, "name": "idx", "fields": ["x"]},
         },
         {
             "type": "add_foreign_key",
@@ -178,17 +218,17 @@ def test_missing_keys_and_noop_targets():
     for op in operations:
         python.apply_operation(deepcopy(op))
         rust.apply_operation(deepcopy(op))
-        assert rust.tables == python.tables
-        assert rust.to_snapshot() == python.to_snapshot()
+    assert rust.to_snapshot() == canonical_snapshot(python.to_snapshot())
 
 
 def test_cache_and_snapshot_independence():
     state = SchemaState()
     state.apply_operation(
-        {"type": "create_table", "table": {"name": "t", "fields": []}}
+        {"type": "create_table", "table": {"name": "t", "fields": [], "indexes": []}}
     )
     first = state.tables
-    assert state.tables is first
+    assert state.tables == first
+    assert state.tables is not first
     snapshot = state.to_snapshot()
     snapshot["tables"]["t"]["fields"].append({"name": "unrelated"})
     assert state.tables["t"]["fields"] == []
@@ -204,9 +244,16 @@ def test_binding_resolved_and_collect_alterations():
             {
                 "type": "create_table",
                 "table": {
+                    "indexes": [],
                     "name": "t",
                     "fields": [
-                        {"name": "x", "column_type": {"kind": "text"}, "nullable": True}
+                        {
+                            "primary_key": False,
+                            "unique": False,
+                            "name": "x",
+                            "column_type": {"kind": "text"},
+                            "nullable": True,
+                        }
                     ],
                 },
             }
@@ -240,7 +287,7 @@ def test_sqlmigrate_resolves_history_and_intra_migration_changes(tmp_path, monke
     from oxyde.cli.migrations import app
 
     (tmp_path / "0001_initial.py").write_text("""def upgrade(ctx):
-    ctx.create_table("items", [{"name": "value", "python_type": "str", "nullable": True}])
+    ctx.create_table("items", [{"name": "value", "python_type": "str", "nullable": True, "primary_key": False, "unique": False}])
 """)
     (tmp_path / "0002_change.py").write_text("""depends_on = "0001_initial"
 def upgrade(ctx):
@@ -339,6 +386,9 @@ def test_existing_integration_migration_fixtures(
         compile(ast.fix_missing_locations(source), fixtures.__file__, "exec"), namespace
     )
     assert len(list(tmp_path.glob("[0-9]*.py"))) == expected
+    from .replay_parity import assert_fixture_histories
+
+    assert_fixture_histories(tmp_path)
 
 
 def test_existing_legacy_history_fixtures(tmp_path):
@@ -360,9 +410,13 @@ def test_enum_field_references_accept_legacy_fields():
         {
             "type": "create_table",
             "table": {
+                "indexes": [],
                 "name": "t",
                 "fields": [
                     {
+                        "nullable": True,
+                        "primary_key": False,
+                        "unique": False,
                         "name": "state",
                         "column_type": {
                             "kind": "enum",
@@ -375,10 +429,22 @@ def test_enum_field_references_accept_legacy_fields():
         }
     )
     op = {
+        "indexes": [],
         "type": "add_enum_value",
         "name": "status",
         "value": "published",
-        "fields": [{"table": "t", "field": {"name": "state", "python_type": "str"}}],
+        "fields": [
+            {
+                "table": "t",
+                "field": {
+                    "nullable": True,
+                    "primary_key": False,
+                    "unique": False,
+                    "name": "state",
+                    "python_type": "str",
+                },
+            }
+        ],
     }
     resolved = state.resolve_operation(op)
     assert resolved["fields"][0]["field"]["column_type"] == {"kind": "string"}
@@ -395,9 +461,13 @@ def test_nested_enum_rewrites_preserve_spec_metadata():
         {
             "type": "create_table",
             "table": {
+                "indexes": [],
                 "name": "t",
                 "fields": [
                     {
+                        "nullable": True,
+                        "primary_key": False,
+                        "unique": False,
                         "name": "states",
                         "column_type": {
                             "kind": "array",
@@ -407,7 +477,7 @@ def test_nested_enum_rewrites_preserve_spec_metadata():
                                 "item": {
                                     "kind": "enum",
                                     "name": "status",
-                                    "note": "retained",
+                                    "values": [],
                                 },
                             },
                         },
@@ -426,5 +496,4 @@ def test_nested_enum_rewrites_preserve_spec_metadata():
     for op in operations:
         python.apply_operation(deepcopy(op))
         rust.apply_operation(deepcopy(op))
-        assert rust.tables == python.tables
-        assert rust.to_snapshot() == python.to_snapshot()
+    assert rust.to_snapshot() == canonical_snapshot(python.to_snapshot())

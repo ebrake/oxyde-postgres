@@ -117,7 +117,7 @@ fn values_the_array_type_cannot_hold_equal_nothing() {
         sql.ends_with(r#"(CASE WHEN "tags" IS NULL THEN NULL ELSE FALSE END)"#),
         "{sql}"
     );
-    assert!(params.is_empty());
+    assert_eq!(params, [] as [sea_query::Value; 0]);
     let (sql, _) = int_array_override("!=", too_big()).build(Dialect::Postgres);
     assert!(
         sql.ends_with(r#"(CASE WHEN "tags" IS NULL THEN NULL ELSE TRUE END)"#),

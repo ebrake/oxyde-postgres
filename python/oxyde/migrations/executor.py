@@ -18,6 +18,7 @@ from oxyde.db.registry import get_connection as _get_connection_async
 from oxyde.migrations.context import MigrationContext
 from oxyde.migrations.replay import (
     SchemaState,
+    _apply_module_ops,
     _get_migration_dependency,
     _topological_sort_migrations,
 )
@@ -184,8 +185,7 @@ def replay_migrations_up_to(
             ctx = MigrationContext(mode="collect")
             module.upgrade(ctx)
 
-            for op in ctx.get_collected_operations():
-                state.apply_operation(op)
+            _apply_module_ops(state, filepath, ctx.get_collected_operations())
 
         # Stop after target if include_target is True
         if filepath == target_migration and include_target:

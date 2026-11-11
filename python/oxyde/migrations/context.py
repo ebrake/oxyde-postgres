@@ -59,10 +59,6 @@ class MigrationContext:
 
         validate_dialect(self._dialect)
         self._db_conn = db_conn
-        if schema_state is None and mode == "execute":
-            from oxyde.migrations.replay import SchemaState
-
-            schema_state = SchemaState()
         self._schema_state = schema_state
         self._operations: list[dict[str, Any]] = []
         self._raw_sql_seen = False
@@ -282,44 +278,17 @@ class MigrationContext:
             self._operations.append(op)
             return
 
-        from oxyde.migrations.replay import SchemaState
+        from oxyde.migrations.replay import resolve_alter_column
 
-        state = self._schema_state
-        table_schema = state.tables.get(table, {}) if state is not None else {}
-        if not any(f["name"] == field_name for f in table_schema.get("fields", [])):
-            state = SchemaState()
-            state.apply_operation(
-                {
-                    "type": "create_table",
-                    "table": {
-                        "name": table,
-                        "fields": [
-                            {
-                                "name": field_name,
-                                "column_type": changes.get(
-                                    "column_type", {"kind": "unknown"}
-                                ),
-                                "db_type": None,
-                                "nullable": True,
-                                "primary_key": False,
-                                "unique": False,
-                                "default": None,
-                                "auto_increment": False,
-                            }
-                        ],
-                    },
-                }
-            )
-        assert state is not None
+        state = self._get_schema_state()
+        op = {
+            "type": "alter_column",
+            "table": table,
+            "column": field_name,
+            "changes": changes,
+        }
         self._execute_operation(
-            state.resolve_operation(
-                {
-                    "type": "alter_column",
-                    "table": table,
-                    "column": field_name,
-                    "changes": changes,
-                }
-            )
+            resolve_alter_column(state, table, field_name, changes), replay_op=op
         )
 
     # ========================================================================
@@ -490,7 +459,16 @@ class MigrationContext:
         """
         return self._operations
 
-    def _execute_operation(self, op: dict[str, Any]) -> None:
+    def _get_schema_state(self) -> SchemaState:
+        if self._schema_state is None:
+            from oxyde.migrations.replay import SchemaState
+
+            self._schema_state = SchemaState()
+        return self._schema_state
+
+    def _execute_operation(
+        self, op: dict[str, Any], *, replay_op: dict[str, Any] | None = None
+    ) -> None:
         """Convert operation to SQL and execute in database.
 
         Args:
@@ -500,15 +478,14 @@ class MigrationContext:
         # column_type. Single legacy funnel for the execute path.
         from oxyde.migrations.utils import normalize_op_fields
 
-        replay_op = op
+        replay_op = op if replay_op is None else replay_op
         op = normalize_op_fields(op)
 
         # Convert operation to SQL using Rust
         operations_json = json.dumps([op])
         sql_statements = migration_to_sql(operations_json, self._dialect)
 
-        if self._schema_state is not None:
-            self._schema_state.apply_operation(replay_op)
+        self._get_schema_state().apply_operation(replay_op)
 
         # Execute each SQL statement
         for sql in sql_statements:

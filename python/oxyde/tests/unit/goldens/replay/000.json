@@ -1,0 +1,68 @@
+{
+  "baseline": "0.2.2 (5f9f406)",
+  "case": "TestNullsDistinctE2E.test_toggle_forward_and_reverse-{'enabled': True, 'kind': 'column'}",
+  "files": {
+    "0002_toggle_nulls.py": "\"\"\"Auto-generated migration.\n\nCreated: 2026-11-11 18:35:34\n\"\"\"\n\ndepends_on = \"0001_initial\"\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.alter_column(\"contacts_38e07b94\", \"email\", nulls_not_distinct=True)\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.alter_column(\"contacts_38e07b94\", \"email\", nulls_not_distinct=False)\n",
+    "0001_initial.py": "\"\"\"Auto-generated migration.\n\nCreated: 2026-11-11 18:35:34\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"contacts_38e07b94\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': True,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"contacts_38e07b94\")\n"
+  },
+  "snapshot": {
+    "version": 1,
+    "tables": {
+      "contacts_38e07b94": {
+        "name": "contacts_38e07b94",
+        "fields": [
+          {
+            "name": "id",
+            "column_type": {
+              "kind": "big_integer"
+            },
+            "db_type": null,
+            "nullable": true,
+            "primary_key": true,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": null,
+            "max_digits": null,
+            "decimal_places": null
+          },
+          {
+            "name": "email",
+            "column_type": {
+              "kind": "string"
+            },
+            "db_type": null,
+            "nullable": true,
+            "primary_key": false,
+            "unique": true,
+            "default": null,
+            "auto_increment": false,
+            "max_length": null,
+            "max_digits": null,
+            "decimal_places": null,
+            "nulls_not_distinct": true
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [],
+        "checks": [],
+        "comment": null
+      }
+    }
+  },
+  "sql": {
+    "0001_initial.py": {
+      "statements": [
+        "CREATE TABLE \"contacts_38e07b94\" ( \"id\" BIGSERIAL PRIMARY KEY, \"email\" VARCHAR(255) UNIQUE )"
+      ]
+    },
+    "0002_toggle_nulls.py": {
+      "statements": [
+        "ALTER TABLE \"contacts_38e07b94\" DROP CONSTRAINT \"contacts_38e07b94_email_key\"",
+        "ALTER TABLE \"contacts_38e07b94\" ADD CONSTRAINT \"contacts_38e07b94_email_key\" UNIQUE NULLS NOT DISTINCT (\"email\")"
+      ]
+    }
+  },
+  "makemigrations": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"contacts_38e07b94\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': True,\n                'nulls_not_distinct': True,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"contacts_38e07b94\")\n",
+  "squash": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"contacts_38e07b94\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': True,\n                'nulls_not_distinct': True,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"contacts_38e07b94\")\n"
+}

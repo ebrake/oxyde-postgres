@@ -94,6 +94,20 @@ impl SchemaReplay {
         serde_json::to_string(&op).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    fn has_table(&self, table: &str) -> bool {
+        self.state.tables.contains_key(table)
+    }
+
+    fn field_json(&self, table: &str, column: &str) -> PyResult<Option<String>> {
+        self.state
+            .tables
+            .get(table)
+            .and_then(|table| table.fields.iter().find(|field| field.name == column))
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     fn snapshot_json(&self) -> PyResult<String> {
         self.state
             .to_json()

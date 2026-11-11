@@ -134,7 +134,10 @@ def normalize_op_fields(op: dict) -> dict:
         op["table_fields"] = [normalize_field_dict(f) for f in op["table_fields"]]
     if op.get("type") == "add_enum_value" and isinstance(op.get("fields"), list):
         op["fields"] = [
-            {**ref, "field": normalize_field_dict(ref["field"])} for ref in op["fields"]
+            {**ref, "field": normalize_field_dict(ref["field"])}
+            if isinstance(ref.get("field"), dict)
+            else ref
+            for ref in op["fields"]
         ]
     return op
 

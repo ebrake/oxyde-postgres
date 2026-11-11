@@ -1,0 +1,124 @@
+{
+  "baseline": "0.2.2 (5f9f406)",
+  "case": "TestDropForeignKeyBugRegressionE2E.test_remove_fk_keep_column-{}",
+  "files": {
+    "0002_drop_fk_2c7d5c42.py": "\"\"\"Auto-generated migration.\n\nCreated: 2026-11-11 18:35:34\n\"\"\"\n\ndepends_on = \"0001_initial_2c7d5c42\"\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.drop_foreign_key(\"books_2c7d5c42\", \"fk_books_2c7d5c42_author_id\")\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.add_foreign_key(\n        \"books_2c7d5c42\",\n        \"fk_books_2c7d5c42_author_id\",\n        ['author_id'],\n        \"authors_2c7d5c42\",\n        ['id'],\n        on_delete=\"CASCADE\",\n        on_update=\"CASCADE\",\n    )\n",
+    "0001_initial_2c7d5c42.py": "\"\"\"Auto-generated migration.\n\nCreated: 2026-11-11 18:35:34\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"authors_2c7d5c42\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'name',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 100\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 100,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n    ctx.create_table(\n        \"books_2c7d5c42\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'title',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 200\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 200,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'author_id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n        foreign_keys=[\n            {\n                'name': 'fk_books_2c7d5c42_author_id',\n                'columns': [\n                    'author_id'\n                ],\n                'ref_table': 'authors_2c7d5c42',\n                'ref_columns': [\n                    'id'\n                ],\n                'on_delete': 'CASCADE',\n                'on_update': 'CASCADE'\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"books_2c7d5c42\")\n    ctx.drop_table(\"authors_2c7d5c42\")\n"
+  },
+  "snapshot": {
+    "version": 1,
+    "tables": {
+      "authors_2c7d5c42": {
+        "name": "authors_2c7d5c42",
+        "fields": [
+          {
+            "name": "id",
+            "column_type": {
+              "kind": "big_integer"
+            },
+            "db_type": null,
+            "nullable": true,
+            "primary_key": true,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": null,
+            "max_digits": null,
+            "decimal_places": null
+          },
+          {
+            "name": "name",
+            "column_type": {
+              "kind": "string",
+              "length": 100
+            },
+            "db_type": null,
+            "nullable": false,
+            "primary_key": false,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": 100,
+            "max_digits": null,
+            "decimal_places": null
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [],
+        "checks": [],
+        "comment": null
+      },
+      "books_2c7d5c42": {
+        "name": "books_2c7d5c42",
+        "fields": [
+          {
+            "name": "id",
+            "column_type": {
+              "kind": "big_integer"
+            },
+            "db_type": null,
+            "nullable": true,
+            "primary_key": true,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": null,
+            "max_digits": null,
+            "decimal_places": null
+          },
+          {
+            "name": "title",
+            "column_type": {
+              "kind": "string",
+              "length": 200
+            },
+            "db_type": null,
+            "nullable": false,
+            "primary_key": false,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": 200,
+            "max_digits": null,
+            "decimal_places": null
+          },
+          {
+            "name": "author_id",
+            "column_type": {
+              "kind": "big_integer"
+            },
+            "db_type": null,
+            "nullable": true,
+            "primary_key": false,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": null,
+            "max_digits": null,
+            "decimal_places": null
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [],
+        "checks": [],
+        "comment": null
+      }
+    }
+  },
+  "sql": {
+    "0001_initial_2c7d5c42.py": {
+      "statements": [
+        "CREATE TABLE \"authors_2c7d5c42\" ( \"id\" BIGSERIAL PRIMARY KEY, \"name\" VARCHAR(100) NOT NULL )",
+        "CREATE TABLE \"books_2c7d5c42\" ( \"id\" BIGSERIAL PRIMARY KEY, \"title\" VARCHAR(200) NOT NULL, \"author_id\" BIGINT )",
+        "ALTER TABLE \"books_2c7d5c42\" ADD CONSTRAINT \"fk_books_2c7d5c42_author_id\" FOREIGN KEY (\"author_id\") REFERENCES \"authors_2c7d5c42\" (\"id\") ON DELETE CASCADE ON UPDATE CASCADE"
+      ]
+    },
+    "0002_drop_fk_2c7d5c42.py": {
+      "statements": [
+        "ALTER TABLE \"books_2c7d5c42\" DROP CONSTRAINT \"fk_books_2c7d5c42_author_id\""
+      ]
+    }
+  },
+  "makemigrations": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"books_2c7d5c42\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'title',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 200\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 200,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'author_id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n    ctx.create_table(\n        \"authors_2c7d5c42\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'name',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 100\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 100,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"authors_2c7d5c42\")\n    ctx.drop_table(\"books_2c7d5c42\")\n",
+  "squash": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"books_2c7d5c42\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'title',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 200\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 200,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'author_id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n    ctx.create_table(\n        \"authors_2c7d5c42\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'name',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 100\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 100,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"authors_2c7d5c42\")\n    ctx.drop_table(\"books_2c7d5c42\")\n"
+}

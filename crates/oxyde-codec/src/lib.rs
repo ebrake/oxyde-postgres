@@ -139,7 +139,6 @@ pub enum ColumnTypeSpec {
     JsonBinary,
     Enum {
         name: String,
-        #[serde(default)]
         values: Vec<String>,
     },
     Array {

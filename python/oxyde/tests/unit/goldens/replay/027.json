@@ -1,0 +1,70 @@
+{
+  "baseline": "0.2.2 (5f9f406)",
+  "case": "generated_seed_16",
+  "files": {
+    "0001_generated.py": "import random\nfrom types import SimpleNamespace\ndef _generated_migration(seed):\n    rng = random.Random(seed)\n\n    def upgrade(ctx):\n        ctx.create_enum_type(\"status\", [\"draft\"])\n        ctx.create_table(\n            \"items\",\n            [\n                {\n                    \"nullable\": True,\n                    \"unique\": False,\n                    \"name\": \"id\",\n                    \"column_type\": {\"kind\": \"big_integer\"},\n                    \"primary_key\": True,\n                },\n                {\n                    \"primary_key\": False,\n                    \"unique\": False,\n                    \"name\": \"value\",\n                    \"column_type\": {\"kind\": \"text\"},\n                    \"nullable\": True,\n                },\n                {\n                    \"nullable\": True,\n                    \"primary_key\": False,\n                    \"unique\": False,\n                    \"name\": \"status\",\n                    \"column_type\": {\n                        \"kind\": \"array\",\n                        \"item\": {\n                            \"kind\": \"array\",\n                            \"item\": {\n                                \"kind\": \"enum\",\n                                \"name\": \"status\",\n                                \"values\": [\"draft\"],\n                            },\n                        },\n                    },\n                },\n            ],\n        )\n        ctx.create_table(\n            \"parent\",\n            [\n                {\n                    \"nullable\": True,\n                    \"primary_key\": False,\n                    \"unique\": False,\n                    \"name\": \"id\",\n                    \"column_type\": {\"kind\": \"big_integer\"},\n                }\n            ],\n        )\n        ctx.create_index(\n            \"items\",\n            {\n                \"unique\": False,\n                \"name\": \"idx\",\n                \"fields\": [\"value\"],\n                \"where\": \"  value IS NOT NULL  \",\n            },\n        )\n        ctx.add_foreign_key(\"items\", \"fk\", [\"id\"], \"parent\", [\"id\"])\n        ctx.add_check(\"items\", \"ck\", \"id > 0\")\n        ctx.add_column(\n            \"items\",\n            {\n                \"nullable\": True,\n                \"primary_key\": False,\n                \"unique\": False,\n                \"name\": \"temporary\",\n                \"column_type\": {\"kind\": \"boolean\"},\n            },\n        )\n        ctx.rename_column(\"items\", \"value\", \"label\")\n        for _ in range(12):\n            ctx.alter_column(\n                \"items\",\n                \"label\",\n                **rng.choice(\n                    [\n                        {\"nullable\": True, \"default\": \"'a'\"},\n                        {\"nullable\": False, \"default\": None},\n                        {\"unique\": True, \"nulls_not_distinct\": True},\n                        {\"unique\": True, \"nulls_not_distinct\": False},\n                        {\"unique\": False, \"max_length\": 50},\n                        {\"column_type\": {\"kind\": \"string\", \"length\": 80}},\n                        {\"column_type\": {\"kind\": \"text\"}, \"db_type\": None},\n                    ]\n                ),\n            )\n        ctx.add_enum_value(\"status\", \"published\")\n        ctx.add_enum_value(\"status\", \"published\")\n        ctx.alter_enum_type(\n            \"status\", [\"draft\", \"published\"], [\"published\", \"draft\", \"archived\"]\n        )\n        ctx.drop_check(\"items\", \"ck\")\n        ctx.drop_foreign_key(\"items\", \"fk\")\n        ctx.drop_index(\"items\", \"idx\")\n        ctx.drop_column(\"items\", \"temporary\")\n        ctx.rename_table(\"items\", \"renamed\")\n        ctx.execute(\"SELECT 1\")\n        ctx.drop_table(\"parent\")\n        ctx.drop_enum_type(\"unused\")\n\n    # Each execute/collect run must see the same generated choices.\n    def deterministic(ctx):\n        rng.seed(seed)\n        upgrade(ctx)\n\n    return SimpleNamespace(upgrade=deterministic)\ndef upgrade(ctx):\n    _generated_migration(16).upgrade(ctx)\n"
+  },
+  "snapshot": {
+    "version": 1,
+    "tables": {
+      "renamed": {
+        "name": "renamed",
+        "fields": [
+          {
+            "nullable": true,
+            "unique": false,
+            "name": "id",
+            "column_type": {
+              "kind": "big_integer"
+            },
+            "primary_key": true
+          },
+          {
+            "primary_key": false,
+            "unique": true,
+            "name": "label",
+            "column_type": {
+              "kind": "string",
+              "length": 80
+            },
+            "nullable": true,
+            "default": "'a'",
+            "db_type": null
+          },
+          {
+            "nullable": true,
+            "primary_key": false,
+            "unique": false,
+            "name": "status",
+            "column_type": {
+              "kind": "array",
+              "item": {
+                "kind": "array",
+                "item": {
+                  "kind": "enum",
+                  "name": "status",
+                  "values": [
+                    "published",
+                    "draft",
+                    "archived"
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [],
+        "checks": [],
+        "comment": null
+      }
+    }
+  },
+  "sql": {
+    "0001_generated.py": {
+      "excluded": "0.3 tracks renames before later alterations within the same migration"
+    }
+  },
+  "makemigrations": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_enum_type('status', [\n    'published',\n    'draft',\n    'archived'\n])\n    ctx.create_table(\n        \"renamed\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'label',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 80\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': True,\n                'default': \"'a'\",\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'status',\n                'column_type': {\n                    'kind': 'array',\n                    'item': {\n                        'kind': 'array',\n                        'item': {\n                            'kind': 'enum',\n                            'name': 'status',\n                            'values': [\n                                'published',\n                                'draft',\n                                'archived'\n                            ]\n                        }\n                    }\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"renamed\")\n    ctx.drop_enum_type('status')\n",
+  "squash": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_enum_type('status', [\n    'published',\n    'draft',\n    'archived'\n])\n    ctx.create_table(\n        \"renamed\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'label',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 80\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': True,\n                'default': \"'a'\",\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'status',\n                'column_type': {\n                    'kind': 'array',\n                    'item': {\n                        'kind': 'array',\n                        'item': {\n                            'kind': 'enum',\n                            'name': 'status',\n                            'values': [\n                                'published',\n                                'draft',\n                                'archived'\n                            ]\n                        }\n                    }\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"renamed\")\n    ctx.drop_enum_type('status')\n"
+}

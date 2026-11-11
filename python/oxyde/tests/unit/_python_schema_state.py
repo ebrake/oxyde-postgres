@@ -1,11 +1,17 @@
-"""Frozen Python replay oracle; production replay lives in Rust."""
+"""Replay migrations in memory to build schema state."""
 
-import json
-from typing import Any, cast
+from __future__ import annotations
 
-from oxyde.core import migration_to_sql
+import warnings
+from pathlib import Path
+from typing import Any
+
 from oxyde.migrations.context import MigrationContext
-from oxyde.migrations.utils import normalize_field_dict, normalize_op_fields
+from oxyde.migrations.utils import (
+    load_migration_module,
+    normalize_field_dict,
+    op_uses_legacy_fields,
+)
 
 
 def _add_enum_value_to_spec(
@@ -41,7 +47,7 @@ def _replace_enum_values_in_spec(
     return spec
 
 
-class _PythonSchemaState:
+class SchemaState:
     """Represents database schema in memory.
 
     This class applies migration operations to build a virtual schema
@@ -249,114 +255,118 @@ class _PythonSchemaState:
         }
 
 
-class _PythonMigrationContext(MigrationContext):
-    """Frozen Python alteration resolution, with sequential schema tracking."""
+def _get_migration_dependency(module: Any) -> str | None:
+    """Get the depends_on value from a migration module.
 
-    _schema_state: Any
+    Args:
+        module: Loaded migration module
 
-    def __init__(self, *, schema_state: _PythonSchemaState, **kwargs: Any):
-        super().__init__(schema_state=cast(Any, schema_state), **kwargs)
+    Returns:
+        Name of dependency migration or None
+    """
+    return getattr(module, "depends_on", None)
 
-    def _execute_operation(self, op):
-        self._sql_statements.extend(
-            migration_to_sql(json.dumps([normalize_op_fields(op)]), self._dialect)
-        )
-        # Frozen replay consumes collect alterations; alter_column below applies
-        # that original shape after SQL generation.
-        if op["type"] != "alter_column":
-            self._schema_state.apply_operation(op)
 
-    def alter_column(self, table: str, field_name: str, **changes: Any) -> None:
-        """Alter column properties (nullable, type, default, etc.).
+def _topological_sort_migrations(
+    migration_files: list[Path],
+) -> list[Path]:
+    """Sort migrations in topological order based on depends_on.
 
-        Args:
-            table: Table name
-            field_name: Column name
-            **changes: Properties to change (nullable, type, default, etc.)
-        """
-        # For collect mode, store simple format
-        if self._mode == "collect":
-            op: dict[str, Any] = {
-                "type": "alter_column",
-                "table": table,
-                "column": field_name,
-                "changes": changes,
-            }
-            self._operations.append(op)
-            return
+    Args:
+        migration_files: List of migration file paths
 
-        # For execute mode, build Rust-compatible format with old_field/new_field
-        old_field = None
+    Returns:
+        Migrations sorted in dependency order
 
-        if self._schema_state:
-            table_schema = self._schema_state.tables.get(table)
-            if table_schema:
-                # Find old field definition
-                for field in table_schema["fields"]:
-                    if field["name"] == field_name:
-                        old_field = dict(field)
-                        break
+    Raises:
+        ValueError: If circular dependency detected
+    """
+    # Build dependency graph
+    modules: dict[str, tuple[Path, Any]] = {}
+    for file in migration_files:
+        module = load_migration_module(file)
+        if module is not None:
+            modules[file.stem] = (file, module)
 
-        if old_field is None:
-            # Fallback: create minimal field definition
-            old_field = {
-                "name": field_name,
-                "column_type": changes.get("column_type", {"kind": "unknown"}),
-                "db_type": None,
-                "nullable": True,
-                "primary_key": False,
-                "unique": False,
-                "default": None,
-                "auto_increment": False,
-            }
+    # Build adjacency list (name -> depends_on)
+    dependencies: dict[str, str | None] = {}
+    for name, (_, module) in modules.items():
+        dependencies[name] = _get_migration_dependency(module)
 
-        # Build new_field by applying changes to old_field
-        new_field = dict(old_field)
-        if "column_type" in changes:
-            new_field["column_type"] = changes["column_type"]
-        # Legacy keys from old migration files — drop stale column_type so
-        # normalization re-derives it from the legacy name
-        if "type" in changes:
-            new_field["python_type"] = changes["type"]
-            new_field.pop("column_type", None)
-        if "python_type" in changes:
-            new_field["python_type"] = changes["python_type"]
-            new_field.pop("column_type", None)
-        if "db_type" in changes:
-            new_field["db_type"] = changes["db_type"]
-        if "nullable" in changes:
-            new_field["nullable"] = changes["nullable"]
-        if "default" in changes:
-            new_field["default"] = changes["default"]
-        if "unique" in changes:
-            new_field["unique"] = changes["unique"]
-        if "nulls_not_distinct" in changes:
-            if changes["nulls_not_distinct"]:
-                new_field["nulls_not_distinct"] = True
-            else:
-                new_field.pop("nulls_not_distinct", None)
-        if "max_length" in changes:
-            new_field["max_length"] = changes["max_length"]
-        if "max_digits" in changes:
-            new_field["max_digits"] = changes["max_digits"]
-        if "decimal_places" in changes:
-            new_field["decimal_places"] = changes["decimal_places"]
+    # Topological sort using Kahn's algorithm
+    # Count incoming edges
+    in_degree: dict[str, int] = {name: 0 for name in modules}
+    for name, dep in dependencies.items():
+        if dep is not None and dep in in_degree:
+            in_degree[name] = 1  # Has one dependency
 
-        # Build Rust-compatible operation
-        op = {
-            "type": "alter_column",
-            "table": table,
-            "old_field": old_field,
-            "new_field": new_field,
-        }
+    # Start with nodes that have no dependencies
+    queue = [name for name, degree in in_degree.items() if degree == 0]
+    result: list[Path] = []
 
-        self._execute_operation(op)
+    while queue:
+        # Sort queue to ensure deterministic order (by migration name)
+        queue.sort()
+        current = queue.pop(0)
+        result.append(modules[current][0])
 
-        self._schema_state.apply_operation(
-            {
-                "type": "alter_column",
-                "table": table,
-                "column": field_name,
-                "changes": changes,
-            }
-        )
+        # Find migrations that depend on current
+        for name, dep in dependencies.items():
+            if dep == current:
+                in_degree[name] -= 1
+                if in_degree[name] == 0:
+                    queue.append(name)
+
+    # Check for circular dependencies
+    if len(result) != len(modules):
+        applied = {f.stem for f in result}
+        remaining = set(modules.keys()) - applied
+        raise ValueError(f"Circular dependency detected in migrations: {remaining}")
+
+    return result
+
+
+def replay_migrations(migrations_dir: str = "migrations") -> dict[str, Any]:
+    """Replay all migrations and return final schema as snapshot.
+
+    Migrations are applied in topological order based on their depends_on field.
+
+    Args:
+        migrations_dir: Directory containing migration files
+
+    Returns:
+        Schema snapshot after replaying all migrations
+    """
+    state = SchemaState()
+    migration_files = sorted(Path(migrations_dir).glob("[0-9]*.py"))
+
+    # Sort migrations by dependencies
+    sorted_files = _topological_sort_migrations(migration_files)
+
+    for file in sorted_files:
+        module = load_migration_module(file)
+        if module is None:
+            continue
+
+        # Run upgrade() in "collect" mode
+        if hasattr(module, "upgrade"):
+            ctx = MigrationContext(mode="collect")
+            module.upgrade(ctx)
+
+            # Apply collected operations to virtual schema
+            operations = ctx.get_collected_operations()
+            if any(op_uses_legacy_fields(op) for op in operations):
+                warnings.warn(
+                    f"Migration file '{file.name}' uses the legacy field format "
+                    "(python_type). Support will be removed in oxyde 1.0 — "
+                    "run `oxyde migrations squash` to convert.",
+                    FutureWarning,
+                    stacklevel=2,
+                )
+            for op in operations:
+                state.apply_operation(op)
+
+    return state.to_snapshot()
+
+
+__all__ = ["SchemaState", "replay_migrations", "_topological_sort_migrations"]

@@ -1,6 +1,7 @@
 //! Apply migration operations to a snapshot without a database or SQL renderer.
 
 use crate::{FieldDef, MigrateError, MigrationOp, Result, Snapshot};
+use oxyde_codec::ColumnTypeSpec;
 use serde_json::Value;
 
 /// Resolve collect-mode column changes using the field currently in the schema.
@@ -20,22 +21,27 @@ pub fn resolve_operation(state: &Snapshot, op: &MigrationOp) -> Result<Migration
     if old_field.is_some() && new_field.is_some() {
         return Ok(op.clone());
     }
-    let column = column.as_deref().ok_or_else(|| {
-        MigrateError::MigrationError(
-            "alter_column requires old_field/new_field or column/changes".into(),
-        )
-    })?;
-    let old = state
-        .tables
-        .get(table)
-        .and_then(|table| table.fields.iter().find(|field| field.name == column))
+    let column = column
+        .as_deref()
+        .or_else(|| old_field.as_ref().map(|field| field.name.as_str()))
+        .ok_or_else(|| {
+            MigrateError::MigrationError(
+                "alter_column requires old_field/new_field or column/changes".into(),
+            )
+        })?;
+    let old = old_field
+        .as_deref()
+        .or_else(|| {
+            state
+                .tables
+                .get(table)
+                .and_then(|table| table.fields.iter().find(|field| field.name == column))
+        })
         .ok_or_else(|| MigrateError::MigrationError(format!("Unknown column {table}.{column}")))?;
     let mut value = serde_json::to_value(old)
         .map_err(|error| MigrateError::SerializationError(error.to_string()))?;
     let field = value.as_object_mut().expect("field is an object");
     if let Some(changes) = changes {
-        // Python normalizes legacy type names before the Rust boundary. Preserve
-        // their metadata in replay, but never interpret Python type names here.
         for key in [
             "column_type",
             "db_type",
@@ -45,24 +51,24 @@ pub fn resolve_operation(state: &Snapshot, op: &MigrationOp) -> Result<Migration
             "max_length",
             "max_digits",
             "decimal_places",
-            "python_type",
-            "__oxyde_legacy_field",
         ] {
             if let Some(value) = changes.get(key) {
                 field.insert(key.into(), value.clone());
             }
         }
         if let Some(value) = changes.get("nulls_not_distinct") {
-            if value == &Value::Bool(true) {
+            let enabled = value.as_bool().ok_or_else(|| {
+                MigrateError::MigrationError("nulls_not_distinct must be a boolean".into())
+            })?;
+            if enabled {
                 field.insert("nulls_not_distinct".into(), Value::Bool(true));
             } else {
                 field.remove("nulls_not_distinct");
             }
         }
     }
-    let mut new: FieldDef = serde_json::from_value(value)
+    let new: FieldDef = serde_json::from_value(value)
         .map_err(|error| MigrateError::SerializationError(error.to_string()))?;
-    new.replay_shape.preserve = true;
     let mut resolved = op.clone();
     if let MigrationOp::AlterColumn {
         old_field,
@@ -80,55 +86,33 @@ pub fn resolve_operation(state: &Snapshot, op: &MigrationOp) -> Result<Migration
     Ok(resolved)
 }
 
-fn rewrite_enum(spec: &mut Value, name: &str, values: &[String], append: bool) {
-    if spec.get("kind").and_then(Value::as_str) == Some("enum")
-        && spec.get("name").and_then(Value::as_str) == Some(name)
-    {
-        if append {
-            let current = spec
-                .as_object_mut()
-                .expect("enum spec is an object")
-                .entry("values")
-                .or_insert_with(|| Value::Array(Vec::new()))
-                .as_array_mut()
-                .expect("enum values were validated during deserialization");
-            for value in values {
-                let value = Value::String(value.clone());
-                if !current.contains(&value) {
-                    current.push(value);
+fn rewrite_enum_spec(spec: &mut ColumnTypeSpec, name: &str, values: &[String], append: bool) {
+    match spec {
+        ColumnTypeSpec::Enum {
+            name: enum_name,
+            values: current,
+        } if enum_name == name => {
+            if append {
+                for value in values {
+                    if !current.contains(value) {
+                        current.push(value.clone());
+                    }
                 }
+            } else {
+                current.clone_from(&values.to_vec());
             }
-        } else {
-            spec["values"] = values.iter().cloned().map(Value::String).collect();
         }
-    } else if spec.get("kind").and_then(Value::as_str) == Some("array") {
-        if let Some(item) = spec.get_mut("item") {
-            rewrite_enum(item, name, values, append);
-        }
+        ColumnTypeSpec::Array { item, .. } => rewrite_enum_spec(item, name, values, append),
+        _ => {}
     }
 }
 
-fn rewrite_enum_fields(
-    state: &mut Snapshot,
-    name: &str,
-    values: &[String],
-    append: bool,
-) -> Result<()> {
+fn rewrite_enum_fields(state: &mut Snapshot, name: &str, values: &[String], append: bool) {
     for table in state.tables.values_mut() {
         for field in &mut table.fields {
-            // Rewrite the preserved JSON spec, including any legacy metadata,
-            // rather than replacing it with a canonicalized typed spec.
-            let mut raw = serde_json::to_value(&*field)
-                .map_err(|error| MigrateError::SerializationError(error.to_string()))?;
-            if let Some(spec) = raw.get_mut("column_type") {
-                rewrite_enum(spec, name, values, append);
-            }
-            *field = serde_json::from_value(raw)
-                .map_err(|error| MigrateError::SerializationError(error.to_string()))?;
-            field.replay_shape.preserve = true;
+            rewrite_enum_spec(&mut field.column_type, name, values, append);
         }
     }
-    Ok(())
 }
 
 /// Apply one operation. Missing tables/columns are ignored, matching Python replay.
@@ -137,28 +121,15 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
     match op {
         MigrationOp::CreateEnumType { .. } | MigrationOp::DropEnumType { .. } => {}
         MigrationOp::AddEnumValue { name, value, .. } => {
-            rewrite_enum_fields(state, name, std::slice::from_ref(value), true)?;
+            rewrite_enum_fields(state, name, std::slice::from_ref(value), true);
         }
         MigrationOp::AlterEnumType {
             name, new_values, ..
         } => {
-            rewrite_enum_fields(state, name, new_values, false)?;
+            rewrite_enum_fields(state, name, new_values, false);
         }
         MigrationOp::CreateTable { table } => {
-            let mut table = table.clone();
-            for field in &mut table.fields {
-                field.replay_shape.preserve = true;
-            }
-            for index in &mut table.indexes {
-                index.replay_shape.preserve = true;
-            }
-            for fk in &mut table.foreign_keys {
-                fk.replay_shape.preserve = true;
-            }
-            for check in &mut table.checks {
-                check.replay_shape.preserve = true;
-            }
-            state.add_table(table);
+            state.add_table(table.clone());
         }
         MigrationOp::DropTable { name, .. } => {
             state.tables.remove(name);
@@ -171,9 +142,7 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
         }
         MigrationOp::AddColumn { table, field } => {
             if let Some(table) = state.tables.get_mut(table) {
-                let mut field = field.clone();
-                field.replay_shape.preserve = true;
-                table.fields.push(field);
+                table.fields.push(field.clone());
             }
         }
         MigrationOp::DropColumn { table, field, .. } => {
@@ -238,14 +207,11 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
                 .and_then(|t| t.fields.iter_mut().find(|f| f.name == name))
             {
                 *field = new.clone();
-                field.replay_shape.preserve = true;
             }
         }
         MigrationOp::CreateIndex { table, index } => {
             if let Some(table) = state.tables.get_mut(table) {
-                let mut index = index.clone();
-                index.replay_shape.preserve = true;
-                table.indexes.push(index);
+                table.indexes.push(index.clone());
             }
         }
         MigrationOp::DropIndex { table, name, .. } => {
@@ -255,9 +221,7 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
         }
         MigrationOp::AddForeignKey { table, fk } => {
             if let Some(table) = state.tables.get_mut(table) {
-                let mut fk = fk.clone();
-                fk.replay_shape.preserve = true;
-                table.foreign_keys.push(fk);
+                table.foreign_keys.push(fk.clone());
             }
         }
         MigrationOp::DropForeignKey { table, name, .. } => {
@@ -267,9 +231,7 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
         }
         MigrationOp::AddCheck { table, check } => {
             if let Some(table) = state.tables.get_mut(table) {
-                let mut check = check.clone();
-                check.replay_shape.preserve = true;
-                table.checks.push(check);
+                table.checks.push(check.clone());
             }
         }
         MigrationOp::DropCheck { table, name, .. } => {
@@ -295,8 +257,8 @@ mod tests {
         let mut state = Snapshot::new();
         apply(
             &mut state,
-            json!({"type": "create_table", "table": {"name": "t", "fields": [
-                {"name": "x", "column_type": {"kind": "text"}, "nullable": true}
+            json!({"type": "create_table", "table": {"name": "t", "indexes": [], "fields": [
+                {"name": "x", "nullable": true, "primary_key": false, "unique": false, "column_type": {"kind": "text"}}
             ]}}),
         );
         let collect: MigrationOp = serde_json::from_value(json!({"type": "alter_column", "table": "t",
@@ -323,15 +285,50 @@ mod tests {
     }
 
     #[test]
+    fn supplied_old_field_resolves_without_a_tracked_column() {
+        let op = serde_json::from_value(json!({
+            "type": "alter_column", "table": "untracked",
+            "old_field": {"name": "x", "column_type": {"kind": "text"},
+                "nullable": true, "primary_key": false, "unique": false},
+            "changes": {"nullable": false}
+        }))
+        .unwrap();
+        let resolved = resolve_operation(&Snapshot::new(), &op).unwrap();
+        let MigrationOp::AlterColumn {
+            old_field: Some(old),
+            new_field: Some(new),
+            ..
+        } = resolved
+        else {
+            panic!("expected resolved alteration");
+        };
+        assert!(old.nullable);
+        assert!(!new.nullable);
+    }
+
+    #[test]
+    fn native_resolution_rejects_non_boolean_nulls_not_distinct() {
+        let op = serde_json::from_value(json!({
+            "type": "alter_column", "table": "untracked", "column": "x",
+            "old_field": {"name": "x", "column_type": {"kind": "text"},
+                "nullable": true, "primary_key": false, "unique": false},
+            "changes": {"nulls_not_distinct": 1}
+        }))
+        .unwrap();
+        let error = resolve_operation(&Snapshot::new(), &op).unwrap_err();
+        assert!(error.to_string().contains("must be a boolean"));
+    }
+
+    #[test]
     fn enum_rewrites_reach_scalar_and_nested_arrays_without_duplicates() {
         let mut state = Snapshot::new();
         apply(
             &mut state,
-            json!({"type": "create_table", "table": {"name": "t", "fields": [
-                {"name": "scalar", "column_type": {"kind": "enum", "name": "status"}},
-                {"name": "nested", "column_type": {"kind": "array", "item": {"kind": "array", "item": {
+            json!({"type": "create_table", "table": {"name": "t", "indexes": [], "fields": [
+                {"name": "scalar", "nullable": true, "primary_key": false, "unique": false, "column_type": {"kind": "enum", "name": "status", "values": []}},
+                {"name": "nested", "nullable": true, "primary_key": false, "unique": false, "column_type": {"kind": "array", "item": {"kind": "array", "item": {
                     "kind": "enum", "name": "status", "values": ["draft"]}}}},
-                {"name": "other", "column_type": {"kind": "enum", "name": "other", "values": ["same"]}}
+                {"name": "other", "nullable": true, "primary_key": false, "unique": false, "column_type": {"kind": "enum", "name": "other", "values": ["same"]}}
             ]}}),
         );
         for _ in 0..2 {
@@ -363,24 +360,16 @@ mod tests {
     }
 
     #[test]
-    fn sparse_members_preserve_shape_but_diff_stays_canonical() {
-        let mut state = Snapshot::new();
-        apply(
-            &mut state,
-            json!({"type": "create_table", "table": {"name": "t", "fields": [
-            {"name": "x", "column_type": {"kind": "text"}, "python_type": "str", "metadata": 1}
-        ], "indexes": [{"name": "idx", "fields": ["x"], "where": " x IS NOT NULL "}]}}),
-        );
-        let raw: Value = serde_json::from_str(&state.to_json().unwrap()).unwrap();
+    fn canonical_members_round_trip_in_declaration_order() {
+        let raw = r#"{"name":"x","column_type":{"kind":"array","item":{"kind":"text"}},"nullable":true,"primary_key":false,"unique":false}"#;
+        let field: FieldDef = serde_json::from_str(raw).unwrap();
+        let serialized = serde_json::to_string(&field).unwrap();
+        assert!(serialized
+            .starts_with(r#"{"name":"x","column_type":{"kind":"array","item":{"kind":"text"}}"#));
         assert_eq!(
-            raw["tables"]["t"]["fields"][0],
-            json!({"name": "x", "column_type": {"kind": "text"}, "python_type": "str", "metadata": 1})
+            serde_json::from_str::<FieldDef>(&serialized).unwrap(),
+            field
         );
-        assert_eq!(raw["tables"]["t"]["indexes"][0]["where"], " x IS NOT NULL ");
-        let ops = crate::compute_diff(&Snapshot::new(), &state).unwrap();
-        let raw = serde_json::to_value(ops).unwrap();
-        assert!(raw[0]["table"]["fields"][0].get("python_type").is_none());
-        assert_eq!(raw[0]["table"]["indexes"][0]["where"], "x IS NOT NULL");
     }
 
     #[test]
@@ -398,8 +387,8 @@ mod tests {
         assert!(state.tables.is_empty());
         apply(
             &mut state,
-            json!({"type": "create_table", "table": {"name": "t", "fields": [
-                {"name": "x", "column_type": {"kind": "text"}}
+            json!({"type": "create_table", "table": {"name": "t", "indexes": [], "fields": [
+                {"name": "x", "nullable": true, "primary_key": false, "unique": false, "column_type": {"kind": "text"}}
             ]}}),
         );
         let before = state.to_json().unwrap();

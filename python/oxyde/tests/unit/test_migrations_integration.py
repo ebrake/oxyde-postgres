@@ -26,15 +26,6 @@ from oxyde.migrations.replay import (
 )
 from oxyde.migrations.tracker import get_migration_files, get_pending_migrations
 
-from .replay_parity import assert_fixture_histories
-
-
-@pytest.fixture(autouse=True)
-def _check_migration_fixture_parity(tmp_path):
-    yield
-    assert_fixture_histories(tmp_path)
-
-
 # =============================================================================
 # Generator Tests
 # =============================================================================
@@ -51,20 +42,20 @@ class TestMigrationGenerator:
                 "table": {
                     "name": "users",
                     "fields": [
-                        {
+                        {'unique': False,
                             "name": "id",
                             "column_type": {"kind": "big_integer"},
                             "primary_key": True,
                             "nullable": False,
                             "auto_increment": True,
                         },
-                        {
+                        {'primary_key': False,
                             "name": "email",
                             "column_type": {"kind": "string", "length": 255},
                             "nullable": False,
                             "unique": True,
                         },
-                        {
+                        {'primary_key': False, 'unique': False,
                             "name": "name",
                             "column_type": {"kind": "string", "length": 100},
                             "nullable": True,
@@ -98,7 +89,7 @@ class TestMigrationGenerator:
             {
                 "type": "add_column",
                 "table": "users",
-                "field": {
+                "field": {'primary_key': False, 'unique': False,
                     "name": "age",
                     "column_type": {"kind": "big_integer"},
                     "nullable": True,
@@ -124,13 +115,13 @@ class TestMigrationGenerator:
                 "table": {
                     "name": "old_table",
                     "fields": [
-                        {
+                        {'unique': False,
                             "name": "id",
                             "column_type": {"kind": "big_integer"},
                             "primary_key": True,
                             "nullable": False,
                         },
-                        {
+                        {'primary_key': False, 'unique': False,
                             "name": "value",
                             "column_type": {"kind": "text"},
                             "nullable": True,
@@ -255,8 +246,8 @@ class TestMigrationReplay:
                 "table": {
                     "name": "users",
                     "fields": [
-                        {"name": "id", "column_type": {"kind": "big_integer"}, "primary_key": True},
-                        {"name": "name", "column_type": {"kind": "text"}},
+                        {'nullable': True, 'unique': False, "name": "id", "column_type": {"kind": "big_integer"}, "primary_key": True},
+                        {'nullable': True, 'primary_key': False, 'unique': False, "name": "name", "column_type": {"kind": "text"}},
                     ],
                     "indexes": [],
                 },
@@ -282,7 +273,7 @@ class TestMigrationReplay:
         state = SchemaState()
         state.apply_operation({"type": "create_table", "table": {
             "name": "users",
-            "fields": [{"name": "id", "column_type": {"kind": "big_integer"}}],
+            "fields": [{'nullable': True, 'primary_key': False, 'unique': False, "name": "id", "column_type": {"kind": "big_integer"}}],
             "indexes": [],
         }})
 
@@ -290,7 +281,7 @@ class TestMigrationReplay:
             {
                 "type": "add_column",
                 "table": "users",
-                "field": {"name": "email", "column_type": {"kind": "text"}},
+                "field": {'nullable': True, 'primary_key': False, 'unique': False, "name": "email", "column_type": {"kind": "text"}},
             }
         )
 
@@ -304,8 +295,8 @@ class TestMigrationReplay:
         state.apply_operation({"type": "create_table", "table": {
             "name": "users",
             "fields": [
-                {"name": "id", "column_type": {"kind": "big_integer"}},
-                {"name": "legacy", "column_type": {"kind": "text"}},
+                {'nullable': True, 'primary_key': False, 'unique': False, "name": "id", "column_type": {"kind": "big_integer"}},
+                {'nullable': True, 'primary_key': False, 'unique': False, "name": "legacy", "column_type": {"kind": "text"}},
             ],
             "indexes": [],
         }})
@@ -346,7 +337,7 @@ class TestMigrationReplay:
         state = SchemaState()
         state.apply_operation({"type": "create_table", "table": {
             "name": "users",
-            "fields": [{"name": "old_col", "column_type": {"kind": "text"}}],
+            "fields": [{'nullable': True, 'primary_key': False, 'unique': False, "name": "old_col", "column_type": {"kind": "text"}}],
             "indexes": [],
         }})
 
@@ -387,7 +378,7 @@ class TestMigrationReplay:
         state.apply_operation({"type": "create_table", "table": {
             "name": "users",
             "fields": [],
-            "indexes": [{"name": "idx_email", "fields": ["email"]}],
+            "indexes": [{"unique": False, "name": "idx_email", "fields": ["email"]}],
         }})
 
         state.apply_operation(
@@ -406,7 +397,7 @@ class TestMigrationReplay:
         state = SchemaState()
         state.apply_operation({"type": "create_table", "table": {
             "name": "users",
-            "fields": [{"name": "id", "column_type": {"kind": "big_integer"}}],
+            "fields": [{'nullable': True, 'primary_key': False, 'unique': False, "name": "id", "column_type": {"kind": "big_integer"}}],
             "indexes": [],
         }})
 
@@ -516,7 +507,7 @@ depends_on = None
 
 def upgrade(ctx):
     ctx.create_table("users", fields=[
-        {"name": "id", "column_type": {"kind": "big_integer"}, "primary_key": True},
+        {"name": "id", "column_type": {"kind": "big_integer"}, "primary_key": True, "nullable": False, "unique": False},
     ])
 
 def downgrade(ctx):
@@ -531,7 +522,7 @@ def downgrade(ctx):
 depends_on = "0001_users"
 
 def upgrade(ctx):
-    ctx.add_column("users", {"name": "email", "column_type": {"kind": "text"}})
+    ctx.add_column("users", {"name": "email", "column_type": {"kind": "text"}, "nullable": True, "primary_key": False, "unique": False})
 
 def downgrade(ctx):
     ctx.drop_column("users", "email")
@@ -562,7 +553,7 @@ class TestMigrationContext:
         ctx.create_table(
             "users",
             fields=[
-                {"name": "id", "column_type": {"kind": "big_integer"}, "primary_key": True},
+                {'nullable': True, 'unique': False, "name": "id", "column_type": {"kind": "big_integer"}, "primary_key": True},
             ],
         )
 
@@ -575,7 +566,7 @@ class TestMigrationContext:
         """Test collecting add_column operation."""
 
         ctx = MigrationContext(mode="collect")
-        ctx.add_column("users", {"name": "email", "column_type": {"kind": "text"}})
+        ctx.add_column("users", {'nullable': True, 'primary_key': False, 'unique': False, "name": "email", "column_type": {"kind": "text"}})
 
         ops = ctx.get_collected_operations()
         assert len(ops) == 1
@@ -598,8 +589,8 @@ class TestMigrationContext:
 
         ctx = MigrationContext(mode="collect")
         ctx.create_table("users", fields=[])
-        ctx.add_column("users", {"name": "email", "column_type": {"kind": "text"}})
-        ctx.create_index("users", {"name": "idx_email", "fields": ["email"]})
+        ctx.add_column("users", {'nullable': True, 'primary_key': False, 'unique': False, "name": "email", "column_type": {"kind": "text"}})
+        ctx.create_index("users", {"unique": False, "name": "idx_email", "fields": ["email"]})
 
         ops = ctx.get_collected_operations()
         assert len(ops) == 3
@@ -798,7 +789,7 @@ class TestDropOperationReversibility:
                 "type": "drop_column",
                 "table": "users",
                 "field": "legacy_field",
-                "field_def": {
+                "field_def": {'primary_key': False, 'unique': False,
                     "name": "legacy_field",
                     "column_type": {"kind": "string", "length": 100},
                     "nullable": True,

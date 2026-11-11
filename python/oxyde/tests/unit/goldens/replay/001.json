@@ -1,0 +1,78 @@
+{
+  "baseline": "0.2.2 (5f9f406)",
+  "case": "TestNullsDistinctE2E.test_toggle_forward_and_reverse-{'enabled': True, 'kind': 'index'}",
+  "files": {
+    "0002_toggle_nulls.py": "\"\"\"Auto-generated migration.\n\nCreated: 2026-11-11 18:35:34\n\"\"\"\n\ndepends_on = \"0001_initial\"\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.drop_index(\"contacts_6a1e8f72\", \"contacts_6a1e8f72_email_idx\")\n    ctx.create_index(\"contacts_6a1e8f72\", {\n    'name': 'contacts_6a1e8f72_email_idx',\n    'fields': [\n        'email'\n    ],\n    'unique': True,\n    'nulls_not_distinct': True,\n    'method': None\n})\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_index(\"contacts_6a1e8f72\", \"contacts_6a1e8f72_email_idx\")\n    ctx.create_index(\"contacts_6a1e8f72\", {\n    'name': 'contacts_6a1e8f72_email_idx',\n    'fields': [\n        'email'\n    ],\n    'unique': True,\n    'method': None\n})\n",
+    "0001_initial.py": "\"\"\"Auto-generated migration.\n\nCreated: 2026-11-11 18:35:34\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"contacts_6a1e8f72\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n        indexes=[\n            {\n                'name': 'contacts_6a1e8f72_email_idx',\n                'fields': [\n                    'email'\n                ],\n                'unique': True,\n                'method': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"contacts_6a1e8f72\")\n"
+  },
+  "snapshot": {
+    "version": 1,
+    "tables": {
+      "contacts_6a1e8f72": {
+        "name": "contacts_6a1e8f72",
+        "fields": [
+          {
+            "name": "id",
+            "column_type": {
+              "kind": "big_integer"
+            },
+            "db_type": null,
+            "nullable": true,
+            "primary_key": true,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": null,
+            "max_digits": null,
+            "decimal_places": null
+          },
+          {
+            "name": "email",
+            "column_type": {
+              "kind": "string"
+            },
+            "db_type": null,
+            "nullable": true,
+            "primary_key": false,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "max_length": null,
+            "max_digits": null,
+            "decimal_places": null
+          }
+        ],
+        "indexes": [
+          {
+            "name": "contacts_6a1e8f72_email_idx",
+            "fields": [
+              "email"
+            ],
+            "unique": true,
+            "nulls_not_distinct": true,
+            "method": null
+          }
+        ],
+        "foreign_keys": [],
+        "checks": [],
+        "comment": null
+      }
+    }
+  },
+  "sql": {
+    "0001_initial.py": {
+      "statements": [
+        "CREATE TABLE \"contacts_6a1e8f72\" ( \"id\" BIGSERIAL PRIMARY KEY, \"email\" VARCHAR(255) )",
+        "CREATE UNIQUE INDEX \"contacts_6a1e8f72_email_idx\" ON \"contacts_6a1e8f72\" (\"email\")"
+      ]
+    },
+    "0002_toggle_nulls.py": {
+      "statements": [
+        "DROP INDEX \"contacts_6a1e8f72_email_idx\"",
+        "CREATE UNIQUE INDEX \"contacts_6a1e8f72_email_idx\" ON \"contacts_6a1e8f72\" (\"email\") NULLS NOT DISTINCT"
+      ]
+    }
+  },
+  "makemigrations": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"contacts_6a1e8f72\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n        indexes=[\n            {\n                'name': 'contacts_6a1e8f72_email_idx',\n                'fields': [\n                    'email'\n                ],\n                'unique': True,\n                'nulls_not_distinct': True,\n                'method': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"contacts_6a1e8f72\")\n",
+  "squash": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"contacts_6a1e8f72\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n        indexes=[\n            {\n                'name': 'contacts_6a1e8f72_email_idx',\n                'fields': [\n                    'email'\n                ],\n                'unique': True,\n                'nulls_not_distinct': True,\n                'method': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"contacts_6a1e8f72\")\n"
+}

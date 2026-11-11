@@ -107,7 +107,7 @@ fn postgres_elements_the_column_type_cannot_hold_match_nothing() {
         sql.ends_with(r#"(CASE WHEN "tags" IS NULL THEN NULL ELSE FALSE END)"#),
         "{sql}"
     );
-    assert!(params.is_empty());
+    assert_eq!(params, [] as [sea_query::Value; 0]);
     // The other lookups leave it out.
     for (op, sql_op) in [("ARRAY_CONTAINED_BY", "<@"), ("ARRAY_OVERLAP", "&&")] {
         let (sql, params) = lookup(op).build(Dialect::Postgres);

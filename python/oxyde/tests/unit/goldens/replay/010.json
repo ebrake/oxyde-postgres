@@ -1,0 +1,119 @@
+{
+  "baseline": "0.2.2 (5f9f406)",
+  "case": "legacy_history",
+  "files": {
+    "0001_users.py": "\"\"\"Legacy-format migration (python_type field dicts).\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    ctx.create_table(\n        \"users\",\n        fields=[\n            {\n                \"name\": \"id\",\n                \"python_type\": \"int\",\n                \"db_type\": None,\n                \"nullable\": False,\n                \"primary_key\": True,\n                \"unique\": False,\n                \"default\": None,\n                \"auto_increment\": True,\n            },\n            {\n                \"name\": \"email\",\n                \"python_type\": \"str\",\n                \"db_type\": None,\n                \"nullable\": False,\n                \"primary_key\": False,\n                \"unique\": True,\n                \"default\": None,\n                \"auto_increment\": False,\n                \"max_length\": 255,\n            },\n        ],\n    )\n\n\ndef downgrade(ctx):\n    ctx.drop_table(\"users\")\n",
+    "0003_identity.py": "\"\"\"Legacy-format migration with a hand-written column definition.\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    ctx.create_table(\n        \"identity_authors\",\n        fields=[\n            {\n                \"name\": \"id\",\n                \"python_type\": \"int\",\n                \"db_type\": \"bigint GENERATED ALWAYS AS IDENTITY\",\n                \"nullable\": True,\n                \"primary_key\": True,\n                \"unique\": False,\n                \"default\": None,\n                \"auto_increment\": False,\n            },\n            {\n                \"name\": \"name\",\n                \"python_type\": \"str\",\n                \"db_type\": None,\n                \"nullable\": False,\n                \"primary_key\": False,\n                \"unique\": False,\n                \"default\": None,\n                \"auto_increment\": False,\n            },\n        ],\n    )\n",
+    "0002_age.py": "\"\"\"Legacy add_column + manual SQL.\"\"\"\n\ndepends_on = \"0001_users\"\n\n\ndef upgrade(ctx):\n    ctx.add_column(\n        \"users\",\n        {\n            \"name\": \"age\",\n            \"python_type\": \"int\",\n            \"db_type\": None,\n            \"nullable\": True,\n            \"primary_key\": False,\n            \"unique\": False,\n            \"default\": None,\n            \"auto_increment\": False,\n        },\n    )\n    ctx.execute(\"UPDATE users SET age = 0 WHERE age IS NULL\")\n\n\ndef downgrade(ctx):\n    ctx.drop_column(\"users\", \"age\")\n"
+  },
+  "snapshot": {
+    "version": 1,
+    "tables": {
+      "users": {
+        "name": "users",
+        "fields": [
+          {
+            "name": "id",
+            "python_type": "int",
+            "db_type": null,
+            "nullable": false,
+            "primary_key": true,
+            "unique": false,
+            "default": null,
+            "auto_increment": true,
+            "column_type": {
+              "kind": "big_integer"
+            }
+          },
+          {
+            "name": "email",
+            "python_type": "str",
+            "db_type": null,
+            "nullable": false,
+            "primary_key": false,
+            "unique": true,
+            "default": null,
+            "auto_increment": false,
+            "max_length": 255,
+            "column_type": {
+              "kind": "string",
+              "length": 255
+            }
+          },
+          {
+            "name": "age",
+            "python_type": "int",
+            "db_type": null,
+            "nullable": true,
+            "primary_key": false,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "column_type": {
+              "kind": "big_integer"
+            }
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [],
+        "checks": [],
+        "comment": null
+      },
+      "identity_authors": {
+        "name": "identity_authors",
+        "fields": [
+          {
+            "name": "id",
+            "python_type": "int",
+            "db_type": "bigint GENERATED ALWAYS AS IDENTITY",
+            "nullable": true,
+            "primary_key": true,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "column_type": {
+              "kind": "unknown"
+            }
+          },
+          {
+            "name": "name",
+            "python_type": "str",
+            "db_type": null,
+            "nullable": false,
+            "primary_key": false,
+            "unique": false,
+            "default": null,
+            "auto_increment": false,
+            "column_type": {
+              "kind": "string"
+            }
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [],
+        "checks": [],
+        "comment": null
+      }
+    }
+  },
+  "sql": {
+    "0001_users.py": {
+      "statements": [
+        "CREATE TABLE \"users\" ( \"id\" BIGSERIAL PRIMARY KEY, \"email\" VARCHAR(255) NOT NULL UNIQUE )"
+      ]
+    },
+    "0002_age.py": {
+      "statements": [
+        "ALTER TABLE \"users\" ADD COLUMN \"age\" BIGINT",
+        "UPDATE users SET age = 0 WHERE age IS NULL"
+      ]
+    },
+    "0003_identity.py": {
+      "statements": [
+        "CREATE TABLE \"identity_authors\" ( \"id\" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, \"name\" VARCHAR(255) NOT NULL )"
+      ]
+    }
+  },
+  "makemigrations": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"users\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': True,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 255\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': True,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 255,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'age',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n    ctx.create_table(\n        \"identity_authors\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'unknown'\n                },\n                'db_type': 'bigint GENERATED ALWAYS AS IDENTITY',\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'name',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"identity_authors\")\n    ctx.drop_table(\"users\")\n",
+  "squash": "\"\"\"Auto-generated migration.\n\nCreated: <timestamp>\n\"\"\"\n\ndepends_on = None\n\n\ndef upgrade(ctx):\n    \"\"\"Apply migration.\"\"\"\n    ctx.create_table(\n        \"users\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': True,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'email',\n                'column_type': {\n                    'kind': 'string',\n                    'length': 255\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': True,\n                'default': None,\n                'auto_increment': False,\n                'max_length': 255,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'age',\n                'column_type': {\n                    'kind': 'big_integer'\n                },\n                'db_type': None,\n                'nullable': True,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n    ctx.create_table(\n        \"identity_authors\",\n        fields=[\n            {\n                'name': 'id',\n                'column_type': {\n                    'kind': 'unknown'\n                },\n                'db_type': 'bigint GENERATED ALWAYS AS IDENTITY',\n                'nullable': True,\n                'primary_key': True,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            },\n            {\n                'name': 'name',\n                'column_type': {\n                    'kind': 'string'\n                },\n                'db_type': None,\n                'nullable': False,\n                'primary_key': False,\n                'unique': False,\n                'default': None,\n                'auto_increment': False,\n                'max_length': None,\n                'max_digits': None,\n                'decimal_places': None\n            }\n        ],\n    )\n\n\ndef downgrade(ctx):\n    \"\"\"Revert migration.\"\"\"\n    ctx.drop_table(\"identity_authors\")\n    ctx.drop_table(\"users\")\n"
+}
