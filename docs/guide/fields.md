@@ -27,6 +27,7 @@ class User(Model):
 | `db_index_name` | `str` | Auto | Custom index name |
 | `db_index_method` | `str` | None | Index method: btree, hash, gin, gist |
 | `db_unique` | `bool` | `False` | UNIQUE constraint |
+| `db_nulls_distinct` | `bool \| None` | `None` | `False` treats NULLs as equal; requires `db_unique=True` and a non-primary-key column |
 | `db_nullable` | `bool` | None | Override NULL/NOT NULL (None = infer from type) |
 | `db_column` | `str` | Field name | Database column name |
 | `db_type` | `str` | Auto | SQL type override |
@@ -92,6 +93,17 @@ email: str = Field(db_index=True, db_index_name="ix_users_email")
 # Index method (PostgreSQL)
 data: dict = Field(db_type="JSONB", db_index=True, db_index_method="gin")
 ```
+
+Unique columns allow multiple NULL values by default. Use
+`db_nulls_distinct=False` to allow at most one NULL:
+
+```python
+email: str | None = Field(default=None, db_unique=True, db_nulls_distinct=False)
+```
+
+`None` (the default) or `True` keeps the default behavior. This option requires
+`db_unique=True` and cannot be used on a primary key. Changing it generates a
+migration that replaces the unique constraint.
 
 ## SQL Defaults
 

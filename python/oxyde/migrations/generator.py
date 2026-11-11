@@ -167,6 +167,12 @@ def _operation_to_python(op: dict[str, Any], indent: str = "    ") -> str:
                 changes["default"] = new_field.get("default")
             if old_field.get("unique") != new_field.get("unique"):
                 changes["unique"] = new_field["unique"]
+            if old_field.get("nulls_not_distinct", False) != new_field.get(
+                "nulls_not_distinct", False
+            ):
+                changes["nulls_not_distinct"] = new_field.get(
+                    "nulls_not_distinct", False
+                )
             if old_field.get("max_length") != new_field.get("max_length"):
                 changes["max_length"] = new_field.get("max_length")
             if old_field.get("max_digits") != new_field.get("max_digits"):
@@ -435,6 +441,17 @@ def generate_migration_file(
         elif op_type == "rename_column":
             t, new, old = op["table"], op["new_name"], op["old_name"]
             downgrade_lines.append(f'    ctx.rename_column("{t}", "{new}", "{old}")')
+        elif op_type == "alter_column" and (
+            op.get("old_field", {}).get("nulls_not_distinct", False)
+            or op.get("new_field", {}).get("nulls_not_distinct", False)
+        ):
+            # Reverse the new unique-column option without changing generated
+            # downgrades for existing models that do not use it.
+            downgrade_lines.append(
+                _operation_to_python(
+                    {**op, "old_field": op["new_field"], "new_field": op["old_field"]}
+                )
+            )
         elif op_type == "create_index":
             downgrade_lines.append(
                 f'    ctx.drop_index("{op["table"]}", "{op["index"]["name"]}")'

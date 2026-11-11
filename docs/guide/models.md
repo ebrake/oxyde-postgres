@@ -162,6 +162,26 @@ class User(Model):
         ]
 ```
 
+### Unique Indexes and NULLs
+
+By default, unique indexes allow multiple NULL values. Set `nulls_distinct=False`
+to treat NULLs as equal. A single-column index then accepts at most one NULL;
+a composite index rejects repeated combinations, including NULLs.
+
+```python
+Index(("email",), unique=True, nulls_distinct=False)
+Index(
+    ("tenant_id", "email"),
+    unique=True,
+    nulls_distinct=False,
+    where="deleted_at IS NULL",
+)
+```
+
+`nulls_distinct=False` requires `unique=True`. `None` (the default) or `True`
+keeps PostgreSQL's default behavior. Changing this option generates a migration
+that recreates the index.
+
 ### Index Methods
 
 PostgreSQL supports different index methods:

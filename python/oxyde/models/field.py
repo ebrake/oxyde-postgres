@@ -17,6 +17,7 @@ Attribute Categories:
         db_index_name: Custom index name (default: ix_{table}_{column})
         db_index_method: Index type - btree, hash, gin, gist (PostgreSQL)
         db_unique: UNIQUE constraint
+        db_nulls_distinct: False treats NULLs as equal (requires db_unique=True)
 
     Column Mapping:
         db_column: Override column name (default: field name)
@@ -73,6 +74,7 @@ class OxydeFieldInfo(FieldInfo):  # type: ignore[misc]
         "db_index_name",
         "db_index_method",
         "db_unique",
+        "db_nulls_distinct",
         "db_column",
         "db_type",
         "db_default",
@@ -96,6 +98,7 @@ class OxydeFieldInfo(FieldInfo):  # type: ignore[misc]
         db_index_name: str | None = None,
         db_index_method: Literal["btree", "hash", "gin", "gist"] | None = None,
         db_unique: bool = False,
+        db_nulls_distinct: bool | None = None,
         db_column: str | None = None,
         db_type: str | None = None,
         db_default: str | None = None,
@@ -122,6 +125,8 @@ class OxydeFieldInfo(FieldInfo):  # type: ignore[misc]
             db_index_name: Custom index name
             db_index_method: Index method (btree, hash, gin, gist)
             db_unique: Add unique constraint
+            db_nulls_distinct: False allows at most one NULL in a unique column.
+                None or True keeps PostgreSQL's default NULLs-distinct behavior.
             db_column: Database column name (overrides field name)
             db_type: SQL type override (e.g., "BIGSERIAL", "TEXT", "JSONB")
             db_default: SQL DEFAULT expression (e.g., "NOW()", "0")
@@ -145,6 +150,7 @@ class OxydeFieldInfo(FieldInfo):  # type: ignore[misc]
         self.db_index_name = db_index_name
         self.db_index_method = db_index_method
         self.db_unique = db_unique
+        self.db_nulls_distinct = db_nulls_distinct
         self.db_column = db_column
         self.db_type = db_type
         self.db_default = db_default
@@ -176,6 +182,9 @@ def Field(
         Basic fields:
         >>> id: int | None = Field(default=None, db_pk=True)
         >>> email: str = Field(db_unique=True, db_index=True)
+        >>> nickname: str | None = Field(
+        ...     default=None, db_unique=True, db_nulls_distinct=False
+        ... )
         >>> age: int = Field(ge=18, le=150)  # Pydantic validators
 
         With column mapping:

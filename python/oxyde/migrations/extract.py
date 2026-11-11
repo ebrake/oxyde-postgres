@@ -202,6 +202,8 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
                 "default": default_val,
                 "auto_increment": auto_increment,
             }
+            if field_meta.nulls_distinct is False:
+                field_dict["nulls_not_distinct"] = True
             for attr in ("max_length", "max_digits", "decimal_places"):
                 val = getattr(field_meta, attr, None)
                 if val is not None:
@@ -222,6 +224,11 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
                         "name": index_name,
                         "fields": list(index.fields),
                         "unique": index.unique,
+                        **(
+                            {"nulls_not_distinct": True}
+                            if index.nulls_distinct is False
+                            else {}
+                        ),
                         "method": index.method,
                         "where": index.where.strip() or None
                         if isinstance(index.where, str)

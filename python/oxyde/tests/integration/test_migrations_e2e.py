@@ -18,6 +18,8 @@ import pytest
 import pytest_asyncio
 
 from oxyde import AsyncDatabase, Field, Index, Model, disconnect_all
+from oxyde.db.schema import create_tables
+from oxyde.exceptions import UniqueViolationError
 from oxyde.migrations import (
     apply_migrations,
     extract_current_schema,
@@ -106,6 +108,135 @@ def _write_migration(
     ops_json = migration_compute_diff(json.dumps(old), json.dumps(new))
     ops = json.loads(ops_json)
     return generate_migration_file(ops, migrations_dir=tmp_path, name=name)
+
+
+class TestNullsDistinctE2E:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mode", ["column", "index", "partial_index", "default", "explicit_true"]
+    )
+    async def test_create_tables_null_uniqueness(self, empty_db, mode):
+        database, _ = empty_db
+
+        class Contact(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(
+                default=None,
+                db_unique=mode in ("column", "default", "explicit_true"),
+                db_nulls_distinct=False
+                if mode == "column"
+                else True
+                if mode == "explicit_true"
+                else None,
+            )
+
+            class Meta:
+                is_table = True
+                table_name = "null_contacts"
+                indexes = (
+                    [
+                        Index(
+                            ["email"],
+                            unique=True,
+                            nulls_distinct=False,
+                            method="btree",
+                            where="email IS NULL" if mode == "partial_index" else None,
+                        )
+                    ]
+                    if mode in ("index", "partial_index")
+                    else []
+                )
+
+        await create_tables(database)
+        await Contact.objects.create(email=None, using=database.name)
+        if mode in ("column", "index", "partial_index"):
+            with pytest.raises(UniqueViolationError):
+                await Contact.objects.create(email=None, using=database.name)
+            assert await Contact.objects.count(using=database.name) == 1
+        else:
+            await Contact.objects.create(email=None, using=database.name)
+            assert await Contact.objects.count(using=database.name) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["column", "index"])
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_toggle_forward_and_reverse(self, empty_db, tmp_path, kind, enabled):
+        database, dialect = empty_db
+        tbl = f"contacts_{uuid.uuid4().hex[:8]}"
+        index_name = f"{tbl}_email_key" if kind == "column" else f"{tbl}_email_idx"
+
+        class Before(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(
+                default=None,
+                db_unique=kind == "column",
+                db_nulls_distinct=False if kind == "column" and not enabled else None,
+            )
+
+            class Meta:
+                is_table = True
+                table_name = tbl
+                indexes = (
+                    [
+                        Index(
+                            ["email"],
+                            unique=True,
+                            nulls_distinct=None if enabled else False,
+                        )
+                    ]
+                    if kind == "index"
+                    else []
+                )
+
+        class After(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(
+                default=None,
+                db_unique=kind == "column",
+                db_nulls_distinct=False if kind == "column" and enabled else None,
+            )
+
+            class Meta:
+                is_table = True
+                table_name = tbl
+                indexes = (
+                    [
+                        Index(
+                            ["email"],
+                            unique=True,
+                            nulls_distinct=False if enabled else None,
+                        )
+                    ]
+                    if kind == "index"
+                    else []
+                )
+
+        _write_migration(tmp_path, [], [Before], dialect, "initial")
+        await apply_migrations(migrations_dir=str(tmp_path), db_alias=database.name)
+        _write_migration(tmp_path, [Before], [After], dialect, "toggle_nulls")
+        await apply_migrations(migrations_dir=str(tmp_path), db_alias=database.name)
+
+        async def assert_null_behavior(expected):
+            rows = await execute_raw(
+                "SELECT i.indnullsnotdistinct AS enabled FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = $1",
+                [index_name],
+                using=database.name,
+            )
+            assert rows == [{"enabled": expected}]
+            await After.objects.create(email=None, using=database.name)
+            if expected:
+                with pytest.raises(UniqueViolationError):
+                    await After.objects.create(email=None, using=database.name)
+            else:
+                await After.objects.create(email=None, using=database.name)
+            await After.objects.filter(email__isnull=True).delete(using=database.name)
+
+        await assert_null_behavior(enabled)
+        await rollback_migrations(
+            steps=1, migrations_dir=str(tmp_path), db_alias=database.name
+        )
+        await assert_null_behavior(not enabled)
 
 
 class TestCreateTableE2E:

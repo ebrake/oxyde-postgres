@@ -8,6 +8,24 @@ from oxyde import Avg, Coalesce, Concat, Count, Max, Min, Model, Q, RawSQL, Sum
 from oxyde.models.registry import register_table
 
 
+class TestIndexNullsDistinct:
+    @pytest.mark.parametrize("nulls_distinct", [None, True, False])
+    def test_stores_option(self, nulls_distinct):
+        from oxyde import Index
+
+        index = Index(["email"], unique=True, nulls_distinct=nulls_distinct)
+        assert index.fields == ("email",)
+        assert index.nulls_distinct is nulls_distinct
+        assert Index(["email"]).nulls_distinct is None
+
+    def test_requires_unique(self):
+        from oxyde import Index
+
+        with pytest.raises(ValueError, match="nulls_distinct requires unique=True"):
+            Index(["email"], nulls_distinct=False)
+        assert Index(["email"], nulls_distinct=True).unique is False
+
+
 class SampleModel(Model):
     """Sample model for new features."""
 

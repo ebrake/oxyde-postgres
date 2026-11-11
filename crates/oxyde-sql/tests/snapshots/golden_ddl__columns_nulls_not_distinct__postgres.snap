@@ -1,0 +1,7 @@
+---
+source: crates/oxyde-sql/tests/golden_ddl.rs
+expression: sql
+---
+CREATE TABLE "users" ( "id" BIGSERIAL PRIMARY KEY, "email" VARCHAR(255) UNIQUE NULLS NOT DISTINCT );
+
+ALTER TABLE "contacts" ADD COLUMN "email" VARCHAR(255) UNIQUE NULLS NOT DISTINCT

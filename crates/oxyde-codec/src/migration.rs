@@ -43,6 +43,12 @@ fn is_none_or_blank(value: &Option<String>) -> bool {
     value.as_deref().map(str::trim).is_none_or(str::is_empty)
 }
 
+// serde's skip_serializing_if requires a borrowed value.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[allow(clippy::ref_option)]
 fn serialize_normalized_optional_sql_fragment<S>(
     value: &Option<String>,
@@ -86,6 +92,8 @@ pub struct FieldDef {
     pub nullable: bool,
     pub primary_key: bool,
     pub unique: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nulls_not_distinct: bool,
     pub default: Option<String>,
     #[serde(default)]
     pub auto_increment: bool,
@@ -105,6 +113,8 @@ pub struct IndexDef {
     pub name: String,
     pub fields: Vec<String>,
     pub unique: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nulls_not_distinct: bool,
     pub method: Option<String>,
     #[serde(
         default,
@@ -129,6 +139,7 @@ impl IndexDef {
         self.name == other.name
             && self.fields == other.fields
             && self.unique == other.unique
+            && self.nulls_not_distinct == other.nulls_not_distinct
             && self.method == other.method
             && self.normalized_where_clause() == other.normalized_where_clause()
     }

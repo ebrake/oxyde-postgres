@@ -56,6 +56,7 @@ fn field(name: &str, column_type: S) -> FieldDef {
         nullable: false,
         primary_key: false,
         unique: false,
+        nulls_not_distinct: false,
         default: None,
         auto_increment: false,
         max_length: None,
@@ -136,6 +137,7 @@ fn index(name: &str, fields: &[&str]) -> IndexDef {
         name: name.into(),
         fields: fields.iter().map(|f| (*f).into()).collect(),
         unique: false,
+        nulls_not_distinct: false,
         method: None,
         where_clause: None,
     }
@@ -482,6 +484,7 @@ fn index_ops() {
         name: "ux_users_email_tenant".into(),
         fields: vec!["email".into(), "tenant_id".into()],
         unique: true,
+        nulls_not_distinct: false,
         method: None,
         where_clause: None,
     };
@@ -489,6 +492,7 @@ fn index_ops() {
         name: "ix_users_tags_gin".into(),
         fields: vec!["tags".into()],
         unique: false,
+        nulls_not_distinct: false,
         method: Some("gin".into()),
         where_clause: None,
     };
@@ -496,6 +500,7 @@ fn index_ops() {
         name: "ix_users_email_hash".into(),
         fields: vec!["email".into()],
         unique: false,
+        nulls_not_distinct: false,
         method: Some("hash".into()),
         where_clause: None,
     };
@@ -532,6 +537,7 @@ fn index_partial() {
         name: "ix_users_active_email".into(),
         fields: vec!["email".into()],
         unique: true,
+        nulls_not_distinct: false,
         method: None,
         where_clause: Some("deleted_at IS NULL".into()),
     };
@@ -540,6 +546,105 @@ fn index_partial() {
         index: partial,
     }];
     snap("index_partial", &ops, ALL_DIALECTS);
+}
+
+#[test]
+fn indexes_nulls_not_distinct() {
+    let mut ops = Vec::new();
+    for (name, method, predicate) in [
+        ("ux_email", None, None),
+        ("ux_email_btree", Some("btree"), None),
+        ("ux_active_email", None, Some("deleted_at IS NULL")),
+        (
+            "ux_active_email_btree",
+            Some("btree"),
+            Some("deleted_at IS NULL"),
+        ),
+    ] {
+        let mut idx = index(name, &["tenant_id", "email"]);
+        idx.unique = true;
+        idx.nulls_not_distinct = true;
+        idx.method = method.map(Into::into);
+        idx.where_clause = predicate.map(Into::into);
+        ops.push(MigrationOp::CreateIndex {
+            table: "users".into(),
+            index: idx,
+        });
+    }
+    snap("indexes_nulls_not_distinct", &ops, ALL_DIALECTS);
+}
+
+#[test]
+fn columns_nulls_not_distinct() {
+    let mut email = field("email", S::String { length: None })
+        .nullable()
+        .unique();
+    email.nulls_not_distinct = true;
+    let ops = [
+        MigrationOp::CreateTable {
+            table: table(
+                "users",
+                vec![field("id", S::BigInteger).pk(), email.clone()],
+            ),
+        },
+        MigrationOp::AddColumn {
+            table: "contacts".into(),
+            field: email,
+        },
+    ];
+    snap("columns_nulls_not_distinct", &ops, ALL_DIALECTS);
+}
+
+#[test]
+fn alter_column_nulls_not_distinct() {
+    let plain = field("email", S::String { length: None }).nullable();
+    let distinct = plain.clone().unique();
+    let mut not_distinct = distinct.clone();
+    not_distinct.nulls_not_distinct = true;
+    let ops = [
+        (distinct.clone(), not_distinct.clone()),
+        (not_distinct.clone(), distinct),
+        (plain.clone(), not_distinct.clone()),
+        (not_distinct, plain),
+    ]
+    .into_iter()
+    .map(|(old_field, new_field)| MigrationOp::AlterColumn {
+        table: "users".into(),
+        old_field,
+        new_field,
+        table_fields: None,
+        table_indexes: None,
+        table_foreign_keys: None,
+        table_checks: None,
+    })
+    .collect::<Vec<_>>();
+    snap("alter_column_nulls_not_distinct", &ops, ALL_DIALECTS);
+}
+
+#[test]
+fn non_unique_index_rejects_nulls_not_distinct() {
+    let mut idx = index("ix_email", &["email"]);
+    idx.nulls_not_distinct = true;
+    let mut users = table("users", vec![]);
+    users.indexes.push(idx.clone());
+    for op in [
+        MigrationOp::CreateIndex {
+            table: "users".into(),
+            index: idx,
+        },
+        MigrationOp::CreateTable { table: users },
+    ] {
+        let migration = Migration {
+            name: "invalid".into(),
+            operations: vec![op],
+        };
+        let error = migration.to_sql(Dialect::Postgres).unwrap_err();
+        assert!(matches!(
+            error,
+            oxyde_codec::MigrateError::MigrationError(_)
+        ));
+        assert!(error.to_string().contains("requires a unique index"));
+    }
 }
 
 #[test]

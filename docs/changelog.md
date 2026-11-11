@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1 — NULLS NOT DISTINCT (2026-11-11)
+
+- Support PostgreSQL `NULLS NOT DISTINCT` for unique indexes with
+  `Index(..., unique=True, nulls_distinct=False)` and unique columns with
+  `Field(db_unique=True, db_nulls_distinct=False)`, including reversible migrations
+  when the option changes.
+- Preserve existing NULLs-distinct behavior with `None` (the default) or `True`.
+  The serialized `nulls_not_distinct` key is omitted when false, so existing
+  snapshots and migration files remain compatible and unchanged models produce
+  no extra migrations.
+
+- Require `oxyde-postgres-core>=0.2.1,<0.3.0` so the Python API always uses a core that supports the new constraint option.
+
+- Validation: 180 Rust tests and 1,257 Python tests passed (two expected skips), including PostgreSQL 18 constraint enforcement, migration upgrades/rollbacks, and existing snapshot compatibility. Required lint/type checks, strict documentation build, and package license/metadata checks passed.
+
+- Pin Linux CI and release hosts to Ubuntu 24.04 LTS; Linux wheel builds use the existing manylinux/musllinux containers.
+
 ## 0.2.0 — dependency refresh and Python 3.13 minimum (2026-11-11)
 
 ### Compatibility

@@ -1,0 +1,11 @@
+---
+source: crates/oxyde-sql/tests/golden_ddl.rs
+expression: sql
+---
+CREATE UNIQUE INDEX "ux_email" ON "users" ("tenant_id", "email") NULLS NOT DISTINCT;
+
+CREATE UNIQUE INDEX "ux_email_btree" ON "users" USING btree ("tenant_id", "email") NULLS NOT DISTINCT;
+
+CREATE UNIQUE INDEX "ux_active_email" ON "users" ("tenant_id", "email") NULLS NOT DISTINCT WHERE deleted_at IS NULL;
+
+CREATE UNIQUE INDEX "ux_active_email_btree" ON "users" USING btree ("tenant_id", "email") NULLS NOT DISTINCT WHERE deleted_at IS NULL

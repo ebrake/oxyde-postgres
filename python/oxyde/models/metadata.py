@@ -81,6 +81,7 @@ class ColumnMeta:
     index_name: str | None = None
     index_method: str | None = None  # btree, hash, gin, gist
     unique: bool = False
+    nulls_distinct: bool | None = None
     primary_key: bool = False
     comment: str | None = None
     default: Any = PydanticUndefined

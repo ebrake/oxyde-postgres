@@ -79,7 +79,11 @@ fn field_to_column_def(field: &FieldDef, dialect: Dialect) -> SeaColumnDef {
     }
 
     if field.unique && !field.primary_key {
-        col.unique_key();
+        if field.nulls_not_distinct {
+            col.extra(unique_clause(field));
+        } else {
+            col.unique_key();
+        }
     }
 
     if let Some(default) = &field.default {
@@ -87,6 +91,14 @@ fn field_to_column_def(field: &FieldDef, dialect: Dialect) -> SeaColumnDef {
     }
 
     col
+}
+
+fn unique_clause(field: &FieldDef) -> &'static str {
+    if field.nulls_not_distinct {
+        "UNIQUE NULLS NOT DISTINCT"
+    } else {
+        "UNIQUE"
+    }
 }
 
 /// Parse FK action string to sea-query `ForeignKeyAction`.
@@ -118,12 +130,20 @@ fn build_fk_stmt(table: &str, fk: &ForeignKeyDef) -> sea_query::ForeignKeyCreate
 }
 
 /// Build CREATE INDEX SQL for an index on a table.
-fn build_create_index(table: &str, index: &IndexDef, dialect: Dialect) -> String {
+fn build_create_index(table: &str, index: &IndexDef, dialect: Dialect) -> Result<String> {
+    if index.nulls_not_distinct && !index.unique {
+        return Err(MigrateError::MigrationError(
+            "NULLS NOT DISTINCT requires a unique index".into(),
+        ));
+    }
     let mut stmt = SeaIndex::create();
     stmt.name(&index.name).table(Alias::new(table));
 
     if index.unique {
         stmt.unique();
+    }
+    if index.nulls_not_distinct {
+        stmt.nulls_not_distinct();
     }
 
     for field in &index.fields {
@@ -144,7 +164,7 @@ fn build_create_index(table: &str, index: &IndexDef, dialect: Dialect) -> String
         sql.push_str(predicate);
     }
 
-    sql
+    Ok(sql)
 }
 
 // ── MigrationOp::to_sql ────────────────────────────────────────────────────
@@ -202,7 +222,7 @@ impl MigrationOpExt for MigrationOp {
 
                 // Indexes (all dialects)
                 for index in &table.indexes {
-                    sql.push(build_create_index(&table.name, index, dialect));
+                    sql.push(build_create_index(&table.name, index, dialect)?);
                 }
 
                 // The migration plan must create referenced tables first.
@@ -320,16 +340,25 @@ impl MigrationOpExt for MigrationOp {
                         }
                     }
 
-                    if old_field.unique != new_field.unique {
-                        if new_field.unique {
-                            stmts.push(format!(
-                                "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}_{}_key\" UNIQUE (\"{}\")",
-                                table, table, new_field.name, new_field.name
-                            ));
-                        } else {
+                    if old_field.unique != new_field.unique
+                        || (old_field.unique
+                            && new_field.unique
+                            && old_field.nulls_not_distinct != new_field.nulls_not_distinct)
+                    {
+                        if old_field.unique {
                             stmts.push(format!(
                                 "ALTER TABLE \"{}\" DROP CONSTRAINT \"{}_{}_key\"",
                                 table, table, new_field.name
+                            ));
+                        }
+                        if new_field.unique {
+                            stmts.push(format!(
+                                "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}_{}_key\" {} (\"{}\")",
+                                table,
+                                table,
+                                new_field.name,
+                                unique_clause(new_field),
+                                new_field.name
                             ));
                         }
                     }
@@ -339,7 +368,7 @@ impl MigrationOpExt for MigrationOp {
             },
 
             MigrationOp::CreateIndex { table, index } => {
-                Ok(vec![build_create_index(table, index, dialect)])
+                Ok(vec![build_create_index(table, index, dialect)?])
             }
 
             MigrationOp::DropIndex {

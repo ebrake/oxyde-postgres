@@ -167,6 +167,11 @@ class SchemaState:
                             field["default"] = changes["default"]
                         if "unique" in changes:
                             field["unique"] = changes["unique"]
+                        if "nulls_not_distinct" in changes:
+                            if changes["nulls_not_distinct"]:
+                                field["nulls_not_distinct"] = True
+                            else:
+                                field.pop("nulls_not_distinct", None)
                         if "max_length" in changes:
                             field["max_length"] = changes["max_length"]
                         if "max_digits" in changes:

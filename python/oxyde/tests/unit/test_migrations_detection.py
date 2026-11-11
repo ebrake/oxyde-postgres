@@ -160,6 +160,61 @@ class TestSchemaExtraction:
 class TestFieldLevelIndexes:
     """Field(db_index/db_unique) must reach the schema snapshot."""
 
+    @pytest.mark.parametrize("nulls_distinct", [None, True, False])
+    def test_nulls_distinct_extracted_only_when_false(self, nulls_distinct):
+        from oxyde import Index
+
+        class UniqueNulls(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(
+                default=None, db_unique=True, db_nulls_distinct=nulls_distinct
+            )
+            code: str | None = None
+            name: str = Field(db_index=True)
+
+            class Meta:
+                is_table = True
+                table_name = "unique_nulls"
+                indexes = [Index(["code"], unique=True, nulls_distinct=nulls_distinct)]
+
+        table = extract_current_schema()["tables"]["unique_nulls"]
+        email = next(f for f in table["fields"] if f["name"] == "email")
+        index = next(i for i in table["indexes"] if i["fields"] == ["code"])
+        for item in (email, index):
+            if nulls_distinct is False:
+                assert item["nulls_not_distinct"] is True
+            else:
+                assert "nulls_not_distinct" not in item
+        plain_index = next(i for i in table["indexes"] if i["fields"] == ["name"])
+        assert "nulls_not_distinct" not in plain_index
+
+    def test_fk_nulls_distinct_reaches_synthetic_column(self):
+        class Writer(Model):
+            id: int | None = Field(default=None, db_pk=True)
+
+            class Meta:
+                is_table = True
+
+        class Book(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            writer: Writer | None = Field(
+                default=None,
+                db_unique=True,
+                db_nulls_distinct=False,
+                db_column="owner_id",
+            )
+
+            class Meta:
+                is_table = True
+                table_name = "books"
+
+        assert Book._db_meta.field_metadata["owner_id"].nulls_distinct is False
+        fields = extract_current_schema()["tables"]["books"]["fields"]
+        owner = next(f for f in fields if f["name"] == "owner_id")
+        assert owner["unique"] is True
+        assert owner["nulls_not_distinct"] is True
+        assert "writer" not in {f["name"] for f in fields}
+
     def test_field_index_extracted_into_snapshot(self):
         """db_index=True on a plain field produces an index definition."""
 

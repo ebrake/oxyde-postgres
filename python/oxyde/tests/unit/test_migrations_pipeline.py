@@ -15,6 +15,7 @@ where Python/Rust payload shapes diverged silently.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from enum import Enum
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from oxyde.core import migration_compute_diff, migration_to_sql
 from oxyde.migrations.context import MigrationContext
 from oxyde.migrations.extract import extract_current_schema
 from oxyde.migrations.generator import generate_migration_file
-from oxyde.migrations.replay import replay_migrations
+from oxyde.migrations.replay import SchemaState, replay_migrations
 from oxyde.migrations.utils import load_migration_module
 from oxyde.models.registry import clear_registry
 
@@ -353,6 +354,162 @@ class TestDropForeignKeyPipeline:
         # Reverse must re-add the FK, not just mention its name
         assert any(
             "ADD" in s.upper() and "fk_books_author_id" in s for s in down_sql
+        )
+
+
+class TestNullsDistinctPipeline:
+    @pytest.mark.parametrize(
+        "old_unique,old_nulls,new_unique,new_nulls",
+        [
+            (True, None, True, False),
+            (True, False, True, True),
+            (False, None, True, False),
+            (True, False, False, None),
+        ],
+    )
+    def test_unique_column_roundtrip(
+        self, tmp_path, old_unique, old_nulls, new_unique, new_nulls
+    ):
+        class Before(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(
+                default=None,
+                db_column="contact_email",
+                db_unique=old_unique,
+                db_nulls_distinct=old_nulls,
+            )
+
+            class Meta:
+                is_table = True
+                table_name = "contacts"
+
+        class After(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(
+                default=None,
+                db_column="contact_email",
+                db_unique=new_unique,
+                db_nulls_distinct=new_nulls,
+            )
+
+            class Meta:
+                is_table = True
+                table_name = "contacts"
+
+        old = _snapshot_from_models([Before], "postgres")
+        new = _snapshot_from_models([After], "postgres")
+        initial = json.loads(
+            migration_compute_diff(
+                json.dumps({"version": 1, "tables": {}}), json.dumps(old)
+            )
+        )
+        generate_migration_file(initial, migrations_dir=tmp_path, name="initial")
+        ops = json.loads(migration_compute_diff(json.dumps(old), json.dumps(new)))
+        assert [op["type"] for op in ops] == ["alter_column"]
+        path = generate_migration_file(
+            ops, migrations_dir=tmp_path, name="nulls_distinct"
+        )
+        module = load_migration_module(path)
+        assert module is not None
+
+        state = SchemaState()
+        state.tables = deepcopy(old["tables"])
+        up = MigrationContext(mode="execute", schema_state=state)
+        module.upgrade(up)
+        assert len(up._sql_statements) == (2 if old_unique and new_unique else 1)
+        if new_unique:
+            assert ("UNIQUE NULLS NOT DISTINCT" in up._sql_statements[-1]) is (
+                new_nulls is False
+            )
+
+        replayed = replay_migrations(tmp_path)
+        assert (
+            json.loads(migration_compute_diff(json.dumps(replayed), json.dumps(new)))
+            == []
+        )
+        state.tables = deepcopy(replayed["tables"])
+        down = MigrationContext(mode="execute", schema_state=state)
+        module.downgrade(down)
+        assert len(down._sql_statements) == (2 if old_unique and new_unique else 1)
+        if old_unique:
+            assert ("UNIQUE NULLS NOT DISTINCT" in down._sql_statements[-1]) is (
+                old_nulls is False
+            )
+
+        collect = MigrationContext(mode="collect")
+        module.downgrade(collect)
+        for op in collect.get_collected_operations():
+            state.apply_operation(op)
+        restored = state.to_snapshot()
+        assert (
+            json.loads(migration_compute_diff(json.dumps(restored), json.dumps(old)))
+            == []
+        )
+        if old_nulls is not False:
+            assert (
+                "nulls_not_distinct" not in restored["tables"]["contacts"]["fields"][1]
+            )
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_index_roundtrip(self, tmp_path, enabled):
+        from oxyde import Index
+
+        class Before(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = None
+
+            class Meta:
+                is_table = True
+                table_name = "users"
+                indexes = [
+                    Index(
+                        ["email"],
+                        unique=True,
+                        nulls_distinct=None if enabled else False,
+                    )
+                ]
+
+        class After(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = None
+
+            class Meta:
+                is_table = True
+                table_name = "users"
+                indexes = [
+                    Index(
+                        ["email"],
+                        unique=True,
+                        nulls_distinct=False if enabled else True,
+                    )
+                ]
+
+        ops, up_sql, down_sql = _run_pipeline(
+            [Before], [After], "postgres", tmp_path, "index_nulls_distinct"
+        )
+        assert [op["type"] for op in ops] == ["drop_index", "create_index"]
+        assert ("NULLS NOT DISTINCT" in up_sql[-1]) is enabled
+        assert ("NULLS NOT DISTINCT" in down_sql[-1]) is not enabled
+
+    def test_default_and_true_produce_no_changes(self):
+        from oxyde import Index
+
+        class Defaults(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str | None = Field(default=None, db_unique=True)
+
+            class Meta:
+                is_table = True
+                table_name = "users"
+                indexes = [Index(["email"], unique=True)]
+
+        old = _snapshot_from_models([Defaults], "postgres")
+        Defaults._db_meta.field_metadata["email"].nulls_distinct = True
+        Defaults._db_meta.indexes[0].nulls_distinct = True
+        new = _snapshot_from_models([Defaults], "postgres")
+        assert old == new
+        assert (
+            json.loads(migration_compute_diff(json.dumps(old), json.dumps(new))) == []
         )
 
 
