@@ -64,7 +64,7 @@ async fn fetch_explain_rows(
     let handle = registry().get(pool_name).await?;
     match handle.clone_pool() {
         DbPool::Postgres(pool) => {
-            let query = bind_postgres(sqlx::query(sql), params)?;
+            let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
             let rows = query
                 .fetch_all(&pool)
                 .await

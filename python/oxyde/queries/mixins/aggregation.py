@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Container
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
-
-from typing_extensions import Self
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from oxyde._msgpack import msgpack
 from oxyde.core import ir

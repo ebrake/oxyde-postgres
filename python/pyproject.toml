@@ -1,22 +1,20 @@
 [project]
 name = "oxyde-postgres"
-version = "0.1.0.post1"
+version = "0.2.0"
 description = "Type-safe asynchronous ORM for PostgreSQL 18+ with a Rust core"
 readme = "README.md"
-license = {file = "LICENSE"}
-requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
 authors = [
+    {name = "E Brake", email = "ebrake123@icloud.com"},
     {name = "Nikita Ryzhenkov", email = "nikita.ryzhenkoff@gmail.com"}
 ]
 keywords = ["orm", "async", "database", "postgresql", "pydantic"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3.15",
@@ -26,28 +24,30 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "pydantic>=2.0",
-    "msgpack>=1.0",
-    "typer>=0.24",
-    "oxyde-postgres-core>=0.1.0.post1,<0.2.0",
+    "pydantic>=2.14.3",
+    "msgpack>=1.2.4",
+    "typer>=0.29.1",
+    "oxyde-postgres-core>=0.2.0,<0.3.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0",
-    "pytest-asyncio>=1.0",
-    "pytest-cov>=7.0",
-    "ruff>=0.14.7",
-    "pre-commit>=4.5.0",
-    "mypy==1.19.1",
-    "pyright[nodejs]==1.1.411",
-    "ty==0.0.59",
-    "testcontainers[postgres]>=4.0",
-    "psycopg2-binary>=2.9",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.4",
+    "pre-commit>=4.7.0",
+    "mypy==2.4.1",
+    "pyright[nodejs]==1.1.414",
+    "ty==0.0.100",
+    "testcontainers[postgres]>=4.15.0",
+    "psycopg2-binary>=2.9.13",
 ]
 docs = [
-    "mkdocs>=1.6,<2",
-    "mkdocs-material>=9.5",
+    "mkdocs>=1.6.1,<2",
+    "mkdocs-material>=9.8.1",
+    "pymdown-extensions>=13.0",
+    "mike>=2.2.0",
 ]
 
 [project.scripts]
@@ -60,7 +60,7 @@ Repository = "https://github.com/ebrake/oxyde-postgres"
 Issues = "https://github.com/ebrake/oxyde-postgres/issues"
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -71,7 +71,7 @@ exclude = ["oxyde.tests*"]
 # Ruff configuration (replaces black, isort, flake8)
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py313"
 exclude = [
     ".git",
     ".venv",
@@ -90,6 +90,9 @@ select = [
     "UP",     # pyupgrade
 ]
 ignore = [
+    # Preserve explicit Generic variance and runtime type metadata.
+    "UP046",
+    "UP047",
     "E203",   # whitespace before ':' (conflicts with black-style)
     "E501",   # line too long (handled by formatter)
 ]
@@ -128,7 +131,7 @@ show_missing = true
 
 # mypy configuration
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import tarfile
+import tomllib
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path
@@ -63,6 +64,12 @@ def validate_artifact(path: Path, package: str, version: str) -> None:
                 f"{path.name}: package name or version does not match "
                 f"{package} {version}"
             )
+        config = ROOT / (
+            "pyproject.toml" if package.endswith("-core") else "python/pyproject.toml"
+        )
+        requires_python = tomllib.loads(config.read_text())["project"]["requires-python"]
+        if headers["Requires-Python"] != requires_python:
+            raise ValueError(f"{path.name}: Python requirement must be {requires_python}")
         if "Nikita Ryzhenkov" not in str(headers.get("Author-email", "")) + str(
             headers.get("Author", "")
         ):

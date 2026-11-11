@@ -1,29 +1,26 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.16.0,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "oxyde-postgres-core"
-version = "0.1.0.post1"
+version = "0.2.0"
 description = "PostgreSQL 18+ Rust core for Oxyde for PostgreSQL"
 readme = "crates/oxyde-core-py/README.md"
 license = "MIT"
 license-files = ["LICENSE", "vendor/sqlx-postgres/LICENSE-MIT", "vendor/sqlx-postgres/LICENSE-APACHE"]
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 authors = [
+    {name = "E Brake", email = "ebrake123@icloud.com"},
     {name = "Nikita Ryzhenkov", email = "nikita.ryzhenkoff@gmail.com"}
 ]
 keywords = ["orm", "rust", "database", "async", "performance"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3.15",

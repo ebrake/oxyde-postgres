@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Coroutine
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
-
-from typing_extensions import Self
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from oxyde._msgpack import msgpack
 from oxyde.core.wrapper import explain_query, render_sql_debug

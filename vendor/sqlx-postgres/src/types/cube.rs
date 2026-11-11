@@ -71,7 +71,7 @@ impl<'r> Decode<'r, Postgres> for PgCube {
     }
 }
 
-impl<'q> Encode<'q, Postgres> for PgCube {
+impl Encode<'_, Postgres> for PgCube {
     fn produces(&self) -> Option<PgTypeInfo> {
         Some(PgTypeInfo::with_name("cube"))
     }
@@ -206,7 +206,7 @@ impl PgCube {
 }
 
 fn read_vec(bytes: &mut &[u8]) -> Result<Vec<f64>, String> {
-    if bytes.len() % BYTE_WIDTH != 0 {
+    if !bytes.len().is_multiple_of(BYTE_WIDTH) {
         return Err(format!(
             "data length not divisible by {BYTE_WIDTH}: {}",
             bytes.len()

@@ -382,7 +382,7 @@ class Author(Model):
 
 | Python | Behavior |
 |--------|----------|
-| 3.10–3.13 | Annotations are evaluated eagerly. Use `from __future__ import annotations` for forward references. |
+| 3.13 | Annotations are evaluated eagerly. Use `from __future__ import annotations` for forward references. |
 | 3.14+ | Annotations are lazy by default ([PEP 749](https://peps.python.org/pep-0749/)). Forward references work without any import. |
 
 **Recommendation:** define models in dependency order (referenced models first) and you won't need

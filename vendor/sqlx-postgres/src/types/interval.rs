@@ -100,7 +100,7 @@ impl TryFrom<std::time::Duration> for PgInterval {
     /// This returns an error if there is a loss of precision using nanoseconds or if there is a
     /// microsecond overflow.
     fn try_from(value: std::time::Duration) -> Result<Self, BoxDynError> {
-        if value.as_nanos() % 1000 != 0 {
+        if !value.as_nanos().is_multiple_of(1000) {
             return Err("PostgreSQL `INTERVAL` does not support nanoseconds precision".into());
         }
 
@@ -231,7 +231,7 @@ fn test_encode_interval() {
         microseconds: 0,
     };
     assert!(matches!(
-        Encode::<Postgres>::encode(&interval, &mut buf),
+        Encode::<Postgres>::encode(interval, &mut buf),
         Ok(IsNull::No)
     ));
     assert_eq!(&**buf, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -243,7 +243,7 @@ fn test_encode_interval() {
         microseconds: 1_000,
     };
     assert!(matches!(
-        Encode::<Postgres>::encode(&interval, &mut buf),
+        Encode::<Postgres>::encode(interval, &mut buf),
         Ok(IsNull::No)
     ));
     assert_eq!(&**buf, [0, 0, 0, 0, 0, 0, 3, 232, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -255,7 +255,7 @@ fn test_encode_interval() {
         microseconds: 1_000_000,
     };
     assert!(matches!(
-        Encode::<Postgres>::encode(&interval, &mut buf),
+        Encode::<Postgres>::encode(interval, &mut buf),
         Ok(IsNull::No)
     ));
     assert_eq!(&**buf, [0, 0, 0, 0, 0, 15, 66, 64, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -267,7 +267,7 @@ fn test_encode_interval() {
         microseconds: 3_600_000_000,
     };
     assert!(matches!(
-        Encode::<Postgres>::encode(&interval, &mut buf),
+        Encode::<Postgres>::encode(interval, &mut buf),
         Ok(IsNull::No)
     ));
     assert_eq!(
@@ -282,7 +282,7 @@ fn test_encode_interval() {
         microseconds: 0,
     };
     assert!(matches!(
-        Encode::<Postgres>::encode(&interval, &mut buf),
+        Encode::<Postgres>::encode(interval, &mut buf),
         Ok(IsNull::No)
     ));
     assert_eq!(&**buf, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
@@ -294,7 +294,7 @@ fn test_encode_interval() {
         microseconds: 0,
     };
     assert!(matches!(
-        Encode::<Postgres>::encode(&interval, &mut buf),
+        Encode::<Postgres>::encode(interval, &mut buf),
         Ok(IsNull::No)
     ));
     assert_eq!(&**buf, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);

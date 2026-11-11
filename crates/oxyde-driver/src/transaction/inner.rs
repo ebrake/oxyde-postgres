@@ -4,8 +4,6 @@
 //! it back before the connection returns to the pool, so no error path can
 //! leak an open transaction into pooled connections.
 
-use sqlx::Executor;
-
 use crate::error::{DriverError, Result};
 use crate::pool::DbPool;
 use std::time::Instant;
@@ -32,7 +30,10 @@ impl DbTx {
     /// Execute a raw statement inside the transaction (savepoints).
     pub(crate) async fn execute_raw(&mut self, sql: &str) -> std::result::Result<(), sqlx::Error> {
         match self {
-            DbTx::Postgres(tx) => tx.execute(sql).await.map(|_| ()),
+            DbTx::Postgres(tx) => sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&mut **tx)
+                .await
+                .map(|_| ()),
         }
     }
 }

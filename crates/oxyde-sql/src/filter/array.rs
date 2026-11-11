@@ -198,20 +198,20 @@ fn typed_element(value: &rmpv::Value, item: &ColumnTypeSpec) -> Result<Value> {
             .as_str()
             .filter(|s| values.iter().any(|allowed| allowed == s))
             .map(string_value),
-        (S::Blob, V::Binary(b)) => Some(Value::Bytes(Some(Box::new(b.clone())))),
+        (S::Blob, V::Binary(b)) => Some(Value::Bytes(Some(b.clone()))),
         (S::Uuid, V::String(s)) => s
             .as_str()
             .and_then(|s| Uuid::parse_str(s).ok())
-            .map(|u| Value::Uuid(Some(Box::new(u)))),
+            .map(|u| Value::Uuid(Some(u))),
         (S::Decimal { .. }, V::String(s)) => s
             .as_str()
             .and_then(parse_decimal_exact)
-            .map(|d| Value::Decimal(Some(Box::new(d)))),
+            .map(|d| Value::Decimal(Some(d))),
         (S::Decimal { .. }, V::Integer(n)) => n
             .as_i64()
             .map(Decimal::from)
             .or_else(|| n.as_u64().map(Decimal::from))
-            .map(|d| Value::Decimal(Some(Box::new(d)))),
+            .map(|d| Value::Decimal(Some(d))),
         (S::DateTime | S::DateTimeUtc | S::Date | S::Time, V::String(_)) => {
             temporal_element(bind_value(value, item), item)
         }
@@ -455,7 +455,7 @@ mod tests {
             scale: None,
         };
         let value = typed_element(&rmpv::Value::String("1E+2".into()), &item).unwrap();
-        assert_eq!(value, Value::Decimal(Some(Box::new(Decimal::from(100)))));
+        assert_eq!(value, Value::Decimal(Some(Decimal::from(100))));
     }
 
     #[test]
@@ -466,11 +466,7 @@ mod tests {
         };
         for n in [1_u64 << 63, u64::MAX] {
             let value = typed_element(&rmpv::Value::Integer(n.into()), &item).unwrap();
-            assert_eq!(
-                value,
-                Value::Decimal(Some(Box::new(Decimal::from(n)))),
-                "{n}"
-            );
+            assert_eq!(value, Value::Decimal(Some(Decimal::from(n))), "{n}");
         }
     }
 

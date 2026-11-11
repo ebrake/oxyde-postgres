@@ -34,28 +34,28 @@ pub fn bind_value(value: &rmpv::Value, spec: &ColumnTypeSpec) -> Value {
                 Value::BigInt(Some(i))
             } else if let Some(u) = n.as_u64() {
                 // u64 that doesn't fit i64 — store as string (legacy behavior)
-                Value::String(Some(Box::new(u.to_string())))
+                Value::String(Some(u.to_string()))
             } else {
-                Value::String(Some(Box::new(n.to_string())))
+                Value::String(Some(n.to_string()))
             }
         }
         rmpv::Value::F32(f) => Value::Double(Some(f64::from(*f))),
         rmpv::Value::F64(f) => Value::Double(Some(*f)),
         rmpv::Value::String(s) => bind_string(s.as_str().unwrap_or_default(), spec),
-        rmpv::Value::Binary(b) => Value::Bytes(Some(Box::new(b.clone()))),
+        rmpv::Value::Binary(b) => Value::Bytes(Some(b.clone())),
         rmpv::Value::Map(_) => {
             if matches!(spec, ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary) {
                 if let Some(j) = super::value::rmpv_to_json(value) {
                     return Value::Json(Some(Box::new(j)));
                 }
             }
-            Value::String(Some(Box::new(format!("{value}"))))
+            Value::String(Some(format!("{value}")))
         }
         rmpv::Value::Array(arr) => match spec {
             ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => {
                 match super::value::rmpv_to_json(value) {
                     Some(j) => Value::Json(Some(Box::new(j))),
-                    None => Value::String(Some(Box::new(format!("{value}")))),
+                    None => Value::String(Some(format!("{value}"))),
                 }
             }
             ColumnTypeSpec::Array { item } => match element_array_type(item) {
@@ -65,11 +65,11 @@ pub fn bind_value(value: &rmpv::Value, spec: &ColumnTypeSpec) -> Value {
                 }
                 // Unknown / nested-array element types have no sea_query
                 // ArrayType — stringify, matching the legacy unclassified path.
-                None => Value::String(Some(Box::new(format!("{value}")))),
+                None => Value::String(Some(format!("{value}"))),
             },
-            _ => Value::String(Some(Box::new(format!("{value}")))),
+            _ => Value::String(Some(format!("{value}"))),
         },
-        rmpv::Value::Ext(_, _) => Value::String(Some(Box::new(format!("{value}")))),
+        rmpv::Value::Ext(_, _) => Value::String(Some(format!("{value}"))),
     }
 }
 
@@ -101,17 +101,17 @@ fn bind_element(value: &rmpv::Value, item: &ColumnTypeSpec) -> Value {
 pub(crate) fn coerce_element(value: Value, spec: &ColumnTypeSpec) -> Value {
     match (spec, value) {
         (ColumnTypeSpec::DateTime, Value::ChronoDateTimeUtc(Some(dt))) => {
-            Value::ChronoDateTime(Some(Box::new(dt.naive_utc())))
+            Value::ChronoDateTime(Some(dt.naive_utc()))
         }
         (ColumnTypeSpec::DateTimeUtc, Value::ChronoDateTime(Some(dt))) => {
-            Value::ChronoDateTimeUtc(Some(Box::new(dt.and_utc())))
+            Value::ChronoDateTimeUtc(Some(dt.and_utc()))
         }
         // The column holds doubles, so the comparison happens in double
         // precision whatever the integer.
         #[allow(clippy::cast_precision_loss)]
         (ColumnTypeSpec::Double, Value::BigInt(Some(n))) => Value::Double(Some(n as f64)),
         (ColumnTypeSpec::Decimal { .. }, Value::BigInt(Some(n))) => {
-            Value::Decimal(Some(Box::new(Decimal::from(n))))
+            Value::Decimal(Some(Decimal::from(n)))
         }
         (_, value) => value,
     }
@@ -201,7 +201,7 @@ pub fn typed_value_expr(value: Value, spec: &ColumnTypeSpec, _dialect: Dialect) 
             return Expr::cust_with_values(format!("$1::{type_name}"), vec![value]);
         }
     }
-    Expr::val(value).into()
+    Expr::val(value)
 }
 
 /// Bind a string payload according to the spec.
@@ -213,39 +213,39 @@ fn bind_string(s: &str, spec: &ColumnTypeSpec) -> Value {
     match spec {
         ColumnTypeSpec::DateTimeUtc => {
             if let Some(dt) = parse_datetime_utc(s) {
-                return Value::ChronoDateTimeUtc(Some(Box::new(dt)));
+                return Value::ChronoDateTimeUtc(Some(dt));
             }
             // Naive string under an aware spec: bind as naive (legacy fallback)
             if let Ok(dt) = parse_datetime(s) {
-                return Value::ChronoDateTime(Some(Box::new(dt)));
+                return Value::ChronoDateTime(Some(dt));
             }
             string_value(s)
         }
         ColumnTypeSpec::DateTime => {
             if let Ok(dt) = parse_datetime(s) {
-                return Value::ChronoDateTime(Some(Box::new(dt)));
+                return Value::ChronoDateTime(Some(dt));
             }
             // Aware string under a naive spec: normalize to UTC (legacy fallback)
             rfc3339_heuristic_or_string(s)
         }
         ColumnTypeSpec::Date => {
             if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                return Value::ChronoDate(Some(Box::new(d)));
+                return Value::ChronoDate(Some(d));
             }
             rfc3339_heuristic_or_string(s)
         }
         ColumnTypeSpec::Time => {
             if let Ok(t) = parse_time(s) {
-                return Value::ChronoTime(Some(Box::new(t)));
+                return Value::ChronoTime(Some(t));
             }
             rfc3339_heuristic_or_string(s)
         }
         ColumnTypeSpec::Uuid => match Uuid::parse_str(s) {
-            Ok(u) => Value::Uuid(Some(Box::new(u))),
+            Ok(u) => Value::Uuid(Some(u)),
             Err(_) => string_value(s),
         },
         ColumnTypeSpec::Decimal { .. } => match parse_decimal(s) {
-            Some(d) => Value::Decimal(Some(Box::new(d))),
+            Some(d) => Value::Decimal(Some(d)),
             None => string_value(s),
         },
         ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => {
@@ -366,12 +366,12 @@ pub(crate) fn quote_pg_type_path(name: &str) -> String {
 }
 
 pub(crate) fn string_value(s: &str) -> Value {
-    Value::String(Some(Box::new(s.to_string())))
+    Value::String(Some(s.to_string()))
 }
 
 fn rfc3339_heuristic_or_string(s: &str) -> Value {
     match parse_datetime_utc(s) {
-        Some(dt) => Value::ChronoDateTimeUtc(Some(Box::new(dt))),
+        Some(dt) => Value::ChronoDateTimeUtc(Some(dt)),
         None => string_value(s),
     }
 }
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn decimal_string() {
         match bind_value(&s("99.99"), &decimal_spec()) {
-            Value::Decimal(Some(d)) => assert_eq!(*d, Decimal::from_str("99.99").unwrap()),
+            Value::Decimal(Some(d)) => assert_eq!(d, Decimal::from_str("99.99").unwrap()),
             other => panic!("expected Decimal, got {other:?}"),
         }
     }
@@ -621,7 +621,7 @@ mod tests {
             ColumnTypeSpec::String { length: Some(100) },
         ] {
             match bind_value(&s("2024-01-15T12:30:00Z"), &spec) {
-                Value::String(Some(v)) => assert_eq!(v.as_ref(), "2024-01-15T12:30:00Z"),
+                Value::String(Some(v)) => assert_eq!(v.as_str(), "2024-01-15T12:30:00Z"),
                 other => panic!("spec {spec:?}: expected String, got {other:?}"),
             }
         }
@@ -721,7 +721,7 @@ mod tests {
         match bind_value(&val, &array_of(ColumnTypeSpec::DateTime)) {
             Value::Array(ArrayType::ChronoDateTime, Some(vals)) => {
                 let expected = NaiveDateTime::from_str("2024-01-01T08:00:00").unwrap();
-                assert_eq!(vals[0], Value::ChronoDateTime(Some(Box::new(expected))));
+                assert_eq!(vals[0], Value::ChronoDateTime(Some(expected)));
                 assert!(matches!(vals[1], Value::ChronoDateTime(Some(_))));
             }
             other => panic!("expected Array(ChronoDateTime), got {other:?}"),
@@ -733,7 +733,7 @@ mod tests {
                     .unwrap()
                     .and_utc();
                 assert!(matches!(vals[0], Value::ChronoDateTimeUtc(Some(_))));
-                assert_eq!(vals[1], Value::ChronoDateTimeUtc(Some(Box::new(expected))));
+                assert_eq!(vals[1], Value::ChronoDateTimeUtc(Some(expected)));
             }
             other => panic!("expected Array(ChronoDateTimeUtc), got {other:?}"),
         }
@@ -801,8 +801,8 @@ mod tests {
             Value::Array(
                 ArrayType::Decimal,
                 Some(Box::new(vec![
-                    Value::Decimal(Some(Box::new(Decimal::from(1)))),
-                    Value::Decimal(Some(Box::new(Decimal::new(250, 2)))),
+                    Value::Decimal(Some(Decimal::from(1))),
+                    Value::Decimal(Some(Decimal::new(250, 2))),
                 ]))
             )
         );
@@ -812,7 +812,7 @@ mod tests {
     fn decimal_exponent_string() {
         assert_eq!(
             bind_value(&s("1E+2"), &decimal_spec()),
-            Value::Decimal(Some(Box::new(Decimal::from(100))))
+            Value::Decimal(Some(Decimal::from(100)))
         );
     }
 
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(parse_decimal("0Eabc"), None);
         assert_eq!(
             bind_value(&s("0E-30"), &decimal_spec()),
-            Value::Decimal(Some(Box::new(Decimal::ZERO)))
+            Value::Decimal(Some(Decimal::ZERO))
         );
     }
 
@@ -933,7 +933,7 @@ mod tests {
             Value::Double(Some(_))
         ));
         match bind_value(&s("hello"), &ColumnTypeSpec::Unknown) {
-            Value::String(Some(v)) => assert_eq!(v.as_ref(), "hello"),
+            Value::String(Some(v)) => assert_eq!(v.as_str(), "hello"),
             other => panic!("expected String, got {other:?}"),
         }
     }
