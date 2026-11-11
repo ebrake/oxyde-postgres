@@ -7,11 +7,8 @@ use sea_query::Iden;
 pub struct TableIdent(pub String);
 
 impl Iden for TableIdent {
-    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
-        // Write should never fail for in-memory strings
-        // If it does fail, we silently ignore it as there's no recovery path
-        // and the error will propagate when sea_query tries to use the incomplete SQL
-        let _ = write!(s, "{}", self.0);
+    fn unquoted(&self) -> &str {
+        &self.0
     }
 }
 
@@ -20,10 +17,7 @@ impl Iden for TableIdent {
 pub struct ColumnIdent(pub String);
 
 impl Iden for ColumnIdent {
-    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
-        // Write should never fail for in-memory strings
-        // If it does fail, we silently ignore it as there's no recovery path
-        // and the error will propagate when sea_query tries to use the incomplete SQL
-        let _ = write!(s, "{}", self.0);
+    fn unquoted(&self) -> &str {
+        &self.0
     }
 }

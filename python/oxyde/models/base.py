@@ -72,6 +72,8 @@ from typing import (
     Any,
     ClassVar,
     ForwardRef,
+    Self,
+    dataclass_transform,
     get_args,
     get_origin,
     get_type_hints,
@@ -81,7 +83,6 @@ from pydantic import BaseModel, ConfigDict
 from pydantic._internal._model_construction import ModelMetaclass
 from pydantic.errors import PydanticUndefinedAnnotation
 from pydantic.fields import FieldInfo, PydanticUndefined
-from typing_extensions import Self, dataclass_transform
 
 from oxyde.core import register_validator
 
@@ -149,7 +150,7 @@ class OxydeModelMeta(ModelMetaclass):
         cls: type[Model] = super().__new__(mcs, name, bases, namespace, **kwargs)
 
         # Detect FK fields from Pydantic's processed model_fields
-        # This works on all Python versions (3.10-3.14+) because Pydantic
+        # This works on all supported Python versions because Pydantic
         # has already resolved annotations regardless of lazy/eager evaluation
         pending_fk_fields: list[tuple[str, Any, FieldInfo | None]] = []
         for field_name, field_info in cls.model_fields.items():
@@ -191,8 +192,8 @@ def _build_globalns(cls: type) -> dict[str, Any]:
     combined.setdefault("ForeignKeyInfo", ForeignKeyInfo)
     combined.setdefault("Query", Query)
     combined.setdefault("QueryManager", QueryManager)
-    # typing.Self does not exist on 3.10; the inherited `objects` annotation
-    # references it, so resolution must see the typing_extensions fallback.
+    # Resolve the inherited `objects` annotation even if the model module
+    # does not import Self.
     combined.setdefault("Self", Self)
     return combined
 
@@ -726,6 +727,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         await self.pre_save(is_create=is_create, update_fields=update_fields_set)
 
         if not is_create:
+            assert pk_field is not None
             # Update specified fields or all fields (except PK)
             if update_fields_set is not None:
                 # Validate that all specified fields exist
@@ -765,7 +767,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                 )
                 return self
 
-            rows = await manager.filter(**{pk_field: pk_value}).update(  # type: ignore[misc]
+            rows = await manager.filter(**{pk_field: pk_value}).update(
                 returning=True, client=client, using=using, **values
             )
             if not rows:

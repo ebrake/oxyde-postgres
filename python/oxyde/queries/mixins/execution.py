@@ -8,10 +8,9 @@ Model.model_config - no sanitization needed.
 from __future__ import annotations
 
 from collections.abc import Coroutine, Sequence
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from pydantic import TypeAdapter
-from typing_extensions import Self
 
 from oxyde._msgpack import msgpack
 from oxyde.core import ir

@@ -87,7 +87,7 @@ fn postgres_typed_arrays_use_native_operators_with_cast_operands() {
             params,
             [Value::Array(
                 ArrayType::String,
-                Some(Box::new(vec![Value::String(Some(Box::new("rust".into())))]))
+                Some(Box::new(vec![Value::String(Some("rust".into()))]))
             )]
         );
     }

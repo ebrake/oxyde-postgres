@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.2.0 — dependency refresh and Python 3.13 minimum (2026-11-11)
+
+### Compatibility
+
+- Require **Python 3.13+** for both packages; PostgreSQL **18+** remains required. Python 3.10–3.12 users can continue using 0.1.0.post1.
+- Build native wheels for CPython 3.13, 3.14, 3.15, and free-threaded 3.14 on the existing Linux glibc/musl, macOS, and Windows targets.
+- Require Rust 1.99+ for source builds and pin development/CI to stable Rust 1.99.1.
+- Keep the `oxyde` import, `_oxyde_core` extension, CLI, and ORM APIs. Pair `oxyde-postgres` 0.2.0 with `oxyde-postgres-core>=0.2.0,<0.3.0`.
+
+### SQLx and Rust dependencies
+
+- Upgrade [SQLx to 0.9.0](https://github.com/transact-rs/sqlx/blob/v0.9.0/CHANGELOG.md) from 0.8.6. Rebase the vendored PostgreSQL driver on the published 0.9.0 source, including its current type resolver, authentication, TLS, connection, and transaction fixes.
+- Preserve cache-disabled, single-batch unnamed Parse → Bind → Describe portal → Execute → Close → Sync execution. Cold custom result types resolve through SQLx's recursive resolver only after the original `ReadyForQuery`, on the owning connection, without replaying SQL.
+- Adapt generated and explicit raw SQL entry points to SQLx's `SqlStr` / `AssertSqlSafe` API; ORM values remain separately bound parameters.
+- Upgrade SeaQuery from 0.31.1 to **1.0.2**, adapting identifiers, expression operators, unboxed scalar values, array binding, and thread-safe values.
+- SeaQuery now parenthesizes SQL default expressions (`DEFAULT (42)`, `DEFAULT (CURRENT_TIMESTAMP)`). The two affected golden DDL snapshots are intentionally updated; the SQL retains the same PostgreSQL default behavior and existing databases need no migration for this formatting change.
+- Refresh `Cargo.lock` to the latest non-yanked versions allowed by the dependency graph. Direct dependency baselines are:
+
+| Package | Version |
+|---|---|
+| SQLx / sqlx-postgres | 0.9.0 |
+| SeaQuery | 1.0.2 |
+| Tokio | 1.54.1 |
+| serde / serde_json | 1.0.229 / 1.0.154 |
+| anyhow / thiserror / tracing | 1.0.104 / 2.0.21 / 0.1.44 |
+| async-trait / futures / once_cell | 0.1.92 / 0.3.34 / 1.21.4 |
+| chrono / uuid / rust_decimal | 0.4.45 / 1.29.2 / 1.43.0 |
+| rmp / rmp-serde / rmpv | 0.8.15 / 1.3.1 / 1.3.1 |
+| PyO3 / pyo3-async-runtimes | 0.30.1 / 0.30.0 |
+| mimalloc / tikv-jemallocator (optional) | 0.1.52 / 0.7.0 |
+| insta / tempfile (tests) | 1.49.0 / 3.27.0 |
+
+### Python, build, and documentation dependencies
+
+| Package | Version baseline |
+|---|---|
+| Pydantic / MessagePack / Typer | 2.14.3 / 1.2.4 / 0.29.1 |
+| pytest / pytest-asyncio / pytest-cov | 9.2.0 / 1.4.1.post1 / 7.1.0 |
+| Ruff / pre-commit | 0.17.4 / 4.7.0 |
+| mypy / pyright / ty (pinned) | 2.4.1 / 1.1.414 / 0.0.100 |
+| testcontainers / psycopg2-binary | 4.15.0 / 2.9.13 |
+| maturin / setuptools | 1.16.0 / 84.2.1 |
+| MkDocs / Material for MkDocs | 1.6.1 / 9.8.1 |
+| PyMdown Extensions / mike | 13.0 / 2.2.0 |
+
+- Raise runtime and optional dependency baselines to their latest stable releases at preparation time. Update Ruff hooks, CI's mypy version, and native release builds to match.
+- Use standard-library `Self`, `dataclass_transform`, and `TimeoutError` with the Python 3.13 minimum. Keep explicit generic variance and runtime typing metadata.
+- Adapt primary-key narrowing for mypy 2 and emit the current `ty` override diagnostic name in generated stubs.
+- Put **E Brake <ebrake123@icloud.com>** first in both distribution author lists, retaining Nikita Ryzhenkov's author credit and the complete original Oxyde MIT license. Preserve SQLx's current license texts and its original LaunchBadge copyright notices.
+- Validate `Requires-Python` alongside package version, description links, authorship, and bundled licenses before publishing.
+
+### Validation
+
+- 173 Rust workspace tests and 16 explicitly enabled PostgreSQL driver tests passed, including the wire-order, cold custom-type, cancellation, and no-replay regressions.
+- 1,226 Python tests passed on CPython 3.15 (two expected skips). All 47 generated-stub tests passed on CPython 3.13 with the upgraded mypy, pyright, and ty.
+- All pre-commit hooks, optional allocator builds, strict documentation build, nine release-verifier tests, local wheel imports, and artifact license/metadata checks passed.
+
 ## 0.1.0.post1 — package description corrections (2026-11-11)
 
 - Replace relative links in both PyPI package descriptions with absolute GitHub URLs for the repository, first-release notes, connection guide, documentation, contributor guide, and original MIT license.

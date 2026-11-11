@@ -215,7 +215,7 @@ async fn metadata_failure_after_returning_does_not_replay_the_write() {
                     "write replayed"
                 );
             }
-            if tag == b'P'
+            if matches!(tag, b'P' | b'Q')
                 && body.windows(18).any(|part| part == b"pg_catalog.pg_type")
                 && !injected.swap(true, Ordering::SeqCst)
             {
@@ -223,13 +223,20 @@ async fn metadata_failure_after_returning_does_not_replay_the_write() {
                     original_ready.load(Ordering::SeqCst),
                     "catalog read before ReadyForQuery"
                 );
-                // Preserve the statement name and parameter OIDs, replacing only SQL.
-                let sql_start = body.iter().position(|b| *b == 0).unwrap() + 1;
+                // Preserve extended-query statement IDs and parameter OIDs, or
+                // the simple-query terminator, replacing only the catalog SQL.
+                let sql_start = if tag == b'P' {
+                    body.iter().position(|b| *b == 0).unwrap() + 1
+                } else {
+                    0
+                };
                 let sql_end = sql_start + body[sql_start..].iter().position(|b| *b == 0).unwrap();
-                body.splice(
-                    sql_start..sql_end,
-                    b"SELECT 1 / 0 WHERE $1::oid IS NOT NULL".iter().copied(),
-                );
+                let failing_sql: &[u8] = if tag == b'P' {
+                    b"SELECT 1 / 0 WHERE $1::oid IS NOT NULL"
+                } else {
+                    b"SELECT 1 / 0"
+                };
+                body.splice(sql_start..sql_end, failing_sql.iter().copied());
             }
             remote_write.write_u8(tag).await.unwrap();
             remote_write
@@ -419,7 +426,10 @@ async fn cached_and_explicitly_prepared_statements_keep_existing_behavior() {
 
     let mut uncached = connect(0).await;
     let statement = uncached
-        .prepare_with("SELECT $1 AS value", &[PgTypeInfo::with_name("int4")])
+        .prepare_with(
+            sqlx::SqlStr::from_static("SELECT $1 AS value"),
+            &[PgTypeInfo::with_name("int4")],
+        )
         .await
         .unwrap();
     let row = statement

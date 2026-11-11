@@ -27,10 +27,10 @@ impl Database for Postgres {
     type Value = PgValue;
     type ValueRef<'r> = PgValueRef<'r>;
 
-    type Arguments<'q> = PgArguments;
-    type ArgumentBuffer<'q> = PgArgumentBuffer;
+    type Arguments = PgArguments;
+    type ArgumentBuffer = PgArgumentBuffer;
 
-    type Statement<'q> = PgStatement<'q>;
+    type Statement = PgStatement;
 
     const NAME: &'static str = "PostgreSQL";
 

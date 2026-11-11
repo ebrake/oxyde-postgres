@@ -64,7 +64,7 @@ impl<'r> Decode<'r, Postgres> for PgPath {
     }
 }
 
-impl<'q> Encode<'q, Postgres> for PgPath {
+impl Encode<'_, Postgres> for PgPath {
     fn produces(&self) -> Option<PgTypeInfo> {
         Some(PgTypeInfo::with_name("path"))
     }
@@ -131,7 +131,7 @@ impl PgPath {
             .into());
         }
 
-        if bytes.len() % BYTE_WIDTH * 2 != 0 {
+        if !bytes.len().is_multiple_of(BYTE_WIDTH * 2) {
             return Err(format!(
                 "data length not divisible by pairs of {BYTE_WIDTH}: {}",
                 bytes.len()

@@ -4,19 +4,18 @@ use crate::{
 };
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
-use futures_util::{stream, StreamExt, TryFutureExt, TryStreamExt};
-use std::borrow::Cow;
+use futures_util::{stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use sqlx_core::sql_str::SqlStr;
 use std::{future, pin::pin};
 
 use sqlx_core::any::{
-    Any, AnyArguments, AnyColumn, AnyConnectOptions, AnyConnectionBackend, AnyQueryResult, AnyRow,
+    AnyArguments, AnyColumn, AnyConnectOptions, AnyConnectionBackend, AnyQueryResult, AnyRow,
     AnyStatement, AnyTypeInfo, AnyTypeInfoKind,
 };
 
 use crate::type_info::PgType;
 use sqlx_core::connection::Connection;
 use sqlx_core::database::Database;
-use sqlx_core::describe::Describe;
 use sqlx_core::executor::Executor;
 use sqlx_core::ext::ustr::UStr;
 use sqlx_core::transaction::TransactionManager;
@@ -29,30 +28,27 @@ impl AnyConnectionBackend for PgConnection {
     }
 
     fn close(self: Box<Self>) -> BoxFuture<'static, sqlx_core::Result<()>> {
-        Connection::close(*self)
+        Connection::close(*self).boxed()
     }
 
     fn close_hard(self: Box<Self>) -> BoxFuture<'static, sqlx_core::Result<()>> {
-        Connection::close_hard(*self)
+        Connection::close_hard(*self).boxed()
     }
 
     fn ping(&mut self) -> BoxFuture<'_, sqlx_core::Result<()>> {
-        Connection::ping(self)
+        Connection::ping(self).boxed()
     }
 
-    fn begin(
-        &mut self,
-        statement: Option<Cow<'static, str>>,
-    ) -> BoxFuture<'_, sqlx_core::Result<()>> {
-        PgTransactionManager::begin(self, statement)
+    fn begin(&mut self, statement: Option<SqlStr>) -> BoxFuture<'_, sqlx_core::Result<()>> {
+        PgTransactionManager::begin(self, statement).boxed()
     }
 
     fn commit(&mut self) -> BoxFuture<'_, sqlx_core::Result<()>> {
-        PgTransactionManager::commit(self)
+        PgTransactionManager::commit(self).boxed()
     }
 
     fn rollback(&mut self) -> BoxFuture<'_, sqlx_core::Result<()>> {
-        PgTransactionManager::rollback(self)
+        PgTransactionManager::rollback(self).boxed()
     }
 
     fn start_rollback(&mut self) {
@@ -68,7 +64,7 @@ impl AnyConnectionBackend for PgConnection {
     }
 
     fn flush(&mut self) -> BoxFuture<'_, sqlx_core::Result<()>> {
-        Connection::flush(self)
+        Connection::flush(self).boxed()
     }
 
     fn should_flush(&self) -> bool {
@@ -82,14 +78,14 @@ impl AnyConnectionBackend for PgConnection {
         Ok(self)
     }
 
-    fn fetch_many<'q>(
-        &'q mut self,
-        query: &'q str,
+    fn fetch_many(
+        &mut self,
+        query: SqlStr,
         persistent: bool,
-        arguments: Option<AnyArguments<'q>>,
-    ) -> BoxStream<'q, sqlx_core::Result<Either<AnyQueryResult, AnyRow>>> {
+        arguments: Option<AnyArguments>,
+    ) -> BoxStream<'_, sqlx_core::Result<Either<AnyQueryResult, AnyRow>>> {
         let persistent = persistent && arguments.is_some();
-        let arguments = match arguments.as_ref().map(AnyArguments::convert_to).transpose() {
+        let arguments = match arguments.map(AnyArguments::convert_into).transpose() {
             Ok(arguments) => arguments,
             Err(error) => {
                 return stream::once(future::ready(Err(sqlx_core::Error::Encode(error)))).boxed()
@@ -108,16 +104,15 @@ impl AnyConnectionBackend for PgConnection {
         )
     }
 
-    fn fetch_optional<'q>(
-        &'q mut self,
-        query: &'q str,
+    fn fetch_optional(
+        &mut self,
+        query: SqlStr,
         persistent: bool,
-        arguments: Option<AnyArguments<'q>>,
-    ) -> BoxFuture<'q, sqlx_core::Result<Option<AnyRow>>> {
+        arguments: Option<AnyArguments>,
+    ) -> BoxFuture<'_, sqlx_core::Result<Option<AnyRow>>> {
         let persistent = persistent && arguments.is_some();
         let arguments = arguments
-            .as_ref()
-            .map(AnyArguments::convert_to)
+            .map(AnyArguments::convert_into)
             .transpose()
             .map_err(sqlx_core::Error::Encode);
 
@@ -135,20 +130,21 @@ impl AnyConnectionBackend for PgConnection {
 
     fn prepare_with<'c, 'q: 'c>(
         &'c mut self,
-        sql: &'q str,
+        sql: SqlStr,
         _parameters: &[AnyTypeInfo],
-    ) -> BoxFuture<'c, sqlx_core::Result<AnyStatement<'q>>> {
+    ) -> BoxFuture<'c, sqlx_core::Result<AnyStatement>> {
         Box::pin(async move {
             let statement = Executor::prepare_with(self, sql, &[]).await?;
-            AnyStatement::try_from_statement(
-                sql,
-                &statement,
-                statement.metadata.column_names.clone(),
-            )
+            let column_names = statement.metadata.column_names.clone();
+            AnyStatement::try_from_statement(statement, column_names)
         })
     }
 
-    fn describe<'q>(&'q mut self, sql: &'q str) -> BoxFuture<'q, sqlx_core::Result<Describe<Any>>> {
+    #[cfg(feature = "offline")]
+    fn describe<'c>(
+        &mut self,
+        sql: SqlStr,
+    ) -> BoxFuture<'_, sqlx_core::Result<sqlx_core::describe::Describe<sqlx_core::any::Any>>> {
         Box::pin(async move {
             let describe = Executor::describe(self, sql).await?;
 
@@ -179,7 +175,7 @@ impl AnyConnectionBackend for PgConnection {
                 None => None,
             };
 
-            Ok(Describe {
+            Ok(sqlx_core::describe::Describe {
                 columns,
                 parameters,
                 nullable: describe.nullable,

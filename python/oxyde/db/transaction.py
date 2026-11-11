@@ -202,7 +202,7 @@ class AsyncTransaction:
                 raise TransactionTimeoutError(msg)
             try:
                 return await asyncio.wait_for(coro, remaining)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 self._timed_out = True
                 msg = f"Transaction {self._tx_id} exceeded timeout"
                 raise TransactionTimeoutError(msg) from exc

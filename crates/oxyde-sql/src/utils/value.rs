@@ -4,6 +4,7 @@
 //! parses arithmetic expression trees produced by Python's `F()` and converts
 //! rmpv maps/arrays into `serde_json::Value` for JSON column storage.
 
+use sea_query::ExprTrait;
 use sea_query::{Expr, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};
@@ -74,12 +75,12 @@ pub fn parse_expression(node: &rmpv::Value) -> Result<SimpleExpr> {
             let spec = map_get(node, "value_type")
                 .and_then(|v| rmpv::ext::from_value::<ColumnTypeSpec>(v.clone()).ok())
                 .unwrap_or(ColumnTypeSpec::Unknown);
-            Ok(Expr::val(super::bind::bind_value(val, &spec)).into())
+            Ok(Expr::val(super::bind::bind_value(val, &spec)))
         }
         "column" => {
             let name = map_get_str(node, "name")
                 .ok_or_else(|| QueryError::InvalidQuery("Column node missing 'name'".into()))?;
-            Ok(Expr::col(ColumnIdent(name.to_string())).into())
+            Ok(Expr::col(ColumnIdent(name.to_string())))
         }
         "op" => {
             let op = map_get_str(node, "op")
@@ -165,7 +166,7 @@ mod tests {
         assert_eq!(json["count"], 3);
         assert_eq!(json["items"][0], 1);
         assert_eq!(json["items"][1], true);
-        assert!(json["items"][2].is_null());
+        assert!(serde_json::Value::is_null(&json["items"][2]));
     }
 
     // ── parse_expression: value_type spec on literal nodes ──────────────
@@ -199,7 +200,7 @@ mod tests {
         let expr = parse_expression(&node).unwrap();
         match expr {
             SimpleExpr::Value(Value::Decimal(Some(d))) => {
-                assert_eq!(*d, Decimal::from_str("2.50").unwrap());
+                assert_eq!(d, Decimal::from_str("2.50").unwrap());
             }
             other => panic!("expected Value::Decimal, got {other:?}"),
         }
@@ -213,7 +214,7 @@ mod tests {
         let expr = parse_expression(&node).unwrap();
         match expr {
             SimpleExpr::Value(Value::String(Some(s))) => {
-                assert_eq!(s.as_ref(), "2.50");
+                assert_eq!(s.as_str(), "2.50");
             }
             other => panic!("expected Value::String without hint, got {other:?}"),
         }
@@ -265,7 +266,7 @@ mod tests {
         };
         match *rhs_box {
             SimpleExpr::Value(Value::Decimal(Some(d))) => {
-                assert_eq!(*d, Decimal::from_str("2.50").unwrap());
+                assert_eq!(d, Decimal::from_str("2.50").unwrap());
             }
             other => panic!("expected nested Value::Decimal on RHS, got {other:?}"),
         }

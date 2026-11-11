@@ -9,21 +9,21 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/ebrake/oxyde-postgres"
 homepage = "https://github.com/ebrake/oxyde-postgres"
 description = "Type-safe asynchronous ORM for PostgreSQL 18+"
 
 [workspace.dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.0", features = ["full"] }
-anyhow = "1.0"
-thiserror = "1.0"
-tracing = "0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["full"] }
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+tracing = "0.1.44"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

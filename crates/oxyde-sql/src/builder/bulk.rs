@@ -3,6 +3,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use oxyde_codec::{BulkUpdate, BulkUpdateRow, ColumnTypeSpec, QueryIR};
+use sea_query::ExprTrait;
 use sea_query::{CaseStatement, Cond, Expr, PostgresQueryBuilder, Query, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};

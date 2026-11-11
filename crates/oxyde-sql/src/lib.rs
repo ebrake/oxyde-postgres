@@ -319,7 +319,7 @@ mod tests {
         assert!(!sql.contains("ESCAPE"));
         assert_eq!(params.len(), 1);
         match &params[0] {
-            Value::String(Some(val)) => assert_eq!(val.as_ref(), "%rust%"),
+            Value::String(Some(val)) => assert_eq!(val.as_str(), "%rust%"),
             other => panic!("unexpected parameter value {other:?}"),
         }
     }

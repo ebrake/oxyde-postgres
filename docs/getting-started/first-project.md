@@ -101,7 +101,7 @@ Key concepts:
     ```
 
     Without this import, a forward reference like `author: Author | None` will raise
-    a `NameError` (Python 3.10–3.13). Starting with Python 3.14, annotations are lazy
+    a `NameError` (Python 3.13). Starting with Python 3.14, annotations are lazy
     by default and this import is no longer needed.
 
     Alternatively, you can use a string literal inside generic types for reverse relations:

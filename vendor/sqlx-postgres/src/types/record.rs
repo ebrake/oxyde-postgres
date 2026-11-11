@@ -41,13 +41,10 @@ impl<'a> PgRecordEncoder<'a> {
     {
         let ty = value.produces().unwrap_or_else(T::type_info);
 
-        match ty.0 {
-            // push a hole for this type ID
-            // to be filled in on query execution
-            PgType::DeclareWithName(name) => self.buf.patch_type_by_name(&name),
-            PgType::DeclareArrayOf(array) => self.buf.patch_array_type(array),
-            // write type id
-            pg_type => self.buf.extend(&pg_type.oid().0.to_be_bytes()),
+        if let Some(oid) = ty.oid() {
+            self.buf.extend(oid.0.to_be_bytes())
+        } else {
+            self.buf.push_hole(ty);
         }
 
         self.buf.encode(value)?;
@@ -103,27 +100,7 @@ impl<'r> PgRecordDecoder<'r> {
         match self.fmt {
             PgValueFormat::Binary => {
                 let element_type_oid = Oid(self.buf.get_u32());
-                let element_type_opt = match self.typ.0.kind() {
-                    PgTypeKind::Simple if self.typ.0 == PgType::Record => {
-                        PgTypeInfo::try_from_oid(element_type_oid)
-                    }
-
-                    PgTypeKind::Composite(fields) => {
-                        let ty = fields[self.ind].1.clone();
-                        if ty.0.oid() != element_type_oid {
-                            return Err("unexpected mismatch of composite type information".into());
-                        }
-
-                        Some(ty)
-                    }
-
-                    _ => {
-                        return Err(
-                            "unexpected non-composite type being decoded as a composite type"
-                                .into(),
-                        );
-                    }
-                };
+                let element_type_opt = self.find_type_info(&self.typ, element_type_oid)?;
 
                 if let Some(ty) = &element_type_opt {
                     if !ty.is_null() && !T::compatible(ty) {
@@ -200,6 +177,26 @@ impl<'r> PgRecordDecoder<'r> {
                     row: None,
                 })
             }
+        }
+    }
+
+    fn find_type_info(
+        &self,
+        typ: &PgTypeInfo,
+        oid: Oid,
+    ) -> Result<Option<PgTypeInfo>, BoxDynError> {
+        match typ.kind() {
+            PgTypeKind::Simple if typ.0 == PgType::Record => Ok(PgTypeInfo::try_from_oid(oid)),
+            PgTypeKind::Composite(fields) => {
+                let ty = fields[self.ind].1.clone();
+                if ty.0.oid() != oid {
+                    return Err("unexpected mismatch of composite type information".into());
+                }
+
+                Ok(Some(ty))
+            }
+            PgTypeKind::Domain(domain) => self.find_type_info(domain, oid),
+            _ => Err("unexpected custom type being decoded as a composite type".into()),
         }
     }
 }

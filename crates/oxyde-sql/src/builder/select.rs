@@ -1,9 +1,10 @@
 //! SELECT query building
 
 use oxyde_codec::{JoinSpec, LockType as OxydeLockType, QueryIR};
+use sea_query::ExprTrait;
 use sea_query::{
-    Alias, Asterisk, ColumnRef, Expr, Func, LockType as SeaLockType, Order, PostgresQueryBuilder,
-    Query, SeaRc, SelectStatement, UnionType, Value,
+    Alias, Asterisk, Expr, Func, IntoColumnRef, IntoTableRef, LockType as SeaLockType, Order,
+    PostgresQueryBuilder, Query, SelectStatement, UnionType, Value,
 };
 
 use crate::aggregate::build_aggregate;
@@ -35,19 +36,13 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
         }
         if let Some(group_by) = &ir.group_by {
             for field in group_by {
-                let column_ref = ColumnRef::TableColumn(
-                    SeaRc::new(table.clone()),
-                    SeaRc::new(ColumnIdent(field.clone())),
-                );
+                let column_ref = (table.clone(), ColumnIdent(field.clone())).into_column_ref();
                 query.expr_as(Expr::col(column_ref), Alias::new(field.clone()));
             }
         }
     } else if let Some(cols) = &ir.cols {
         for col in cols {
-            let column_ref = ColumnRef::TableColumn(
-                SeaRc::new(table.clone()),
-                SeaRc::new(ColumnIdent(col.clone())),
-            );
+            let column_ref = (table.clone(), ColumnIdent(col.clone())).into_column_ref();
             query.expr_as(Expr::col(column_ref), Alias::new(col.clone()));
         }
     } else {
@@ -75,14 +70,11 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
     if let Some(group_by) = &ir.group_by {
         for field in group_by {
             let col_expr = if ir.joins.is_some() {
-                Expr::col(ColumnRef::TableColumn(
-                    SeaRc::new(table.clone()),
-                    SeaRc::new(ColumnIdent(field.clone())),
-                ))
+                Expr::col((table.clone(), ColumnIdent(field.clone())).into_column_ref())
             } else {
                 Expr::col(ColumnIdent(field.clone()))
             };
-            query.add_group_by([col_expr.into()]);
+            query.add_group_by([col_expr]);
         }
     }
 
@@ -126,10 +118,7 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
                 _ => Order::Asc,
             };
             if ir.joins.is_some() {
-                let col_ref = ColumnRef::TableColumn(
-                    SeaRc::new(table.clone()),
-                    SeaRc::new(ColumnIdent(field.clone())),
-                );
+                let col_ref = (table.clone(), ColumnIdent(field.clone())).into_column_ref();
                 query.order_by(col_ref, order);
             } else {
                 query.order_by(ColumnIdent(field.clone()), order);
@@ -215,22 +204,18 @@ fn apply_select_joins(
 ) {
     for join in joins {
         let join_alias = Alias::new(join.alias.clone());
-        let mut table_ref = sea_query::TableRef::Table(SeaRc::new(TableIdent(join.table.clone())));
+        let mut table_ref = TableIdent(join.table.clone()).into_table_ref();
         table_ref = table_ref.alias(join_alias.clone());
         let left_col = match &join.parent {
-            Some(parent_alias) => ColumnRef::TableColumn(
-                SeaRc::new(Alias::new(parent_alias.clone())),
-                SeaRc::new(ColumnIdent(join.source_column.clone())),
-            ),
-            None => ColumnRef::TableColumn(
-                SeaRc::new(base_table.clone()),
-                SeaRc::new(ColumnIdent(join.source_column.clone())),
-            ),
+            Some(parent_alias) => (
+                Alias::new(parent_alias.clone()),
+                ColumnIdent(join.source_column.clone()),
+            )
+                .into_column_ref(),
+            None => (base_table.clone(), ColumnIdent(join.source_column.clone())).into_column_ref(),
         };
-        let right_col = ColumnRef::TableColumn(
-            SeaRc::new(join_alias.clone()),
-            SeaRc::new(ColumnIdent(join.target_column.clone())),
-        );
+        let right_col =
+            (join_alias.clone(), ColumnIdent(join.target_column.clone())).into_column_ref();
         query.left_join(table_ref, Expr::col(left_col).equals(right_col));
         for column in &join.columns {
             let expr = Expr::col((join_alias.clone(), ColumnIdent(column.column.clone())));
@@ -248,22 +233,18 @@ fn apply_joins_only(
 ) {
     for join in joins {
         let join_alias = Alias::new(join.alias.clone());
-        let mut table_ref = sea_query::TableRef::Table(SeaRc::new(TableIdent(join.table.clone())));
+        let mut table_ref = TableIdent(join.table.clone()).into_table_ref();
         table_ref = table_ref.alias(join_alias.clone());
         let left_col = match &join.parent {
-            Some(parent_alias) => ColumnRef::TableColumn(
-                SeaRc::new(Alias::new(parent_alias.clone())),
-                SeaRc::new(ColumnIdent(join.source_column.clone())),
-            ),
-            None => ColumnRef::TableColumn(
-                SeaRc::new(base_table.clone()),
-                SeaRc::new(ColumnIdent(join.source_column.clone())),
-            ),
+            Some(parent_alias) => (
+                Alias::new(parent_alias.clone()),
+                ColumnIdent(join.source_column.clone()),
+            )
+                .into_column_ref(),
+            None => (base_table.clone(), ColumnIdent(join.source_column.clone())).into_column_ref(),
         };
-        let right_col = ColumnRef::TableColumn(
-            SeaRc::new(join_alias.clone()),
-            SeaRc::new(ColumnIdent(join.target_column.clone())),
-        );
+        let right_col =
+            (join_alias.clone(), ColumnIdent(join.target_column.clone())).into_column_ref();
         query.left_join(table_ref, Expr::col(left_col).equals(right_col));
         // Note: no columns added - only JOIN clause for filtering
     }

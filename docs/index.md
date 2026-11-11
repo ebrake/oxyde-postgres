@@ -1,6 +1,6 @@
 # Oxyde for PostgreSQL
 
-PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and Python 3.10+. See the [first-release notes](changelog.md) for all fork additions.
+PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and Python 3.13+. See the [release notes](changelog.md) for dependency upgrades and all fork additions.
 
 
 <p align="center">

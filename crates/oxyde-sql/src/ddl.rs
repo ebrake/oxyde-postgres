@@ -83,7 +83,7 @@ fn field_to_column_def(field: &FieldDef, dialect: Dialect) -> SeaColumnDef {
     }
 
     if let Some(default) = &field.default {
-        col.default(Expr::cust(default));
+        col.default(Expr::cust(default.clone()));
     }
 
     col

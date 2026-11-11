@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use oxyde_codec::{Aggregate, AggregateOp, ColumnTypeSpec, Filter, FilterNode};
+use sea_query::ExprTrait;
 use sea_query::{Expr, Func, LikeExpr, SimpleExpr, Value};
 
 use super::array::{build_array_filter, ArrayOp};
@@ -156,13 +157,13 @@ fn out_of_range(value: &Value, array_cast: Option<&Result<String>>) -> bool {
 
 /// `=` (`equal`) or `!=` against a value that equals no stored value: NULL
 /// for a NULL column, as the comparison would be, and a constant otherwise.
-fn never_equal(col: Expr, equal: bool, dialect: Dialect) -> SimpleExpr {
+fn never_equal(col: &Expr, equal: bool, dialect: Dialect) -> SimpleExpr {
     let template = if equal {
         "(CASE WHEN {col} IS NULL THEN NULL ELSE FALSE END)"
     } else {
         "(CASE WHEN {col} IS NULL THEN NULL ELSE TRUE END)"
     };
-    render_col(template, &col.into(), dialect)
+    render_col(template, col, dialect)
 }
 
 /// Left side of LIKE / ILIKE. A `str` field stored as JSON matches the
@@ -185,7 +186,7 @@ fn like_target(col: Expr, spec: &ColumnTypeSpec, dialect: Dialect) -> Expr {
         // matches as stored. Flags 9 accept RFC 8259 text (1) and strictly
         // valid JSONB blobs (8).
     };
-    Expr::expr(render_col(template, &col.into(), dialect))
+    Expr::expr(render_col(template, &col, dialect))
 }
 
 fn like_expr(filter: &Filter, pattern: String) -> Result<LikeExpr> {
@@ -326,7 +327,7 @@ fn apply_filter(
             )));
         }
         return build_array_filter(
-            &make_col_expr(col_name, default_table).into(),
+            &make_col_expr(col_name, default_table),
             op,
             &filter.value,
             spec,
@@ -357,8 +358,8 @@ fn apply_filter(
 
     let expr = match filter.operator.as_str() {
         // A value the column's array type cannot hold equals no stored value.
-        "=" if out_of_range(&val, array_cast) => never_equal(col, true, dialect),
-        "!=" if out_of_range(&val, array_cast) => never_equal(col, false, dialect),
+        "=" if out_of_range(&val, array_cast) => never_equal(&col, true, dialect),
+        "!=" if out_of_range(&val, array_cast) => never_equal(&col, false, dialect),
         "=" => col.eq(typed(val)?),
         "!=" => col.ne(typed(val)?),
         ">" => col.gt(typed(val)?),
@@ -388,7 +389,7 @@ fn apply_filter(
                     .filter(|v| !out_of_range(v, array_cast))
                     .collect();
                 if values.is_empty() && !arr.is_empty() {
-                    never_equal(col, true, dialect)
+                    never_equal(&col, true, dialect)
                 } else {
                     let values = values.into_iter().map(typed).collect::<Result<Vec<_>>>()?;
                     col.is_in(values)

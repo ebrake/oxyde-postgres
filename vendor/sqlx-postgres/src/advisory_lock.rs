@@ -2,9 +2,12 @@ use crate::error::Result;
 use crate::Either;
 use crate::PgConnection;
 use hkdf::Hkdf;
-use once_cell::sync::OnceCell;
 use sha2::Sha256;
+use sqlx_core::executor::Executor;
+use sqlx_core::sql_str::SqlSafeStr;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// A mutex-like type utilizing [Postgres advisory locks].
 ///
@@ -37,7 +40,7 @@ use std::ops::{Deref, DerefMut};
 pub struct PgAdvisoryLock {
     key: PgAdvisoryLockKey,
     /// The query to execute to release this lock.
-    release_query: OnceCell<String>,
+    release_query: Arc<OnceLock<String>>,
 }
 
 /// A key type natively used by Postgres advisory locks.
@@ -77,8 +80,8 @@ pub enum PgAdvisoryLockKey {
 ///
 /// This means the lock is not actually released as soon as the guard is dropped. To ensure the
 /// lock is eagerly released, you can call [`.release_now().await`][Self::release_now()].
-pub struct PgAdvisoryLockGuard<'lock, C: AsMut<PgConnection>> {
-    lock: &'lock PgAdvisoryLock,
+pub struct PgAdvisoryLockGuard<C: AsMut<PgConnection>> {
+    lock: PgAdvisoryLock,
     conn: Option<C>,
 }
 
@@ -163,7 +166,7 @@ impl PgAdvisoryLock {
     pub fn with_key(key: PgAdvisoryLockKey) -> Self {
         Self {
             key,
-            release_query: OnceCell::new(),
+            release_query: Arc::new(OnceLock::new()),
         }
     }
 
@@ -198,27 +201,36 @@ impl PgAdvisoryLock {
     /// See [Postgres' documentation for the Advisory Lock Functions][advisory-funcs] for details.
     ///
     /// [advisory-funcs]: https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS
+    ///
+    /// # Cancel Safety
+    ///
+    /// This method is cancel safe. If the future is dropped before the query completes, a
+    /// `pg_advisory_unlock()` call is queued and run the next time the connection is used.
     pub async fn acquire<C: AsMut<PgConnection>>(
         &self,
         mut conn: C,
-    ) -> Result<PgAdvisoryLockGuard<'_, C>> {
-        match &self.key {
-            PgAdvisoryLockKey::BigInt(key) => {
-                crate::query::query("SELECT pg_advisory_lock($1)")
-                    .bind(key)
-                    .execute(conn.as_mut())
-                    .await?;
-            }
-            PgAdvisoryLockKey::IntPair(key1, key2) => {
-                crate::query::query("SELECT pg_advisory_lock($1, $2)")
-                    .bind(key1)
-                    .bind(key2)
-                    .execute(conn.as_mut())
-                    .await?;
-            }
-        }
+    ) -> Result<PgAdvisoryLockGuard<C>> {
+        let query = match &self.key {
+            PgAdvisoryLockKey::BigInt(_) => "SELECT pg_advisory_lock($1)",
+            PgAdvisoryLockKey::IntPair(_, _) => "SELECT pg_advisory_lock($1, $2)",
+        };
 
-        Ok(PgAdvisoryLockGuard::new(self, conn))
+        let stmt = conn.as_mut().prepare(query.into_sql_str()).await?;
+        let query = crate::query::query_statement(&stmt);
+
+        // We're wrapping the connection in a `PgAdvisoryLockGuard` early here on purpose. If this
+        // future is dropped, the lock will be released in the drop impl.
+        let mut guard = PgAdvisoryLockGuard::new(self.clone(), conn);
+        let conn = guard.conn.as_mut().unwrap();
+
+        match &self.key {
+            PgAdvisoryLockKey::BigInt(key) => query.bind(key),
+            PgAdvisoryLockKey::IntPair(key1, key2) => query.bind(key1).bind(key2),
+        }
+        .execute(conn.as_mut())
+        .await?;
+
+        Ok(guard)
     }
 
     /// Acquires an exclusive lock using `pg_try_advisory_lock()`, returning immediately
@@ -241,10 +253,16 @@ impl PgAdvisoryLock {
     /// See [Postgres' documentation for the Advisory Lock Functions][advisory-funcs] for details.
     ///
     /// [advisory-funcs]: https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS
+    ///
+    /// # Cancel Safety
+    ///
+    /// This method is **not** cancel safe. If the future is dropped while the query is in-flight,
+    /// it is not possible to know whether the lock was acquired, so it cannot be safely released.
+    /// The lock may remain held until the connection is closed.
     pub async fn try_acquire<C: AsMut<PgConnection>>(
         &self,
         mut conn: C,
-    ) -> Result<Either<PgAdvisoryLockGuard<'_, C>, C>> {
+    ) -> Result<Either<PgAdvisoryLockGuard<C>, C>> {
         let locked: bool = match &self.key {
             PgAdvisoryLockKey::BigInt(key) => {
                 crate::query_scalar::query_scalar("SELECT pg_try_advisory_lock($1)")
@@ -262,7 +280,7 @@ impl PgAdvisoryLock {
         };
 
         if locked {
-            Ok(Either::Left(PgAdvisoryLockGuard::new(self, conn)))
+            Ok(Either::Left(PgAdvisoryLockGuard::new(self.clone(), conn)))
         } else {
             Ok(Either::Right(conn))
         }
@@ -322,8 +340,8 @@ impl PgAdvisoryLockKey {
 
 const NONE_ERR: &str = "BUG: PgAdvisoryLockGuard.conn taken";
 
-impl<'lock, C: AsMut<PgConnection>> PgAdvisoryLockGuard<'lock, C> {
-    fn new(lock: &'lock PgAdvisoryLock, conn: C) -> Self {
+impl<C: AsMut<PgConnection>> PgAdvisoryLockGuard<C> {
+    fn new(lock: PgAdvisoryLock, conn: C) -> Self {
         PgAdvisoryLockGuard {
             lock,
             conn: Some(conn),
@@ -362,7 +380,7 @@ impl<'lock, C: AsMut<PgConnection>> PgAdvisoryLockGuard<'lock, C> {
     }
 }
 
-impl<'lock, C: AsMut<PgConnection> + AsRef<PgConnection>> Deref for PgAdvisoryLockGuard<'lock, C> {
+impl<C: AsMut<PgConnection> + AsRef<PgConnection>> Deref for PgAdvisoryLockGuard<C> {
     type Target = PgConnection;
 
     fn deref(&self) -> &Self::Target {
@@ -376,17 +394,13 @@ impl<'lock, C: AsMut<PgConnection> + AsRef<PgConnection>> Deref for PgAdvisoryLo
 /// However, replacing the connection with a different one using, e.g. [`std::mem::replace()`]
 /// is a logic error and will cause a warning to be logged by the PostgreSQL server when this
 /// guard attempts to release the lock.
-impl<'lock, C: AsMut<PgConnection> + AsRef<PgConnection>> DerefMut
-    for PgAdvisoryLockGuard<'lock, C>
-{
+impl<C: AsMut<PgConnection> + AsRef<PgConnection>> DerefMut for PgAdvisoryLockGuard<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.conn.as_mut().expect(NONE_ERR).as_mut()
     }
 }
 
-impl<'lock, C: AsMut<PgConnection> + AsRef<PgConnection>> AsRef<PgConnection>
-    for PgAdvisoryLockGuard<'lock, C>
-{
+impl<C: AsMut<PgConnection> + AsRef<PgConnection>> AsRef<PgConnection> for PgAdvisoryLockGuard<C> {
     fn as_ref(&self) -> &PgConnection {
         self.conn.as_ref().expect(NONE_ERR).as_ref()
     }
@@ -398,7 +412,7 @@ impl<'lock, C: AsMut<PgConnection> + AsRef<PgConnection>> AsRef<PgConnection>
 /// However, replacing the connection with a different one using, e.g. [`std::mem::replace()`]
 /// is a logic error and will cause a warning to be logged by the PostgreSQL server when this
 /// guard attempts to release the lock.
-impl<'lock, C: AsMut<PgConnection>> AsMut<PgConnection> for PgAdvisoryLockGuard<'lock, C> {
+impl<C: AsMut<PgConnection>> AsMut<PgConnection> for PgAdvisoryLockGuard<C> {
     fn as_mut(&mut self) -> &mut PgConnection {
         self.conn.as_mut().expect(NONE_ERR).as_mut()
     }
@@ -407,7 +421,7 @@ impl<'lock, C: AsMut<PgConnection>> AsMut<PgConnection> for PgAdvisoryLockGuard<
 /// Queues a `pg_advisory_unlock()` call on the wrapped connection which will be flushed
 /// to the server the next time it is used, or when it is returned to [`PgPool`][crate::PgPool]
 /// in the case of [`PoolConnection<Postgres>`][crate::pool::PoolConnection].
-impl<'lock, C: AsMut<PgConnection>> Drop for PgAdvisoryLockGuard<'lock, C> {
+impl<C: AsMut<PgConnection>> Drop for PgAdvisoryLockGuard<C> {
     fn drop(&mut self) {
         if let Some(mut conn) = self.conn.take() {
             // Queue a simple query message to execute next time the connection is used.

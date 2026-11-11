@@ -1033,7 +1033,7 @@ class {model_name}Manager(QueryManager[{model_name}]):
         \"\"\"Get minimum field value.\"\"\"
         ...
 
-    async def create(  # type: ignore[override]  # ty: ignore[invalid-method-override]
+    async def create(  # type: ignore[override]  # ty: ignore[incompatible-method-override]
         self,
         *,
         instance: {model_name} | None = None,

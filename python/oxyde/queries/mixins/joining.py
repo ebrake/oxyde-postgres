@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
-
-from typing_extensions import Self
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from oxyde.exceptions import FieldLookupError
 from oxyde.queries.base import (

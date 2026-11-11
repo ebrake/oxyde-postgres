@@ -351,7 +351,7 @@ fn status_enum() -> ColumnTypeSpec {
 }
 
 fn decimal(value: i64, scale: u32) -> Value {
-    Value::Decimal(Some(Box::new(Decimal::new(value, scale))))
+    Value::Decimal(Some(Decimal::new(value, scale)))
 }
 
 #[test]

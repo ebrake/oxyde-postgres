@@ -106,7 +106,7 @@ impl PoolExec for DbPool {
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbPool::Postgres(pool) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(pool);
                 encode_stream::<PgEncoder, _>(stream, col_types, None)
                     .await
@@ -124,7 +124,7 @@ impl PoolExec for DbPool {
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbPool::Postgres(pool) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(pool);
                 encode_stream::<PgEncoder, _>(stream, col_types, Some(relations))
                     .await
@@ -141,7 +141,7 @@ impl PoolExec for DbPool {
     ) -> Result<Vec<u8>> {
         match self {
             DbPool::Postgres(pool) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(pool);
                 encode_stream_mutation_returning::<PgEncoder, _>(stream, col_types)
                     .await
@@ -153,7 +153,7 @@ impl PoolExec for DbPool {
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<u64> {
         match self {
             DbPool::Postgres(pool) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let result = query.execute(pool).await.map_err(stmt_err)?;
                 Ok(result.rows_affected())
             }
@@ -181,7 +181,7 @@ impl ConnExec for DbTx {
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbTx::Postgres(tx) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(&mut **tx);
                 encode_stream::<PgEncoder, _>(stream, col_types, None)
                     .await
@@ -199,7 +199,7 @@ impl ConnExec for DbTx {
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbTx::Postgres(tx) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(&mut **tx);
                 encode_stream::<PgEncoder, _>(stream, col_types, Some(relations))
                     .await
@@ -216,7 +216,7 @@ impl ConnExec for DbTx {
     ) -> Result<Vec<u8>> {
         match self {
             DbTx::Postgres(tx) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(&mut **tx);
                 encode_stream_mutation_returning::<PgEncoder, _>(stream, col_types)
                     .await
@@ -228,7 +228,7 @@ impl ConnExec for DbTx {
     async fn execute(&mut self, sql: &str, params: &[Value]) -> Result<u64> {
         match self {
             DbTx::Postgres(tx) => {
-                let query = bind_postgres(sqlx::query(sql), params)?;
+                let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let result = query.execute(&mut **tx).await.map_err(stmt_err)?;
                 Ok(result.rows_affected())
             }

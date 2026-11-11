@@ -43,29 +43,29 @@ pub fn bind_postgres_value<'q>(query: PgQuery<'q>, value: &'q Value) -> Result<P
         Value::Float(None) => query.bind(Option::<f32>::None),
         Value::Double(Some(v)) => query.bind(*v),
         Value::Double(None) => query.bind(Option::<f64>::None),
-        Value::String(Some(s)) => query.bind(s.as_ref().as_str()),
+        Value::String(Some(s)) => query.bind(s.as_str()),
         Value::String(None) => query.bind(Option::<String>::None),
         Value::Char(Some(c)) => query.bind(c.to_string()),
         Value::Char(None) => query.bind(Option::<String>::None),
-        Value::Bytes(Some(bytes)) => query.bind(bytes.as_ref().as_slice()),
+        Value::Bytes(Some(bytes)) => query.bind(bytes.as_slice()),
         Value::Bytes(None) => query.bind(Option::<Vec<u8>>::None),
         // Chrono types
-        Value::ChronoDateTimeUtc(Some(dt)) => query.bind(**dt),
+        Value::ChronoDateTimeUtc(Some(dt)) => query.bind(*dt),
         Value::ChronoDateTimeUtc(None) => query.bind(Option::<DateTime<Utc>>::None),
-        Value::ChronoDateTime(Some(dt)) => query.bind(**dt),
+        Value::ChronoDateTime(Some(dt)) => query.bind(*dt),
         Value::ChronoDateTime(None) => query.bind(Option::<NaiveDateTime>::None),
-        Value::ChronoDate(Some(d)) => query.bind(**d),
+        Value::ChronoDate(Some(d)) => query.bind(*d),
         Value::ChronoDate(None) => query.bind(Option::<NaiveDate>::None),
-        Value::ChronoTime(Some(t)) => query.bind(**t),
+        Value::ChronoTime(Some(t)) => query.bind(*t),
         Value::ChronoTime(None) => query.bind(Option::<NaiveTime>::None),
         // UUID
-        Value::Uuid(Some(u)) => query.bind(**u),
+        Value::Uuid(Some(u)) => query.bind(*u),
         Value::Uuid(None) => query.bind(Option::<Uuid>::None),
         // JSON
         Value::Json(Some(j)) => query.bind(j.as_ref().clone()),
         Value::Json(None) => query.bind(Option::<serde_json::Value>::None),
         // Decimal
-        Value::Decimal(Some(d)) => query.bind(**d),
+        Value::Decimal(Some(d)) => query.bind(*d),
         Value::Decimal(None) => query.bind(Option::<Decimal>::None),
         // Arrays (native PostgreSQL arrays)
         Value::Array(arr_type, Some(vals)) => return bind_pg_array(query, arr_type, vals),
@@ -117,7 +117,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<String>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::String(Some(s)) => Some(s.as_ref().clone()),
+                    Value::String(Some(s)) => Some(s.clone()),
                     _ => None,
                 })
                 .collect();
@@ -127,7 +127,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<Uuid>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::Uuid(Some(u)) => Some(**u),
+                    Value::Uuid(Some(u)) => Some(*u),
                     _ => None,
                 })
                 .collect();
@@ -137,7 +137,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<Decimal>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::Decimal(Some(d)) => Some(**d),
+                    Value::Decimal(Some(d)) => Some(*d),
                     _ => None,
                 })
                 .collect();
@@ -147,7 +147,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<NaiveDateTime>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::ChronoDateTime(Some(dt)) => Some(**dt),
+                    Value::ChronoDateTime(Some(dt)) => Some(*dt),
                     _ => None,
                 })
                 .collect();
@@ -157,7 +157,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<DateTime<Utc>>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::ChronoDateTimeUtc(Some(dt)) => Some(**dt),
+                    Value::ChronoDateTimeUtc(Some(dt)) => Some(*dt),
                     _ => None,
                 })
                 .collect();
@@ -167,7 +167,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<NaiveDate>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::ChronoDate(Some(d)) => Some(**d),
+                    Value::ChronoDate(Some(d)) => Some(*d),
                     _ => None,
                 })
                 .collect();
@@ -177,7 +177,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<NaiveTime>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::ChronoTime(Some(t)) => Some(**t),
+                    Value::ChronoTime(Some(t)) => Some(*t),
                     _ => None,
                 })
                 .collect();
@@ -187,7 +187,7 @@ fn bind_pg_array<'q>(
             let v: Vec<Option<Vec<u8>>> = vals
                 .iter()
                 .map(|v| match v {
-                    Value::Bytes(Some(b)) => Some(b.as_ref().clone()),
+                    Value::Bytes(Some(b)) => Some(b.clone()),
                     _ => None,
                 })
                 .collect();

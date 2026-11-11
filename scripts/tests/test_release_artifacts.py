@@ -28,11 +28,14 @@ class ReleaseArtifactTests(unittest.TestCase):
         author=True,
         windows_newlines=False,
         description="",
+        requires_python=">=3.13",
     ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / ("package.tar.gz" if source else "package.whl")
-        metadata = f"Name: {package}\nVersion: {version}\n"
+        metadata = (
+            f"Name: {package}\nVersion: {version}\nRequires-Python: {requires_python}\n"
+        )
         if author:
             metadata += "Author-email: Nikita Ryzhenkov <nikita.ryzhenkoff@gmail.com>\n"
         metadata += "\n" + description
@@ -132,6 +135,19 @@ class ReleaseArtifactTests(unittest.TestCase):
             checker.validate_artifact(
                 self.artifact(author=False), "oxyde-postgres-core", "0.1.0"
             )
+
+    def test_wrong_python_requirement_fails(self):
+        for package in ("oxyde-postgres", "oxyde-postgres-core"):
+            for source in (False, True):
+                with (
+                    self.subTest(package=package, source=source),
+                    self.assertRaisesRegex(ValueError, "Python requirement"),
+                ):
+                    checker.validate_artifact(
+                        self.artifact(package, source=source, requires_python=">=3.10"),
+                        package,
+                        "0.1.0",
+                    )
 
 
 if __name__ == "__main__":

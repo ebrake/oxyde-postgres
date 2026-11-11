@@ -3,8 +3,8 @@
 ## Requirements
 
 - PostgreSQL 18+
-- Python 3.10+
-- Rust 1.88+ (for building from source)
+- Python 3.13+
+- Rust 1.99+ (for building from source)
 
 ## Install from PyPI
 
