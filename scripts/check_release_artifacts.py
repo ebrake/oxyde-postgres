@@ -68,10 +68,12 @@ def validate_artifact(path: Path, package: str, version: str) -> None:
         ):
             raise ValueError(f"{path.name}: original author credit is missing")
     bundled = [
-        value.strip() for name, value in files.items() if "license" in name.lower()
+        value.replace(b"\r\n", b"\n").strip()
+        for name, value in files.items()
+        if "license" in name.lower()
     ]
     for label, content in expected_licenses(package).items():
-        if content.strip() not in bundled:
+        if content.replace(b"\r\n", b"\n").strip() not in bundled:
             raise ValueError(
                 f"{path.name}: complete {label} license/copyright notice is missing"
             )

@@ -26,6 +26,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         omit=None,
         version="0.1.0",
         author=True,
+        windows_newlines=False,
     ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -40,6 +41,8 @@ class ReleaseArtifactTests(unittest.TestCase):
         }
         for label, contents in checker.expected_licenses(package).items():
             if label != omit:
+                if windows_newlines:
+                    contents = contents.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
                 files[f"package/licenses/{label}"] = contents
         if source:
             with tarfile.open(path, "w:gz") as archive:
@@ -72,6 +75,16 @@ class ReleaseArtifactTests(unittest.TestCase):
                     "oxyde-postgres-core",
                     "0.1.0",
                 )
+
+    def test_windows_line_endings_preserve_complete_license_text(self):
+        for package in ("oxyde-postgres", "oxyde-postgres-core"):
+            for source in (False, True):
+                with self.subTest(package=package, source=source):
+                    checker.validate_artifact(
+                        self.artifact(package, source=source, windows_newlines=True),
+                        package,
+                        "0.1.0",
+                    )
 
     def test_each_vendored_notice_is_required(self):
         for label in ("SQLx LICENSE-MIT", "SQLx LICENSE-APACHE"):

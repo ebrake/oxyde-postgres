@@ -9,9 +9,13 @@ on:
       version:
         description: 'Version to release (e.g., 0.1.0)'
         required: true
+      artifacts_run_id:
+        description: 'Optional prior run with successful builds for this release tag'
+        required: false
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,7 +47,33 @@ jobs:
               print(f"version={core}\ntag=v{core}", file=output)
           PYTHON
 
+      - name: Verify reusable builds belong to the release tag
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git fetch --depth=1 origin tag "$RELEASE_TAG"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACTS_RUN_ID" > prior-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACTS_RUN_ID/jobs?per_page=100" > prior-jobs.json
+          python - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          run = json.loads(Path("prior-run.json").read_text())
+          tag_sha = subprocess.check_output(["git", "rev-parse", os.environ["RELEASE_TAG"] + "^{commit}"], text=True).strip()
+          if run["head_sha"] != tag_sha or run["path"] != ".github/workflows/release-core.yml":
+              raise SystemExit("Reusable artifacts must come from this workflow at the exact release tag")
+          targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+          expected = {"Build source distribution", *(f"Build {target} wheels" for target in targets)}
+          successful = {job["name"] for job in json.loads(Path("prior-jobs.json").read_text())["jobs"] if job["conclusion"] == "success"}
+          if expected - successful:
+              raise SystemExit(f"Required builds did not succeed: {sorted(expected - successful)}")
+          print(f"Reusing eight successful build jobs at {tag_sha}")
+          PYTHON
+
       - name: Build sdist
+        if: inputs.artifacts_run_id == ''
         uses: PyO3/maturin-action@v1.51.0
         with:
           maturin-version: v1.14.1
@@ -51,6 +81,7 @@ jobs:
           args: -m crates/oxyde-core-py/Cargo.toml --out dist
 
       - name: Upload sdist
+        if: inputs.artifacts_run_id == ''
         uses: actions/upload-artifact@v7.0.1
         with:
           name: sdist
@@ -59,6 +90,7 @@ jobs:
   build-wheels:
     name: Build ${{ matrix.platform.target }} wheels
     needs: [build-sdist]
+    if: inputs.artifacts_run_id == ''
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -147,6 +179,7 @@ jobs:
   validate:
     name: Verify release licenses and metadata
     needs: [build-wheels, build-sdist]
+    if: ${{ !cancelled() && needs.build-sdist.result == 'success' && (needs.build-wheels.result == 'success' || needs.build-wheels.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -154,16 +187,20 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          run-id: ${{ inputs.artifacts_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - run: python -m unittest discover -s scripts/tests -v
       - run: python scripts/check_release_artifacts.py dist --package oxyde-postgres-core
 
   publish:
     name: Publish to PyPI
     needs: validate
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
+      actions: read
     environment:
       name: pypi
       url: https://pypi.org/project/oxyde-postgres-core/
@@ -179,6 +216,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          run-id: ${{ inputs.artifacts_run_id || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: List artifacts
         run: ls -la dist/
@@ -189,6 +228,7 @@ jobs:
   release:
     name: Stage combined release and publish Python package
     needs: [publish, build-sdist]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.build-sdist.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -202,6 +242,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          run-id: ${{ inputs.artifacts_run_id || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Create Release
         uses: softprops/action-gh-release@v3.0.0
