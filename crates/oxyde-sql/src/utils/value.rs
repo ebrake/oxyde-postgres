@@ -266,6 +266,18 @@ fn compile<'a>(
                 "coalesce" => Ok(Func::coalesce(compiled).into()),
                 "greatest" => Ok(Func::greatest(compiled).into()),
                 "concat_ws" => Ok(Func::cust("CONCAT_WS").args(compiled).into()),
+                "lower" | "upper" => {
+                    let [arg] = <[SimpleExpr; 1]>::try_from(compiled).map_err(|_| {
+                        QueryError::InvalidQuery(format!(
+                            "Function '{name}' takes exactly one argument"
+                        ))
+                    })?;
+                    Ok(match name.as_str() {
+                        "lower" => Func::lower(arg),
+                        _ => Func::upper(arg),
+                    }
+                    .into())
+                }
                 other => Err(QueryError::InvalidQuery(format!(
                     "Unsupported scalar function '{other}'"
                 ))),

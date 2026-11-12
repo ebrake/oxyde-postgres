@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.2 — Expression and operator-class indexes
+
+- `Index` fields can be expressions (`Index((Lower("email"),), name=...)`), and
+  `Index(..., opclasses=(...))` sets an operator class per field. Expression
+  indexes need an explicit name. `spgist` and `brin` join the accepted `method`
+  values.
+- `makemigrations` now checks index definitions in Rust: every column an index uses
+  must exist, and index names must be unique across the schema, also after
+  PostgreSQL's 63-byte truncation. Unnamed operator-class indexes include the
+  operator class in their generated name (`users_email_text_pattern_ops_idx`), and
+  plain indexes now honour `db_column` and foreign-key column names.
+  An index name that PostgreSQL has already used (a table, `<table>_pkey`,
+  `<table>_<column>_key` or `<table>_<column>_seq`) is rejected the same way.
+- Replaying `rename_column` keeps index keys (including expressions) and foreign
+  keys in step with the renamed column. Replaying `drop_column` removes the
+  indexes and foreign keys that used the column, as PostgreSQL does, so a
+  hand-written migration no longer leaves `makemigrations` proposing a
+  `drop_index` that fails.
+- Changing a column's `unique` flag now names the constraint the way PostgreSQL
+  names an inline `UNIQUE` (`<table>_<column>_key`, shortened to fit 63 bytes), so
+  `DROP CONSTRAINT` finds the constraint `CREATE TABLE` made on long table or
+  column names. Names that already fit are unchanged.
+- Expression index keys no longer contain an enum's list of values, so adding an
+  enum member does not recreate the index. Their `column_types` are written in a
+  fixed order, so generated migration files are reproducible.
+- Add `Lower` and `Upper` scalar expressions (also usable in `annotate()` and
+  `update()`).
+- Index keys are stored as a bare string for a plain column (unchanged, so existing
+  snapshots and migrations are byte-identical) or as an object with `column` or
+  `expr` and an optional `opclass`. A core older than 0.3.2 rejects such keys
+  instead of dropping them. Index expressions may only call `coalesce`,
+  `greatest`, `lower` and `upper` (PostgreSQL requires them to be IMMUTABLE;
+  `concat_ws` is STABLE).
+- Fix `makemigrations` output for a `drop_index` operation without its stored
+  definition (it referenced a missing key).
+
 ## 0.3.1 — Scalar expressions (2026-11-12)
 
 - Add `Greatest` and `Value`, and rebuild `Coalesce` as a scalar expression that

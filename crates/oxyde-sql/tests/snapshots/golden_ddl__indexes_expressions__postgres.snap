@@ -1,0 +1,27 @@
+---
+source: crates/oxyde-sql/tests/golden_ddl.rs
+expression: sql
+---
+CREATE UNIQUE INDEX "ux_users_email_lower" ON "users" ((LOWER("email")));
+
+CREATE INDEX "ix_items_qty_default" ON "users" ((COALESCE("qty", 1)));
+
+CREATE INDEX "ix_users_tenant_email_lower" ON "users" ("tenant_id", (LOWER("email")));
+
+CREATE INDEX "ix_users_name_pattern" ON "users" ("name" text_pattern_ops);
+
+CREATE INDEX "ix_users_name_trgm" ON "users" USING gin ((LOWER("name")) gin_trgm_ops);
+
+CREATE INDEX "ix_users_schema_opclass" ON "users" ("name" public.text_pattern_ops);
+
+CREATE INDEX "ix_literals_quote" ON "users" ((COALESCE("note", E'O\'Brien')));
+
+CREATE INDEX "ix_literals_decimal" ON "users" ((COALESCE("price", 1.50)));
+
+CREATE INDEX "ix_literals_date" ON "users" ((COALESCE("day", '2024-01-31')));
+
+CREATE INDEX "ix_literals_bool_null" ON "users" ((COALESCE("flag", TRUE)), (COALESCE("other", NULL)));
+
+CREATE INDEX "ix_arith_neg" ON "users" (("qty" * 2), (0 - "qty"));
+
+CREATE INDEX "ix_raw_expr" ON "users" USING gin (((data -> 'tags')))

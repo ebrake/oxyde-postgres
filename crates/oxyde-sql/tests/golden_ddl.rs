@@ -570,6 +570,142 @@ fn index_partial() {
     snap("index_partial", &ops, ALL_DIALECTS);
 }
 
+/// Expression and operator-class keys, built from their wire JSON so the
+/// snapshot also pins the contract Python emits.
+#[test]
+fn indexes_expressions() {
+    use serde_json::{json, Value};
+
+    let col = |name: &str| json!({"type": "column", "name": name});
+    let lit = |value: Value| json!({"type": "value", "value": value});
+    let typed = |value: Value, kind: &str| json!({"type": "value", "value": value, "value_type": {"kind": kind}});
+    let func = |name: &str, args: Vec<Value>| json!({"type": "func", "name": name, "args": args});
+    let expr = |node: Value| json!({"expr": node});
+
+    let build = |name: &str, unique: bool, method: Option<&str>, keys: Vec<Value>| IndexDef {
+        name: name.into(),
+        fields: keys
+            .into_iter()
+            .map(|key| serde_json::from_value(key).expect("valid index key"))
+            .collect(),
+        unique,
+        nulls_not_distinct: false,
+        method: method.map(Into::into),
+        where_clause: None,
+    };
+
+    let indexes = vec![
+        build(
+            "ux_users_email_lower",
+            true,
+            None,
+            vec![expr(func("lower", vec![col("email")]))],
+        ),
+        build(
+            "ix_items_qty_default",
+            false,
+            None,
+            vec![expr(func("coalesce", vec![col("qty"), lit(json!(1))]))],
+        ),
+        build(
+            "ix_users_tenant_email_lower",
+            false,
+            None,
+            vec![json!("tenant_id"), expr(func("lower", vec![col("email")]))],
+        ),
+        build(
+            "ix_users_name_pattern",
+            false,
+            None,
+            vec![json!({"column": "name", "opclass": "text_pattern_ops"})],
+        ),
+        build(
+            "ix_users_name_trgm",
+            false,
+            Some("gin"),
+            vec![json!({
+                "expr": func("lower", vec![col("name")]),
+                "opclass": "gin_trgm_ops",
+            })],
+        ),
+        build(
+            "ix_users_schema_opclass",
+            false,
+            None,
+            vec![json!({"column": "name", "opclass": "public.text_pattern_ops"})],
+        ),
+        build(
+            "ix_literals_quote",
+            false,
+            None,
+            vec![expr(func(
+                "coalesce",
+                vec![col("note"), lit(json!("O'Brien"))],
+            ))],
+        ),
+        build(
+            "ix_literals_decimal",
+            false,
+            None,
+            vec![expr(func(
+                "coalesce",
+                vec![col("price"), typed(json!("1.50"), "decimal")],
+            ))],
+        ),
+        build(
+            "ix_literals_date",
+            false,
+            None,
+            vec![expr(func(
+                "coalesce",
+                vec![col("day"), typed(json!("2024-01-31"), "date")],
+            ))],
+        ),
+        build(
+            "ix_literals_bool_null",
+            false,
+            None,
+            vec![
+                expr(func("coalesce", vec![col("flag"), lit(json!(true))])),
+                expr(func("coalesce", vec![col("other"), lit(Value::Null)])),
+            ],
+        ),
+        build(
+            "ix_arith_neg",
+            false,
+            None,
+            vec![
+                expr(json!({"type": "op", "op": "mul", "lhs": col("qty"), "rhs": lit(json!(2))})),
+                expr(json!({"type": "neg", "expr": col("qty")})),
+            ],
+        ),
+        build(
+            "ix_raw_expr",
+            false,
+            Some("gin"),
+            vec![expr(json!({"type": "raw", "sql": "(data -> 'tags')"}))],
+        ),
+    ];
+
+    let ops: Vec<MigrationOp> = indexes
+        .into_iter()
+        .map(|index| MigrationOp::CreateIndex {
+            table: "users".into(),
+            index,
+        })
+        .collect();
+
+    // Schema statements inline every literal: a `$n` placeholder here would
+    // make the DDL unexecutable.
+    for &dialect in ALL_DIALECTS {
+        assert!(
+            !render(&ops, dialect).contains('$'),
+            "CREATE INDEX must not contain bind placeholders"
+        );
+    }
+    snap("indexes_expressions", &ops, ALL_DIALECTS);
+}
+
 #[test]
 fn indexes_nulls_not_distinct() {
     let mut ops = Vec::new();

@@ -58,6 +58,7 @@ from .wrapper import (
     init_pool_overwrite,
     migration_compute_diff,
     migration_to_sql,
+    migration_validate_schema,
     pool_backend,
     register_validator,
     release_savepoint,
@@ -87,6 +88,7 @@ __all__ = [
     "explain_query",
     "migration_compute_diff",
     "migration_to_sql",
+    "migration_validate_schema",
     "SchemaReplay",
     "ir",
 ]

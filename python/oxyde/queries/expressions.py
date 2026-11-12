@@ -21,6 +21,7 @@ Supported Operations:
 Scalar Functions and Literals:
     Coalesce("a", F("b"), 0)   → COALESCE(a, b, $1)   (str args are columns)
     Greatest("a", 1)           → GREATEST(a, $1)
+    Lower("a"), Upper("a")     → LOWER(a), UPPER(a)   (exactly one argument)
     Concat("a", "b", separator=" ") → CONCAT_WS($1, a, b)   (skips NULLs)
     RawSQL("LENGTH(name)")     → verbatim SQL fragment
     Value("draft")             → literal (a str is never read as a column here)
@@ -220,6 +221,30 @@ class Greatest(_Function):
     _func_name = "greatest"
 
 
+class Lower(_Function):
+    """LOWER — lower-case a text expression. A ``str`` argument is a column.
+
+    Also usable in ``Index((Lower("email"),), name=...)`` (case-insensitive
+    lookups): ``lower`` is IMMUTABLE, so PostgreSQL accepts it in an index.
+    """
+
+    __slots__ = ()
+    _func_name = "lower"
+
+    def __init__(self, arg: Any):
+        super().__init__(arg)
+
+
+class Upper(_Function):
+    """UPPER — upper-case a text expression. A ``str`` argument is a column."""
+
+    __slots__ = ()
+    _func_name = "upper"
+
+    def __init__(self, arg: Any):
+        super().__init__(arg)
+
+
 class F:
     """Field expression helper for arithmetic updates."""
 
@@ -321,6 +346,8 @@ __all__ = [
     "Coalesce",
     "Concat",
     "Greatest",
+    "Lower",
+    "Upper",
     "RawSQL",
     "_Expression",
     "_coerce_expression",

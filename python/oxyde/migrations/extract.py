@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import warnings
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -11,9 +12,17 @@ from uuid import UUID
 
 from pydantic.fields import PydanticUndefined
 
+from oxyde.core import migration_validate_schema
 from oxyde.core.column_types import compute_column_type
+from oxyde.core.types import serialize_value
 from oxyde.models.base import Model
+from oxyde.models.metadata import db_column_for
 from oxyde.models.registry import iter_tables, registered_tables
+from oxyde.queries.expressions import (
+    _Expression,
+    _map_expression_columns,
+    _resolve_column_name,
+)
 
 
 def _resolve_fk_target(
@@ -122,6 +131,120 @@ def _serialize_default(value: Any, dialect: str) -> str | None:
     return str_val
 
 
+def _snapshot_literal_value(value: Any) -> Any:
+    """Encode MessagePack values as JSON, retaining bytes as octet lists."""
+    if isinstance(value, bytes):
+        return list(value)
+    if isinstance(value, list):
+        return [_snapshot_literal_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _snapshot_literal_value(item) for key, item in value.items()}
+    return value
+
+
+def _bytes_list_spec(value: Any) -> dict[str, Any] | None:
+    """Type of a non-empty (nested) list of ``bytes``, else ``None``.
+
+    JSON carries bytes only as octet lists, which look like lists of small
+    integers, so the literal has to say what it is for the core to restore it.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return {"kind": "blob"}
+    if isinstance(value, (list, tuple)) and value:
+        items = [_bytes_list_spec(item) for item in value]
+        if all(item is not None and item == items[0] for item in items):
+            return {"kind": "array", "item": items[0]}
+    return None
+
+
+def _normalize_index_literals(node: Any) -> Any:
+    """Make the literals of an index expression snapshot-safe.
+
+    The value goes through ``serialize_value`` so Decimal/date/UUID/Enum
+    become plain JSON values: they must survive the snapshot, the generated
+    migration file (``repr``) and replay. Bytes become octet lists.
+
+    Nothing schema-aware happens here. The core canonicalizes an expression
+    key when it reads it: enum value lists are dropped from ``column_types``
+    and from literal types (they would make the index diff, and be recreated,
+    whenever the enum gains a member), and an octet list typed ``blob`` becomes
+    bytes. Doing it once in the core means the snapshot, the migration files
+    and replay all agree.
+    """
+    if isinstance(node, dict):
+        if node.get("type") == "value":
+            raw = node["value"]
+            out = {**node, "value": _snapshot_literal_value(serialize_value(raw))}
+            if "value_type" not in out and isinstance(raw, (list, tuple)):
+                spec = _bytes_list_spec(raw)
+                if spec is not None:
+                    out["value_type"] = spec
+            return out
+        return {key: _normalize_index_literals(val) for key, val in node.items()}
+    if isinstance(node, list):
+        return [_normalize_index_literals(item) for item in node]
+    return node
+
+
+def _extract_index_keys(
+    index: Any, model_cls: type[Model], column_types: dict[str, Any]
+) -> list[Any]:
+    """Wire form of ``index.fields`` (the Rust ``IndexKey`` encoding).
+
+    A plain column with the default operator class is a bare string; anything
+    else is ``{"column"|"expr": ..., "opclass": ...}``.
+
+    Field names are mapped to their ``db_column`` (FK virtual fields to their
+    ``<name>_id`` column). Names that are not model fields pass through, so a
+    raw column name keeps working and snapshots without remapped fields do not
+    change.
+    """
+    opclasses = index.opclasses or (None,) * len(index.fields)
+
+    keys: list[Any] = []
+    for key, opclass in zip(index.fields, opclasses, strict=True):
+        wire: Any
+        if isinstance(key, _Expression):
+            array_types: dict[str, Any] = {}
+
+            def resolve(name: str) -> str:
+                column = _resolve_column_name(name, model_cls)
+                spec = column_types.get(column, {})
+                if spec.get("kind") == "array":
+                    array_types[column] = spec
+                return column
+
+            mapped = _map_expression_columns(key._expr, resolve)
+            wire = {"expr": _normalize_index_literals(mapped)}
+            if array_types:
+                wire["column_types"] = array_types
+            if opclass is not None:
+                wire["opclass"] = opclass
+        else:
+            column = db_column_for(model_cls, key)
+            wire = column if opclass is None else {"column": column, "opclass": opclass}
+        keys.append(wire)
+    return keys
+
+
+def _auto_index_name(table_name: str, index: Any) -> str:
+    """Default name of an unnamed Meta index.
+
+    ``<table>_<field>_..._idx``. A key with an operator class contributes
+    ``<field>_<opclass>``, so ``Index(("email",), opclasses=("text_pattern_ops",))``
+    does not collide with the plain index on the same column.
+
+    ``Index`` requires an explicit name for expression keys, so only plain
+    field names reach this function.
+    """
+    opclasses = index.opclasses or (None,) * len(index.fields)
+    parts = [
+        key if opclass is None else f"{key}_{opclass.replace('.', '_')}"
+        for key, opclass in zip(index.fields, opclasses, strict=True)
+    ]
+    return f"{table_name}_{'_'.join(parts)}_idx"
+
+
 def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
     """Extract current schema from registered models.
 
@@ -149,6 +272,8 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
 
     for model_cls in iter_tables():
         meta = model_cls._db_meta
+        table_name = meta.table_name
+        assert table_name is not None, "Registered tables must have a table name"
 
         # Extract fields
         fields = []
@@ -214,15 +339,16 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
         indexes: list[dict[str, Any]] = []
         if hasattr(meta, "indexes") and meta.indexes:
             for index in meta.indexes:
-                # Generate index name if not provided
-                index_name = index.name
-                if not index_name and index.fields:
-                    index_name = f"{meta.table_name}_{'_'.join(index.fields)}_idx"
+                index_name = index.name or _auto_index_name(table_name, index)
 
                 indexes.append(
                     {
                         "name": index_name,
-                        "fields": list(index.fields),
+                        "fields": _extract_index_keys(
+                            index,
+                            model_cls,
+                            {field["name"]: field["column_type"] for field in fields},
+                        ),
                         "unique": index.unique,
                         **(
                             {"nulls_not_distinct": True}
@@ -239,7 +365,13 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
         # Field-level indexes: Field(db_index=True) on any column, FK included.
         # Skipped for unique columns — the UNIQUE constraint already creates
         # an index, an extra plain one is redundant.
-        declared_column_sets = {frozenset(index["fields"]) for index in indexes}
+        # Only indexes made of bare db column names count: an expression or
+        # operator-class key is a different index than a plain one on the column.
+        declared_column_sets = {
+            frozenset(index["fields"])
+            for index in indexes
+            if all(isinstance(key, str) for key in index["fields"])
+        }
         for field_name, field_meta in meta.field_metadata.items():
             if isinstance(field_meta.python_type, type) and issubclass(
                 field_meta.python_type, Model
@@ -314,10 +446,14 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
             "comment": meta.comment,
         }
 
-    return {
+    snapshot = {
         "version": 1,
         "tables": tables,
     }
+    # Rust owns the cross-checks (index columns exist, index names are unique
+    # schema-wide and after PostgreSQL's 63-byte truncation).
+    migration_validate_schema(json.dumps(snapshot))
+    return snapshot
 
 
 __all__ = ["extract_current_schema"]

@@ -62,8 +62,8 @@ use thiserror::Error;
 pub mod migration;
 
 pub use migration::{
-    CheckDef, EnumFieldRef, FieldDef, ForeignKeyDef, IndexDef, MigrateError, MigrationOp, Snapshot,
-    TableDef,
+    unique_constraint_name, CheckDef, EnumFieldRef, FieldDef, ForeignKeyDef, IndexDef, IndexKey,
+    MigrateError, MigrationOp, Snapshot, TableDef,
 };
 
 /// Errors that can occur during IR serialization, deserialization, or validation.
@@ -225,7 +225,7 @@ where
 ///
 /// Shared by F-expressions in UPDATE/INSERT values (wire-wrapped as
 /// `{"__expr__": ...}`) and by SELECT annotations. Internally tagged by `type`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScalarExpr {
     /// Column reference.

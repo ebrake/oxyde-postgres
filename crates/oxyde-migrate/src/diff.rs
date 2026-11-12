@@ -218,9 +218,13 @@ fn existing_scalar_enum_fields(
 }
 
 fn index_covers_columns(index: &IndexDef, columns: &[String]) -> bool {
+    // Expression keys end the usable prefix, so an index
+    // like (lower(email)) never stands in for an index on the email column.
     !columns.is_empty()
-        && index.fields.len() >= columns.len()
-        && index.fields[..columns.len()] == *columns
+        && index
+            .leading_columns()
+            .take(columns.len())
+            .eq(columns.iter().map(String::as_str))
 }
 
 fn index_supports_fk(
@@ -276,7 +280,7 @@ fn add_column_drop_dependencies(
                 table: index_table,
                 index_def: Some(index),
                 ..
-            } if index_table == table && index.fields.iter().any(|name| name == column) => {
+            } if index_table == table && index.references_column(column) => {
                 add_dependency(prerequisites, before, after);
             }
             MigrationOp::DropCheck {
@@ -357,9 +361,7 @@ fn order_generated_operations(operations: Vec<MigrationOp>) -> Result<Vec<Migrat
                         _ => {
                             if let Some((column_table, column)) = added_or_altered_column(candidate)
                             {
-                                if column_table == table
-                                    && index.fields.iter().any(|name| name == column)
-                                {
+                                if column_table == table && index.references_column(column) {
                                     add_dependency(&mut prerequisites, before, after);
                                 }
                             }
@@ -456,15 +458,25 @@ fn order_generated_operations(operations: Vec<MigrationOp>) -> Result<Vec<Migrat
                 ..
             } => {
                 for (before, candidate) in operations.iter().enumerate() {
-                    if let MigrationOp::DropForeignKey {
-                        table: fk_table,
-                        fk_def: Some(fk),
-                        ..
-                    } = candidate
-                    {
-                        if index_supports_fk(table, index, fk_table, fk) {
+                    match candidate {
+                        MigrationOp::DropForeignKey {
+                            table: fk_table,
+                            fk_def: Some(fk),
+                            ..
+                        } if index_supports_fk(table, index, fk_table, fk) => {
                             add_dependency(&mut prerequisites, before, after);
                         }
+                        MigrationOp::DropTable {
+                            table: Some(child), ..
+                        } if child.name != *table
+                            && child
+                                .foreign_keys
+                                .iter()
+                                .any(|fk| index_supports_fk(table, index, &child.name, fk)) =>
+                        {
+                            add_dependency(&mut prerequisites, before, after);
+                        }
+                        _ => {}
                     }
                 }
             }

@@ -466,7 +466,7 @@ def generate_migration_file(
                 )
             else:
                 downgrade_lines.append(
-                    f"    # TODO: Reverse drop_index for {op['table']}.{op['index']}"
+                    f"    # TODO: Reverse drop_index for {op['table']}.{op['name']}"
                 )
         elif op_type == "add_foreign_key":
             downgrade_lines.append(

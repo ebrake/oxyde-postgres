@@ -7,13 +7,16 @@
 
 use sea_query::{
     Alias, ColumnDef as SeaColumnDef, Expr, ForeignKey as SeaForeignKey,
-    ForeignKeyAction as SeaFkAction, Index as SeaIndex, IndexType, IntoIden, PostgresQueryBuilder,
-    Table as SeaTable,
+    ForeignKeyAction as SeaFkAction, Index as SeaIndex, IndexColumn, IndexType, IntoIden,
+    PostgresQueryBuilder, Table as SeaTable,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::utils::{compile_scalar, ColumnTypes, ExprTypes};
 use crate::Dialect;
-use oxyde_codec::{FieldDef, ForeignKeyDef, IndexDef, MigrateError, MigrationOp};
+use oxyde_codec::{
+    unique_constraint_name, FieldDef, ForeignKeyDef, IndexDef, IndexKey, MigrateError, MigrationOp,
+};
 
 type Result<T> = std::result::Result<T, MigrateError>;
 
@@ -129,6 +132,36 @@ fn build_fk_stmt(table: &str, fk: &ForeignKeyDef) -> sea_query::ForeignKeyCreate
     stmt
 }
 
+/// One index key as a sea-query index column.
+///
+/// Array column types are persisted on expression keys so array literals use
+/// PostgreSQL arrays. Other literals are typed by PostgreSQL from context.
+/// Schema statements are built into a `String`, which inlines every value:
+/// CREATE INDEX never carries `$n` placeholders.
+fn index_column(key: &IndexKey) -> Result<IndexColumn> {
+    let column = match key {
+        IndexKey::Column { name, .. } => IndexColumn::from(Alias::new(name)),
+        IndexKey::Expr {
+            expr, column_types, ..
+        } => {
+            // Keys keep their types ordered; expression compilation takes a
+            // plain map. Schema rendering is not a hot path.
+            let types: ColumnTypes = column_types
+                .iter()
+                .map(|(name, spec)| (name.clone(), spec.clone()))
+                .collect();
+            let compiled = compile_scalar(expr, None, ExprTypes::from(Some(&types))).map_err(
+                |e| MigrateError::MigrationError(format!("invalid index expression: {e}")),
+            )?;
+            IndexColumn::from(compiled)
+        }
+    };
+    Ok(match key.opclass() {
+        Some(opclass) => column.with_operator_class(Alias::new(opclass)),
+        None => column,
+    })
+}
+
 /// Build CREATE INDEX SQL for an index on a table.
 fn build_create_index(table: &str, index: &IndexDef, dialect: Dialect) -> Result<String> {
     if index.nulls_not_distinct && !index.unique {
@@ -146,8 +179,8 @@ fn build_create_index(table: &str, index: &IndexDef, dialect: Dialect) -> Result
         stmt.nulls_not_distinct();
     }
 
-    for field in &index.fields {
-        stmt.col(Alias::new(field));
+    for key in &index.fields {
+        stmt.col(index_column(key)?);
     }
 
     // Index method (USING btree/hash/gin/gist) — Postgres only
@@ -348,18 +381,20 @@ impl MigrationOpExt for MigrationOp {
                                 && new_field.unique
                                 && old_field.nulls_not_distinct != new_field.nulls_not_distinct)
                         {
+                            // Named the way PostgreSQL names an inline UNIQUE,
+                            // so this finds what CREATE TABLE made (they
+                            // differ once the name needs shortening).
+                            let constraint = unique_constraint_name(table, &new_field.name);
                             if old_field.unique {
                                 stmts.push(format!(
-                                    "ALTER TABLE \"{}\" DROP CONSTRAINT \"{}_{}_key\"",
-                                    table, table, new_field.name
+                                    "ALTER TABLE \"{table}\" DROP CONSTRAINT \"{constraint}\""
                                 ));
                             }
                             if new_field.unique {
                                 stmts.push(format!(
-                                    "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}_{}_key\" {} (\"{}\")",
+                                    "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}\" {} (\"{}\")",
                                     table,
-                                    table,
-                                    new_field.name,
+                                    constraint,
                                     unique_clause(new_field),
                                     new_field.name
                                 ));

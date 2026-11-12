@@ -35,7 +35,8 @@ Functions Exported:
         render_sql, render_sql_debug, explain_query
 
     Migrations:
-        SchemaReplay, migration_compute_diff, migration_to_sql
+        SchemaReplay, migration_compute_diff, migration_to_sql,
+        migration_validate_schema
 
     Validation:
         register_validator (no-op, not implemented in Rust)
@@ -81,6 +82,7 @@ _FUNCTION_REGISTRY: list[tuple[str, str, bool, bool]] = [
     ("SchemaReplay", "SchemaReplay", False, False),
     ("migration_compute_diff", "migration_compute_diff", False, False),
     ("migration_to_sql", "migration_to_sql", False, False),
+    ("migration_validate_schema", "migration_validate_schema", False, False),
     # Validation (no-op - not implemented in Rust, kept for compatibility)
     ("register_validator", "register_validator", False, True),
 ]
@@ -179,6 +181,7 @@ render_sql_debug = _exports["render_sql_debug"]
 explain_query = _exports["explain_query"]
 migration_compute_diff = _exports["migration_compute_diff"]
 migration_to_sql = _exports["migration_to_sql"]
+migration_validate_schema = _exports["migration_validate_schema"]
 SchemaReplay = _exports["SchemaReplay"]
 
 # ── Core exception classes ────────────────────────────────────────────────
@@ -235,6 +238,7 @@ __all__ = [
     "explain_query",
     "migration_compute_diff",
     "migration_to_sql",
+    "migration_validate_schema",
     "SchemaReplay",
     "DatabaseError",
     "IntegrityError",

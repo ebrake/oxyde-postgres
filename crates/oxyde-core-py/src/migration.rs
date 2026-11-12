@@ -28,6 +28,17 @@ pub(crate) fn migration_compute_diff(old_json: &str, new_json: &str) -> PyResult
         .map_err(|e| PyErr::new::<PyValueError, _>(format!("Failed to serialize operations: {e}")))
 }
 
+/// Validate a snapshot extracted from models (see
+/// `Snapshot::validate_model_schema`). Raises `ValueError` on the first problem.
+#[pyfunction]
+pub(crate) fn migration_validate_schema(snapshot_json: &str) -> PyResult<()> {
+    use oxyde_migrate::Snapshot;
+
+    Snapshot::from_json(snapshot_json)
+        .and_then(|snapshot| snapshot.validate_model_schema())
+        .map_err(|e| PyErr::new::<PyValueError, _>(format!("{e}")))
+}
+
 /// Convert migration operations to SQL statements
 ///
 /// Operations are rendered in the supplied order. Callers are responsible for

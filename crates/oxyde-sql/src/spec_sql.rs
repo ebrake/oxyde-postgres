@@ -113,6 +113,68 @@ mod tests {
         }
     }
 
+    /// `FieldDef::creates_sequence` (used to predict the relation names
+    /// `CREATE TABLE` takes) must agree with what this resolver renders.
+    #[test]
+    fn creates_sequence_matches_the_rendered_type() {
+        use oxyde_codec::FieldDef;
+        use ColumnTypeSpec as S;
+
+        let specs = [
+            S::BigInteger,
+            spec_string(None),
+            S::Uuid,
+            S::Text,
+            S::Enum {
+                name: "status".into(),
+                values: vec![],
+            },
+        ];
+        let db_types = [
+            None,
+            Some("INTEGER"),
+            Some("serial"),
+            Some("SERIAL"),
+            Some("BigSerial"),
+            Some("SMALLSERIAL"),
+            Some("serial8"),
+            Some("  bigserial "),
+            Some("BIGINT"),
+            Some("TEXT"),
+        ];
+        for spec in &specs {
+            for db_type in db_types {
+                for primary_key in [false, true] {
+                    let field = FieldDef {
+                        name: "id".into(),
+                        column_type: spec.clone(),
+                        db_type: db_type.map(str::to_string),
+                        nullable: false,
+                        primary_key,
+                        unique: false,
+                        nulls_not_distinct: false,
+                        default: None,
+                        auto_increment: false,
+                        max_length: None,
+                        max_digits: None,
+                        decimal_places: None,
+                    };
+                    let rendered = resolve_spec_type(
+                        &field.column_type,
+                        field.db_type.as_deref(),
+                        Dialect::Postgres,
+                        field.primary_key,
+                    );
+                    assert_eq!(
+                        field.creates_sequence(),
+                        rendered.to_ascii_uppercase().contains("SERIAL"),
+                        "spec={spec:?} db_type={db_type:?} pk={primary_key} rendered={rendered:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn pk_str_and_uuid_do_not_become_serial() {
         assert_eq!(

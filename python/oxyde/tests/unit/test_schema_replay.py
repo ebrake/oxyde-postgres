@@ -136,6 +136,41 @@ def test_generated_sequences(seed):
     assert_migration_parity(_generated_migration(seed))
 
 
+def test_drop_column_takes_its_indexes_with_it(tmp_path):
+    """A migration that drops only the column replays like PostgreSQL runs it.
+
+    PostgreSQL drops every index that uses a dropped column. This is outside
+    the differential corpus on purpose: the frozen 0.2.2 reference keeps those
+    indexes, and generated migrations always drop them first.
+    """
+    from oxyde.migrations.replay import replay_migrations
+
+    (tmp_path / "0001_create.py").write_text(
+        """def upgrade(ctx):
+    ctx.create_table("users", [
+        {"name": "id", "column_type": {"kind": "big_integer"}, "primary_key": True, "nullable": False, "unique": False},
+        {"name": "email", "column_type": {"kind": "text"}, "primary_key": False, "nullable": True, "unique": False},
+    ])
+    ctx.create_index("users", {"name": "ix_email", "fields": ["email"], "unique": False})
+    ctx.create_index("users", {"name": "ix_id_email", "fields": ["id", "email"], "unique": False})
+    ctx.create_index("users", {"name": "ix_lower", "unique": False, "fields": [
+        {"expr": {"type": "func", "name": "lower", "args": [{"type": "column", "name": "email"}]}},
+    ]})
+    ctx.create_index("users", {"name": "ix_id", "fields": ["id"], "unique": False})
+"""
+    )
+    (tmp_path / "0002_drop_email.py").write_text(
+        """depends_on = "0001_create"
+def upgrade(ctx):
+    ctx.drop_column("users", "email")
+"""
+    )
+
+    users = replay_migrations(str(tmp_path))["tables"]["users"]
+    assert [field["name"] for field in users["fields"]] == ["id"]
+    assert [index["name"] for index in users["indexes"]] == ["ix_id"]
+
+
 @pytest.mark.parametrize("type_key", ["type", "python_type"])
 def test_legacy_migration_files(tmp_path, type_key):
     sources = [

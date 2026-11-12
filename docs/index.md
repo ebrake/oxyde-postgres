@@ -1,6 +1,6 @@
 # Oxyde for PostgreSQL
 
-PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and **Python 3.13+**. Version **0.3.1** adds scalar expressions to annotations and updates; see the [expression guide](guide/expressions.md) and [release notes](changelog.md).
+PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and **Python 3.13+**. Version **0.3.2** adds expression and operator-class indexes (see [Models](guide/models.md#expression-indexes)); 0.3.1 added scalar expressions to annotations and updates, see the [expression guide](guide/expressions.md) and [release notes](changelog.md).
 
 
 <p align="center">

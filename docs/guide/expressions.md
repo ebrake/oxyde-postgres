@@ -84,6 +84,18 @@ await Item.objects.query().update(qty=Greatest(Coalesce("qty", F("default_qty"))
 
 They also work in `annotate()`; see [Aggregation](aggregation.md).
 
+## Lower and Upper
+
+`Lower(x)` and `Upper(x)` take exactly one argument (a `str` is a column) and
+compile to `LOWER(...)` / `UPPER(...)`. They work in `annotate()` and `update()`,
+and as fields of an expression [index](models.md#expression-indexes):
+
+```python
+from oxyde import Lower
+
+rows = await User.objects.annotate(email_lc=Lower("email")).values("id", "email_lc").all()
+```
+
 ## Use with annotate()
 
 Compute a value for each row and select it with `.values()`:

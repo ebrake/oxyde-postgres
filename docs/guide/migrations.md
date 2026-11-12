@@ -286,6 +286,12 @@ ctx.add_column("users", {
 ctx.drop_column("users", "old_field")
 ```
 
+PostgreSQL drops every index that uses the column, and the table's own foreign
+keys on it, together with the column, and the migration state follows. You do not
+need to drop those indexes first. Indexes that only reach the column through a
+`where` predicate or a `RawSQL` fragment, and CHECK constraints that use it,
+cannot be seen from the migration state: drop them in the same migration.
+
 ### Rename Column
 
 ```python
@@ -316,6 +322,28 @@ ctx.create_index("users", {
     "unique": True,
 })
 ```
+
+Each entry of `fields` is a column name, or an object for an expression or an
+operator class:
+
+```python
+ctx.create_index("users", {
+    "name": "ix_users_email_lower",
+    "fields": [
+        "tenant_id",                                            # plain column
+        {"column": "name", "opclass": "text_pattern_ops"},      # operator class
+        {"expr": {"type": "func", "name": "lower",              # expression
+                  "args": [{"type": "column", "name": "email"}]},
+         "opclass": "gin_trgm_ops"},                            # opclass optional
+    ],
+    "unique": False,
+})
+```
+
+An object sets exactly one of `column` and `expr`, plus an optional `opclass`.
+An expression may only call `coalesce`, `greatest`, `lower` and `upper`
+(PostgreSQL requires index expressions to be IMMUTABLE; `concat_ws` is not).
+Migrations written by `makemigrations` already have this shape.
 
 ### Drop Index
 

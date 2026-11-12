@@ -13,8 +13,8 @@ pub use replay::{apply_operation, resolve_operation};
 
 // Contract types re-exported for convenience (canonical home: oxyde-codec).
 pub use oxyde_codec::{
-    CheckDef, EnumFieldRef, FieldDef, ForeignKeyDef, IndexDef, MigrateError, MigrationOp, Snapshot,
-    TableDef,
+    CheckDef, EnumFieldRef, FieldDef, ForeignKeyDef, IndexDef, IndexKey, MigrateError, MigrationOp,
+    Snapshot, TableDef,
 };
 
 pub type Result<T> = std::result::Result<T, MigrateError>;

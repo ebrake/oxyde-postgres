@@ -523,6 +523,26 @@ mod tests {
     }
 
     #[test]
+    fn list_for_a_blob_column_keeps_the_string_fallback() {
+        // Query values are MessagePack: bytes arrive as Binary, never as a
+        // list of octets. A list bound to a bytea column is not reinterpreted.
+        let val = rmpv::Value::Array(vec![
+            rmpv::Value::Integer(1.into()),
+            rmpv::Value::Integer(2.into()),
+            rmpv::Value::Integer(3.into()),
+        ]);
+        assert!(matches!(
+            bind_value(&val, &ColumnTypeSpec::Blob),
+            Value::String(Some(_))
+        ));
+        let bytes = rmpv::Value::Binary(vec![1, 2, 3]);
+        assert!(matches!(
+            bind_value(&bytes, &ColumnTypeSpec::Blob),
+            Value::Bytes(Some(b)) if b == [1, 2, 3]
+        ));
+    }
+
+    #[test]
     fn map_without_json_spec_stringifies() {
         let val = rmpv::Value::Map(vec![(
             rmpv::Value::String("key".into()),

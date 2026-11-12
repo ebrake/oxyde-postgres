@@ -522,6 +522,63 @@ mod tests {
     }
 
     #[test]
+    fn test_select_annotation_lower_upper() {
+        let name = || serde_json::json!({"type": "column", "name": "name"});
+        let ir = QueryIR {
+            table: "posts".into(),
+            cols: Some(vec!["id".into()]),
+            annotations: Some(vec![
+                annotation(
+                    "lo",
+                    serde_json::json!({"type": "func", "name": "lower", "args": [name()]}),
+                ),
+                annotation(
+                    "up",
+                    serde_json::json!({"type": "func", "name": "upper", "args": [
+                        {"type": "func", "name": "coalesce", "args": [
+                            name(), {"type": "value", "value": "x"}]}]}),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            r#"SELECT "posts"."id" AS "id", LOWER("name") AS "lo", UPPER(COALESCE("name", $1)) AS "up" FROM "posts""#
+        );
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_lower_upper_take_exactly_one_argument() {
+        for (function, args) in [
+            ("lower", serde_json::json!([])),
+            (
+                "upper",
+                serde_json::json!([
+                    {"type": "column", "name": "a"},
+                    {"type": "column", "name": "b"},
+                ]),
+            ),
+        ] {
+            let ir = QueryIR {
+                table: "posts".into(),
+                cols: Some(vec!["id".into()]),
+                annotations: Some(vec![annotation(
+                    "x",
+                    serde_json::json!({"type": "func", "name": function, "args": args}),
+                )]),
+                ..Default::default()
+            };
+            let error = build_sql(&ir, Dialect::Postgres).unwrap_err().to_string();
+            assert!(
+                error.contains("exactly one argument") || error.contains("at least one argument"),
+                "{function}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_select_annotation_only_with_empty_cols() {
         let ir = QueryIR {
             table: "posts".into(),

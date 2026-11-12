@@ -182,6 +182,84 @@ Index(
 keeps PostgreSQL's default behavior. Changing this option generates a migration
 that recreates the index.
 
+### Expression Indexes
+
+A field of `Index` can be an expression instead of a column name, for example
+for case-insensitive lookups. An index with an expression needs an explicit
+`name`. PostgreSQL truncates identifiers to 63 bytes; index names that become
+equal after truncation, or that repeat across tables, are rejected by
+`makemigrations`. So are names PostgreSQL has already used: a table name, and
+the relations `CREATE TABLE` creates itself (`<table>_pkey` for a primary key,
+`<table>_<column>_key` for a `unique` column, `<table>_<column>_seq` for a
+serial column such as an integer primary key).
+
+```python
+from oxyde import Coalesce, Index, Lower
+
+class User(Model):
+    tenant_id: int
+    email: str
+    qty: int = 0
+
+    class Meta:
+        is_table = True
+        indexes = [
+            Index((Lower("email"),), unique=True, name="ux_user_email_lower"),
+            Index(("tenant_id", Lower("email")), name="ix_user_tenant_email"),
+            Index((Coalesce("qty", 1),), name="ix_user_qty_or_one"),
+        ]
+```
+
+Things to know:
+
+- `Lower`, `Upper`, `Coalesce`, `Greatest`, arithmetic on `F(...)`, `Value(...)`
+  and `RawSQL(...)` are accepted. `Concat` is rejected: PostgreSQL marks
+  `CONCAT_WS` as STABLE, and index expressions must be IMMUTABLE. The core
+  allows only `coalesce`, `greatest`, `lower` and `upper` as functions in an
+  index key.
+- Names inside expressions are field names and are mapped to their `db_column`;
+  a name that is not a field passes through unchanged.
+- Literals are written inline into the `CREATE INDEX` statement and typed by
+  PostgreSQL from the surrounding expression. Write the same expression in a
+  query for the planner to use the index.
+- `RawSQL` is sent verbatim with database column names. Migration ordering cannot
+  see the columns it uses, so dropping such a column does not automatically
+  drop the index first.
+- A bare `F("col")` field is the same as `"col"`.
+- Changing an expression recreates the index (drop, then create).
+- A malformed key in a hand-written migration fails with a specific message,
+  such as "index key must set exactly one of `column` and `expr`, got both", or
+  an unknown-field error. The valid shapes are in
+  [Migrations](migrations.md#create-index).
+- The list of values in an enum column is not part of an index key. Adding a
+  member to the enum does not recreate the index.
+
+### Operator Classes
+
+`opclasses` gives one operator class per field (`None` keeps the default):
+
+```python
+Index(("name",), opclasses=("text_pattern_ops",), name="ix_user_name_pattern")
+Index(
+    (Lower("name"),),
+    method="gin",
+    opclasses=("gin_trgm_ops",),
+    name="ix_user_name_trgm",
+)
+```
+
+The class name is written unquoted, so it must be an identifier, optionally
+schema-qualified (`public.gin_trgm_ops`). Classes that come from an extension need
+the extension first. Create it in an earlier migration:
+
+```python
+def upgrade(ctx):
+    ctx.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+```
+
+An index with an operator class is a different index from a plain one on the same
+column, so `Field(db_index=True)` and an `Index(...)` with `opclasses` can coexist.
+
 ### Index Methods
 
 PostgreSQL supports different index methods:
@@ -189,6 +267,8 @@ PostgreSQL supports different index methods:
 ```python
 Index(("data",), method="gin")   # GIN index for JSONB
 Index(("name",), method="hash")  # Hash index for equality
+Index(("point",), method="spgist")
+Index(("created_at",), method="brin")  # Block-range index for large, ordered tables
 ```
 
 ## Constraints

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 
@@ -626,6 +627,141 @@ class TestIndexPipeline:
         assert any(
             "CREATE" in s.upper() and "idx_users_email" in s for s in down_sql
         )
+
+
+class TestExpressionIndexPipeline:
+    """Expression / operator-class indexes through the full pipeline."""
+
+    @staticmethod
+    def _models():
+        from oxyde import Coalesce, Index, Lower
+
+        class AccountV1(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str = Field(db_column="email_address")
+            name: str
+            price: Decimal = Decimal("0")
+
+            class Meta:
+                is_table = True
+                table_name = "accounts"
+
+        class AccountV2(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            email: str = Field(db_column="email_address")
+            name: str
+            price: Decimal = Decimal("0")
+
+            class Meta:
+                is_table = True
+                table_name = "accounts"
+                indexes = [
+                    Index((Lower("email"),), unique=True, name="ux_accounts_email_lower"),
+                    Index(
+                        ("name",),
+                        opclasses=("text_pattern_ops",),
+                        name="ix_accounts_name_pattern",
+                    ),
+                    Index(
+                        (Coalesce("price", Decimal("1.50")),),
+                        name="ix_accounts_price_default",
+                    ),
+                ]
+
+        return AccountV1, AccountV2
+
+    def test_create_renders_expressions_and_survives_replay(self, tmp_path):
+        v1, v2 = self._models()
+        ops, up_sql, down_sql = _run_pipeline(
+            [v1], [v2], "postgres", tmp_path, "add_expression_indexes"
+        )
+
+        assert [op["type"] for op in ops] == ["create_index"] * 3
+        sql = "\n".join(up_sql)
+        # field name -> db_column mapping happens at extraction time
+        assert 'CREATE UNIQUE INDEX "ux_accounts_email_lower" ON "accounts" ((LOWER("email_address")))' in sql
+        assert '("name" text_pattern_ops)' in sql
+        assert 'COALESCE("price", 1.50)' in sql
+        assert "$" not in sql
+        # The migration file contains plain literals, so it loads and the
+        # downgrade drops every index it created.
+        assert sum("DROP INDEX" in s.upper() for s in down_sql) == 3
+
+        # Replaying the written migration on top of the old schema reproduces
+        # the model snapshot: a fresh diff is empty.
+        module = load_migration_module(next(tmp_path.glob("[0-9]*.py")))
+        replayed = assert_migration_parity(module, _snapshot_from_models([v1], "postgres"))
+        current = _snapshot_from_models([v2], "postgres")
+        assert json.loads(
+            migration_compute_diff(json.dumps(replayed), json.dumps(current))
+        ) == []
+
+    def test_changing_the_expression_recreates_the_index(self, tmp_path):
+        from oxyde import Index, Lower, Upper
+
+        def make(func):
+            class Account(Model):
+                id: int | None = Field(default=None, db_pk=True)
+                email: str
+
+                class Meta:
+                    is_table = True
+                    table_name = "accounts"
+                    indexes = [Index((func("email"),), name="ix_accounts_email_case")]
+
+            return Account
+
+        ops, up_sql, down_sql = _run_pipeline(
+            [make(Lower)], [make(Upper)], "postgres", tmp_path, "swap_case"
+        )
+        assert [op["type"] for op in ops] == ["drop_index", "create_index"]
+        assert "UPPER" in up_sql[-1]
+        # The downgrade recreates the old definition from the stored index_def.
+        assert "LOWER" in down_sql[-1]
+
+    def test_dropping_an_expression_index_is_reversible(self, tmp_path):
+        v1, v2 = self._models()
+        ops, up_sql, down_sql = _run_pipeline(
+            [v2], [v1], "postgres", tmp_path, "drop_expression_indexes"
+        )
+        assert [op["type"] for op in ops] == ["drop_index"] * 3
+        recreated = "\n".join(down_sql)
+        assert 'LOWER("email_address")' in recreated
+        assert "text_pattern_ops" in recreated
+
+    def test_invalid_hand_written_key_fails_loudly(self):
+        state = SchemaState()
+        state.apply_operation(
+            {
+                "type": "create_table",
+                "table": {
+                    "name": "t",
+                    "fields": [],
+                    "indexes": [],
+                    "foreign_keys": [],
+                    "checks": [],
+                },
+            }
+        )
+        with pytest.raises(Exception, match="operator class"):
+            state.apply_operation(
+                {
+                    "type": "create_index",
+                    "table": "t",
+                    "index": {
+                        "name": "ix",
+                        "fields": [{"column": "a", "opclass": "x; DROP TABLE t"}],
+                        "unique": False,
+                        "method": None,
+                    },
+                }
+            )
+
+    def test_generator_tolerates_drop_index_without_definition(self, tmp_path):
+        ops = [{"type": "drop_index", "table": "accounts", "name": "ix_old"}]
+        path = generate_migration_file(ops, migrations_dir=tmp_path, name="drop_old")
+        text = Path(path).read_text()
+        assert "TODO: Reverse drop_index for accounts.ix_old" in text
 
 
 class TestCyclicForeignKeys:

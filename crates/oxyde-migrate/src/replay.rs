@@ -115,6 +115,57 @@ fn rewrite_enum_fields(state: &mut Snapshot, name: &str, values: &[String], appe
     }
 }
 
+/// Follow a column rename through everything PostgreSQL rewrites with it:
+/// the table's index keys (including column references inside expression
+/// keys), its foreign-key columns, and the `ref_columns` of foreign keys that
+/// point at it. `where` clauses, CHECK expressions and raw expression
+/// fragments are opaque SQL and stay as written.
+fn rename_column_references(state: &mut Snapshot, table: &str, old: &str, new: &str) {
+    let rename_in = |columns: &mut [String]| {
+        for column in columns {
+            if column == old {
+                new.clone_into(column);
+            }
+        }
+    };
+
+    if let Some(def) = state.tables.get_mut(table) {
+        for index in &mut def.indexes {
+            index.rename_column(old, new);
+        }
+        for fk in &mut def.foreign_keys {
+            rename_in(&mut fk.columns);
+        }
+    }
+    for def in state.tables.values_mut() {
+        for fk in &mut def.foreign_keys {
+            if fk.ref_table == table {
+                rename_in(&mut fk.ref_columns);
+            }
+        }
+    }
+}
+
+/// Follow a dropped column through what PostgreSQL drops with it: every index
+/// of the table that uses the column (a plain key, a column inside an
+/// expression key, any key of a composite index, whole index either way) and
+/// the table's own foreign keys on it.
+///
+/// A foreign key in *another* table that points at the column is left alone:
+/// migrations render `DROP COLUMN` without `CASCADE`, so PostgreSQL refuses
+/// that drop and the migration never gets this far.
+///
+/// Dependents inside opaque SQL are invisible here: `where` predicates,
+/// `ScalarExpr::Raw` fragments and CHECK expressions. PostgreSQL also drops
+/// (or rejects) those, but replay cannot tell which column they use.
+fn drop_column_dependents(state: &mut Snapshot, table: &str, column: &str) {
+    if let Some(def) = state.tables.get_mut(table) {
+        def.indexes.retain(|index| !index.references_column(column));
+        def.foreign_keys
+            .retain(|fk| !fk.columns.iter().any(|used| used == column));
+    }
+}
+
 /// Apply one operation. Missing tables/columns are ignored, matching Python replay.
 /// Enum declarations and drops are schema-neutral; enum value edits visit nested arrays.
 pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
@@ -138,6 +189,14 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
             if let Some(mut table) = state.tables.remove(old_name) {
                 table.name.clone_from(new_name);
                 state.tables.insert(new_name.clone(), table);
+                // PostgreSQL repoints foreign keys at the renamed table.
+                for table in state.tables.values_mut() {
+                    for fk in &mut table.foreign_keys {
+                        if fk.ref_table == *old_name {
+                            fk.ref_table.clone_from(new_name);
+                        }
+                    }
+                }
             }
         }
         MigrationOp::AddColumn { table, field } => {
@@ -146,8 +205,13 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
             }
         }
         MigrationOp::DropColumn { table, field, .. } => {
-            if let Some(table) = state.tables.get_mut(table) {
-                table.fields.retain(|f| f.name != *field);
+            let dropped = state.tables.get_mut(table).is_some_and(|def| {
+                let before = def.fields.len();
+                def.fields.retain(|f| f.name != *field);
+                def.fields.len() != before
+            });
+            if dropped {
+                drop_column_dependents(state, table, field);
             }
         }
         MigrationOp::RenameColumn {
@@ -156,12 +220,14 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
             new_name,
             ..
         } => {
-            if let Some(field) = state
+            let renamed = state
                 .tables
                 .get_mut(table)
                 .and_then(|t| t.fields.iter_mut().find(|f| f.name == *old_name))
-            {
-                field.name.clone_from(new_name);
+                .map(|field| field.name.clone_from(new_name))
+                .is_some();
+            if renamed {
+                rename_column_references(state, table, old_name, new_name);
             }
         }
         MigrationOp::AlterColumn {
@@ -246,6 +312,7 @@ pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxyde_codec::IndexKey;
     use serde_json::json;
 
     fn apply(state: &mut Snapshot, op: Value) {
@@ -395,5 +462,166 @@ mod tests {
         let invalid = serde_json::from_value(json!({"type": "alter_column", "table": "t", "column": "x", "changes": {"nullable": "invalid"}})).unwrap();
         assert!(apply_operation(&mut state, &invalid).is_err());
         assert_eq!(state.to_json().unwrap(), before);
+    }
+
+    fn replay_state() -> Snapshot {
+        let field = |name: &str| {
+            json!({"name": name, "nullable": true, "primary_key": false,
+                   "unique": false, "column_type": {"kind": "text"}})
+        };
+        let mut state = Snapshot::new();
+        apply(
+            &mut state,
+            json!({"type": "create_table", "table": {
+                "name": "users",
+                "fields": [field("id"), field("email")],
+                "indexes": [
+                    {"name": "users_email_idx", "fields": ["email"], "unique": false, "method": null},
+                    {"name": "users_email_lower", "unique": false, "method": null, "fields": [
+                        {"expr": {"type": "func", "name": "lower", "args": [
+                            {"type": "column", "name": "email"}]}, "opclass": "text_pattern_ops"},
+                        {"column": "email", "opclass": "text_pattern_ops"},
+                    ]},
+                ],
+                "foreign_keys": [
+                    {"name": "fk_users_email", "columns": ["email"], "ref_table": "users",
+                     "ref_columns": ["email"], "on_delete": null, "on_update": null},
+                ],
+            }}),
+        );
+        apply(
+            &mut state,
+            json!({"type": "create_table", "table": {
+                "name": "posts",
+                "fields": [field("id"), field("author_email")],
+                "indexes": [],
+                "foreign_keys": [
+                    {"name": "fk_posts_author", "columns": ["author_email"], "ref_table": "users",
+                     "ref_columns": ["email"], "on_delete": null, "on_update": null},
+                ],
+            }}),
+        );
+        state
+    }
+
+    #[test]
+    fn rename_column_follows_index_keys_and_foreign_keys() {
+        let mut state = replay_state();
+        apply(
+            &mut state,
+            json!({"type": "rename_column", "table": "users",
+                   "old_name": "email", "new_name": "mail"}),
+        );
+
+        let users = &state.tables["users"];
+        assert_eq!(users.fields[1].name, "mail");
+        assert_eq!(users.indexes[0].fields, vec![IndexKey::from("mail")]);
+        assert!(users.indexes[1].references_column("mail"));
+        assert!(!users.indexes[1].references_column("email"));
+        assert_eq!(
+            users.indexes[1].fields[1].opclass(),
+            Some("text_pattern_ops")
+        );
+        assert_eq!(users.foreign_keys[0].columns, vec!["mail"]);
+        assert_eq!(users.foreign_keys[0].ref_columns, vec!["mail"]);
+        // The referencing table keeps its own column, but its ref_columns follow.
+        let posts = &state.tables["posts"];
+        assert_eq!(posts.foreign_keys[0].columns, vec!["author_email"]);
+        assert_eq!(posts.foreign_keys[0].ref_columns, vec!["mail"]);
+    }
+
+    fn index_names(state: &Snapshot, table: &str) -> Vec<String> {
+        state.tables[table]
+            .indexes
+            .iter()
+            .map(|index| index.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn drop_column_removes_indexes_and_foreign_keys_that_use_it() {
+        let mut state = replay_state();
+        apply(
+            &mut state,
+            json!({"type": "create_index", "table": "users", "index": {
+                "name": "users_id_idx", "fields": ["id"], "unique": false, "method": null}}),
+        );
+        apply(
+            &mut state,
+            json!({"type": "create_index", "table": "users", "index": {
+                "name": "users_id_email_idx", "fields": ["id", "email"],
+                "unique": false, "method": null}}),
+        );
+
+        apply(
+            &mut state,
+            json!({"type": "drop_column", "table": "users", "field": "email"}),
+        );
+
+        let users = &state.tables["users"];
+        assert_eq!(users.fields.len(), 1);
+        // PostgreSQL drops every index that uses the column: a plain key, an
+        // expression key and a composite index alike. Unrelated ones stay.
+        assert_eq!(index_names(&state, "users"), vec!["users_id_idx"]);
+        assert_eq!(users.foreign_keys, Vec::new());
+        // A foreign key in another table that points at the column is not
+        // dropped with it: DROP COLUMN without CASCADE refuses to run.
+        assert_eq!(state.tables["posts"].foreign_keys[0].ref_columns, vec!["email"]);
+    }
+
+    #[test]
+    fn drop_of_a_missing_column_changes_nothing() {
+        let mut state = replay_state();
+        let before = state.clone();
+        apply(
+            &mut state,
+            json!({"type": "drop_column", "table": "users", "field": "nope"}),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn dropping_a_column_leaves_nothing_for_the_next_diff_to_drop() {
+        // A hand-written migration drops the column and not its indexes.
+        // PostgreSQL drops them with the column, so models without either
+        // must diff clean: no DropIndex that would fail at migrate time.
+        let before = replay_state();
+        let mut replayed = before.clone();
+        apply(
+            &mut replayed,
+            json!({"type": "drop_column", "table": "users", "field": "email"}),
+        );
+
+        let mut models = before;
+        let users = models.tables.get_mut("users").unwrap();
+        users.fields.retain(|field| field.name != "email");
+        users.indexes.clear();
+        users.foreign_keys.clear();
+
+        let ops = crate::compute_diff(&replayed, &models).unwrap();
+        assert!(ops.is_empty(), "{ops:?}");
+    }
+
+    #[test]
+    fn rename_of_a_missing_column_changes_nothing() {
+        let mut state = replay_state();
+        let before = state.clone();
+        apply(
+            &mut state,
+            json!({"type": "rename_column", "table": "users",
+                   "old_name": "nope", "new_name": "mail"}),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn rename_table_repoints_foreign_keys() {
+        let mut state = replay_state();
+        apply(
+            &mut state,
+            json!({"type": "rename_table", "old_name": "users", "new_name": "people"}),
+        );
+        assert_eq!(state.tables["posts"].foreign_keys[0].ref_table, "people");
+        assert_eq!(state.tables["people"].foreign_keys[0].ref_table, "people");
     }
 }

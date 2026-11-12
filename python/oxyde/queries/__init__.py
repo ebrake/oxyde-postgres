@@ -31,6 +31,7 @@ Aggregates:
     Count, Sum, Avg, Max, Min: SQL aggregate functions.
     Concat: String concatenation.
     Coalesce: NULL handling (COALESCE(a, b, c)).
+    Lower, Upper: case conversion (LOWER(a), UPPER(a)).
     RawSQL: Escape hatch for raw SQL expressions.
 
 Example:
@@ -50,7 +51,7 @@ Example:
 
 from .aggregates import Aggregate, Avg, Concat, Count, Max, Min, RawSQL, Sum
 from .base import SupportsExecute
-from .expressions import Coalesce, F, Greatest, Value
+from .expressions import Coalesce, F, Greatest, Lower, Upper, Value
 from .manager import QueryManager
 from .q import Q
 from .raw import execute_raw
@@ -72,6 +73,8 @@ __all__ = [
     "Concat",
     "Coalesce",
     "Greatest",
+    "Lower",
+    "Upper",
     "Value",
     "RawSQL",
     "execute_raw",

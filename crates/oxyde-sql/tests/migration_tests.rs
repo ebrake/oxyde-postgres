@@ -3,7 +3,8 @@
 //! Tests for public API: MigrationOpExt::to_sql(), compute_diff(), Snapshot.
 
 use oxyde_codec::{
-    CheckDef, ColumnTypeSpec, FieldDef, ForeignKeyDef, IndexDef, MigrationOp, Snapshot, TableDef,
+    CheckDef, ColumnTypeSpec, FieldDef, ForeignKeyDef, IndexDef, IndexKey, MigrationOp, ScalarExpr,
+    Snapshot, TableDef,
 };
 use oxyde_migrate::compute_diff;
 use oxyde_sql::{Dialect, Migration, MigrationOpExt};
@@ -727,6 +728,65 @@ fn test_postgres_alter_column_unique_constraint() {
         "Should drop constraint: {}",
         sql[0]
     );
+}
+
+#[test]
+fn alter_unique_uses_the_name_postgres_gives_an_inline_unique() {
+    // An inline `UNIQUE` is named by PostgreSQL's `makeObjectName`: it shortens
+    // the longer of table and column name and keeps the `_key` suffix. The
+    // ALTER path must use the same name, or its DROP CONSTRAINT misses the
+    // constraint CREATE TABLE made. (A plain cut at 63 bytes loses the suffix.)
+    let table = "a".repeat(60);
+    let expected = format!("\"{}_code_key\"", "a".repeat(54));
+    let plain = sample_field("code");
+    let unique = FieldDef {
+        unique: true,
+        ..sample_field("code")
+    };
+    let alter = |old: &FieldDef, new: &FieldDef| {
+        MigrationOp::AlterColumn {
+            column: None,
+            changes: None,
+            table: table.clone(),
+            old_field: Some(Box::new(old.clone())),
+            new_field: Some(Box::new(new.clone())),
+            table_fields: None,
+            table_indexes: None,
+            table_foreign_keys: None,
+            table_checks: None,
+        }
+        .to_sql(Dialect::Postgres)
+        .unwrap()
+    };
+
+    let added = alter(&plain, &unique);
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert!(
+        added[0].contains(&format!("ADD CONSTRAINT {expected} UNIQUE")),
+        "{added:?}"
+    );
+    let dropped = alter(&unique, &plain);
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert!(
+        dropped[0].ends_with(&format!("DROP CONSTRAINT {expected}")),
+        "{dropped:?}"
+    );
+
+    // Short names are untouched: existing migrations keep their constraint names.
+    let short = MigrationOp::AlterColumn {
+        column: None,
+        changes: None,
+        table: "users".into(),
+        old_field: Some(Box::new(unique.clone())),
+        new_field: Some(Box::new(plain)),
+        table_fields: None,
+        table_indexes: None,
+        table_foreign_keys: None,
+        table_checks: None,
+    }
+    .to_sql(Dialect::Postgres)
+    .unwrap();
+    assert!(short[0].ends_with("DROP CONSTRAINT \"users_code_key\""), "{short:?}");
 }
 
 #[test]
@@ -1603,4 +1663,856 @@ fn test_compute_diff_create_table_referencing_cyclic_subset() {
         vec!["orders"],
         "expected exactly one CreateTable(orders), got ops={ops:?}"
     );
+}
+
+// ── Expression and operator-class index keys ───────────────────────────────
+
+mod index_keys {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn col(name: &str) -> Value {
+        json!({"type": "column", "name": name})
+    }
+
+    #[allow(clippy::needless_pass_by_value)] // call-site ergonomics in test builders
+    fn lit(value: Value) -> Value {
+        json!({"type": "value", "value": value})
+    }
+
+    #[allow(clippy::needless_pass_by_value)] // call-site ergonomics in test builders
+    fn func(name: &str, args: Vec<Value>) -> Value {
+        json!({"type": "func", "name": name, "args": args})
+    }
+
+    fn key(value: Value) -> IndexKey {
+        serde_json::from_value(value).expect("valid index key")
+    }
+
+    fn key_error(value: Value) -> String {
+        serde_json::from_value::<IndexKey>(value)
+            .expect_err("index key must be rejected")
+            .to_string()
+    }
+
+    fn index_with(name: &str, fields: Vec<Value>) -> IndexDef {
+        IndexDef {
+            name: name.into(),
+            fields: fields.into_iter().map(key).collect(),
+            unique: false,
+            nulls_not_distinct: false,
+            method: None,
+            where_clause: None,
+        }
+    }
+
+    #[test]
+    fn plain_columns_keep_the_bare_string_wire_form() {
+        let index_json = json!({
+            "name": "ix", "fields": ["tenant_id", "email"], "unique": false, "method": null,
+        });
+        let index: IndexDef = serde_json::from_value(index_json.clone()).unwrap();
+        assert_eq!(
+            index.fields,
+            vec![IndexKey::from("tenant_id"), IndexKey::from("email")]
+        );
+        assert_eq!(serde_json::to_value(&index).unwrap(), index_json);
+    }
+
+    #[test]
+    fn equivalent_spellings_of_a_plain_column_normalize_to_a_bare_string() {
+        let expected = IndexKey::from("email");
+        for spelling in [
+            json!("email"),
+            json!({"column": "email"}),
+            json!({"expr": col("email")}),
+        ] {
+            let parsed = key(spelling);
+            assert_eq!(parsed, expected);
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), json!("email"));
+        }
+        // With an opclass, both object spellings normalize to the column form.
+        let with_opclass = json!({"column": "name", "opclass": "text_pattern_ops"});
+        assert_eq!(
+            key(json!({"expr": col("name"), "opclass": "text_pattern_ops"})),
+            key(with_opclass.clone())
+        );
+        assert_eq!(
+            serde_json::to_value(key(with_opclass.clone())).unwrap(),
+            with_opclass
+        );
+    }
+
+    #[test]
+    fn expression_and_opclass_keys_round_trip() {
+        for wire in [
+            json!({"column": "name", "opclass": "text_pattern_ops"}),
+            json!({"column": "name", "opclass": "public.text_pattern_ops"}),
+            json!({"expr": func("lower", vec![col("email")])}),
+            json!({
+                "expr": func("lower", vec![col("name")]),
+                "opclass": "gin_trgm_ops",
+            }),
+            json!({"expr": func("coalesce", vec![col("qty"), lit(json!(1))])}),
+            json!({"expr": {"type": "raw", "sql": "(data -> 'tags')"}}),
+        ] {
+            let parsed = key(wire.clone());
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+            assert_eq!(key(serde_json::to_value(&parsed).unwrap()), parsed);
+        }
+    }
+
+    #[test]
+    fn malformed_keys_are_rejected_when_read() {
+        let both = key_error(json!({"column": "a", "expr": col("a")}));
+        assert!(both.contains("exactly one"), "{both}");
+        let neither = key_error(json!({"opclass": "text_pattern_ops"}));
+        assert!(neither.contains("exactly one"), "{neither}");
+
+        for bad in [
+            "x; DROP TABLE users",
+            "a.b.c",
+            "",
+            ".x",
+            "x.",
+            "1abc",
+            "pg trgm",
+            "\"quoted\"",
+        ] {
+            let message = key_error(json!({"column": "name", "opclass": bad}));
+            assert!(message.contains("operator class"), "{bad:?}: {message}");
+        }
+
+        // concat_ws is STABLE in PostgreSQL, so it cannot back an index,
+        // however deeply it is nested.
+        let nested = func(
+            "coalesce",
+            vec![
+                func("concat_ws", vec![lit(json!(" ")), col("a")]),
+                lit(json!("")),
+            ],
+        );
+        let stable = key_error(json!({"expr": nested}));
+        assert!(
+            stable.contains("only coalesce, greatest, lower and upper"),
+            "{stable}"
+        );
+
+        // A modifier this core does not know must fail, not be dropped.
+        assert!(serde_json::from_value::<IndexKey>(json!({"column": "a", "desc": true})).is_err());
+        assert!(serde_json::from_value::<IndexKey>(json!(42)).is_err());
+    }
+
+    // ── Canonical wire form of expression keys ─────────────────────────────
+
+    fn enum_spec(values: &[&str]) -> Value {
+        json!({"kind": "enum", "name": "status", "values": values})
+    }
+
+    fn enum_array_spec(values: &[&str]) -> Value {
+        json!({"kind": "array", "item": enum_spec(values)})
+    }
+
+    /// An expression key over a `list[Status]` column, as Python writes it.
+    fn enum_array_key(values: &[&str]) -> Value {
+        json!({
+            "expr": func("coalesce", vec![
+                col("tags"),
+                json!({"type": "value", "value": [], "value_type": enum_array_spec(values)}),
+                json!({"type": "value", "value": "a", "value_type": enum_spec(values)}),
+            ]),
+            "column_types": {"tags": enum_array_spec(values)},
+        })
+    }
+
+    #[test]
+    fn enum_values_do_not_leak_into_expression_keys() {
+        assert_eq!(
+            key(enum_array_key(&["a"])),
+            key(enum_array_key(&["a", "b"]))
+        );
+
+        let wire = serde_json::to_value(key(enum_array_key(&["a", "b"]))).unwrap();
+        // The enum keeps its name (DDL needs it) but not its value list.
+        assert_eq!(wire["column_types"]["tags"], enum_array_spec(&[]));
+        let args = &wire["expr"]["args"];
+        assert_eq!(args[1]["value_type"], enum_array_spec(&[]));
+        // A bare enum literal is typed by PostgreSQL from the column.
+        assert!(args[2].get("value_type").is_none(), "{args}");
+    }
+
+    #[test]
+    fn enum_value_changes_do_not_recreate_expression_indexes() {
+        let index = |values: &[&str]| index_with("ix_tags", vec![enum_array_key(values)]);
+        let old = snapshot_with_index(&["id", "tags"], Some(index(&["a"])));
+        let new = snapshot_with_index(&["id", "tags"], Some(index(&["a", "b"])));
+        assert!(compute_diff(&old, &new).unwrap().is_empty());
+    }
+
+    #[test]
+    fn column_types_serialize_in_a_stable_order() {
+        let array = json!({"kind": "array", "item": {"kind": "big_integer"}});
+        let wire = json!({
+            "expr": func("greatest", vec![col("zeta"), col("mid"), col("alpha")]),
+            "column_types": {"zeta": array, "mid": array, "alpha": array},
+        });
+        // Each parse builds a fresh map, so an unordered map would differ
+        // between iterations.
+        for _ in 0..32 {
+            let text = serde_json::to_string(&key(wire.clone())).unwrap();
+            let (alpha, mid, zeta) = (
+                text.find("\"alpha\":{").unwrap(),
+                text.find("\"mid\":{").unwrap(),
+                text.find("\"zeta\":{").unwrap(),
+            );
+            assert!(alpha < mid && mid < zeta, "{text}");
+        }
+    }
+
+    #[test]
+    fn binary_literals_are_canonical_bytes() {
+        let wire = json!({
+            "expr": func("coalesce", vec![
+                col("data"),
+                json!({"type": "value", "value": [222, 173, 190, 239],
+                       "value_type": {"kind": "blob"}}),
+            ]),
+        });
+        let parsed = key(wire.clone());
+        let IndexKey::Expr {
+            expr: ScalarExpr::Func { args, .. },
+            ..
+        } = &parsed
+        else {
+            panic!("expected an expression key: {parsed:?}");
+        };
+        let ScalarExpr::Value { value, .. } = &args[1] else {
+            panic!("expected a literal: {args:?}");
+        };
+        assert!(value.is_bin(), "{value:?}");
+        // The octet-list wire form is unchanged.
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+
+        // Without a blob type, a list of small integers is just a list.
+        let list = key(json!({
+            "expr": func("coalesce", vec![col("xs"), lit(json!([1, 2, 3]))]),
+        }));
+        let IndexKey::Expr {
+            expr: ScalarExpr::Func { args, .. },
+            ..
+        } = &list
+        else {
+            panic!("expected an expression key");
+        };
+        let ScalarExpr::Value { value, .. } = &args[1] else {
+            panic!("expected a literal");
+        };
+        assert!(value.is_array(), "{value:?}");
+    }
+
+    #[test]
+    fn byte_array_literals_are_canonical_and_render_as_bytes() {
+        let wire = json!({
+            "expr": func("coalesce", vec![
+                col("blobs"),
+                json!({"type": "value", "value": [[1, 2], []],
+                       "value_type": {"kind": "array", "item": {"kind": "blob"}}}),
+            ]),
+            "column_types": {"blobs": {"kind": "array", "item": {"kind": "blob"}}},
+        });
+        let parsed = key(wire.clone());
+        let IndexKey::Expr {
+            expr: ScalarExpr::Func { args, .. },
+            ..
+        } = &parsed
+        else {
+            panic!("expected an expression key: {parsed:?}");
+        };
+        let ScalarExpr::Value {
+            value: rmpv::Value::Array(elements),
+            ..
+        } = &args[1]
+        else {
+            panic!("expected an array literal: {args:?}");
+        };
+        assert!(elements.iter().all(rmpv::Value::is_bin), "{elements:?}");
+        // The octet-list wire form is unchanged.
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+
+        let op = MigrationOp::CreateIndex {
+            table: "t".into(),
+            index: index_with("ix_blobs", vec![wire]),
+        };
+        let sql = op.to_sql(Dialect::Postgres).unwrap();
+        assert!(sql[0].contains("0102"), "{sql:?}");
+    }
+
+    #[test]
+    fn only_immutable_functions_can_back_an_index() {
+        for allowed in ["lower", "upper", "coalesce", "greatest"] {
+            key(json!({"expr": func(allowed, vec![col("a")])}));
+        }
+        for rejected in ["concat_ws", "CONCAT_WS", "LOWER", "frobnicate"] {
+            let message = key_error(json!({"expr": func(rejected, vec![col("a")])}));
+            assert!(message.contains(rejected), "{message}");
+            assert!(
+                message.contains("only coalesce, greatest, lower and upper"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_key_fails_the_whole_index_and_snapshot() {
+        let bad = json!({"name": "ix", "fields": [{"column": "a", "opclass": "x; y"}],
+                         "unique": false, "method": null});
+        assert!(serde_json::from_value::<IndexDef>(bad).is_err());
+    }
+
+    #[test]
+    fn column_helpers_report_what_the_index_depends_on() {
+        let mixed = index_with(
+            "ix_mixed",
+            vec![
+                json!("tenant_id"),
+                json!({"expr": func("lower", vec![col("email")])}),
+                json!("created_at"),
+            ],
+        );
+        // The usable prefix ends at the first expression key.
+        assert_eq!(
+            mixed.leading_columns().collect::<Vec<_>>(),
+            vec!["tenant_id"]
+        );
+        assert_eq!(
+            mixed.referenced_columns(),
+            vec!["tenant_id", "email", "created_at"]
+        );
+        assert!(mixed.references_column("email"));
+        assert!(!mixed.references_column("missing"));
+
+        // Explicit operator classes can still back foreign keys.
+        let opclass_first = index_with(
+            "ix_opclass",
+            vec![
+                json!({"column": "name", "opclass": "text_pattern_ops"}),
+                json!("id"),
+            ],
+        );
+        assert_eq!(
+            opclass_first.leading_columns().collect::<Vec<_>>(),
+            vec!["name", "id"]
+        );
+        assert_eq!(opclass_first.referenced_columns(), vec!["name", "id"]);
+        assert!(opclass_first.references_column("name"));
+
+        let plain = index_with("ix_plain", vec![json!("a"), json!("b")]);
+        assert_eq!(plain.leading_columns().collect::<Vec<_>>(), vec!["a", "b"]);
+        assert!(plain.references_column("b"));
+
+        // Nested expressions are walked, repeats are reported once, and raw
+        // SQL is opaque.
+        let nested = index_with(
+            "ix_nested",
+            vec![
+                json!({"expr": {"type": "op", "op": "mul", "lhs": col("a"),
+                    "rhs": func("coalesce", vec![col("b"), col("a"), lit(json!(1))])}}),
+                json!({"expr": {"type": "raw", "sql": "lower(hidden)"}}),
+            ],
+        );
+        assert_eq!(nested.referenced_columns(), vec!["a", "b"]);
+    }
+
+    fn snapshot_with_index(columns: &[&str], index: Option<IndexDef>) -> Snapshot {
+        let mut table = table_with_fields("users", columns);
+        table.indexes = index.into_iter().collect();
+        let mut snapshot = Snapshot::new();
+        snapshot.add_table(table);
+        snapshot
+    }
+
+    fn lower_email(name: &str) -> IndexDef {
+        index_with(
+            name,
+            vec![json!({"expr": func("lower", vec![col("email")])})],
+        )
+    }
+
+    #[test]
+    fn unchanged_expression_index_produces_no_ops() {
+        let old = snapshot_with_index(&["id", "email"], Some(lower_email("ix_lower")));
+        let new = snapshot_with_index(&["id", "email"], Some(lower_email("ix_lower")));
+        assert!(compute_diff(&old, &new).unwrap().is_empty());
+    }
+
+    #[test]
+    fn opclass_index_is_created_before_a_new_referencing_table_and_dropped_after_it() {
+        let old = snapshot_with_index(&["id", "email"], None);
+        let mut unique = index_with(
+            "ux_email",
+            vec![json!({
+                "column": "email", "opclass": "text_pattern_ops"
+            })],
+        );
+        unique.unique = true;
+        let mut new = snapshot_with_index(&["id", "email"], Some(unique));
+        let mut child = table_with_fields("child", &["email"]);
+        child.foreign_keys.push(sample_foreign_key(
+            "fk_child",
+            &["email"],
+            "users",
+            &["email"],
+        ));
+        new.add_table(child);
+
+        for (before, after, adding) in [(&old, &new, true), (&new, &old, false)] {
+            let ops = compute_diff(before, after).unwrap();
+            let index_pos = ops
+                .iter()
+                .position(|op| {
+                    matches!(
+                        op,
+                        MigrationOp::CreateIndex { .. } | MigrationOp::DropIndex { .. }
+                    )
+                })
+                .unwrap();
+            let table_pos = ops
+                .iter()
+                .position(|op| {
+                    matches!(
+                        op,
+                        MigrationOp::CreateTable { .. } | MigrationOp::DropTable { .. }
+                    )
+                })
+                .unwrap();
+            assert_eq!(index_pos < table_pos, adding, "{ops:?}");
+        }
+    }
+
+    #[test]
+    fn array_index_context_survives_round_trip_and_column_rename() {
+        let wire = json!({
+            "expr": func("coalesce", vec![col("tags"), lit(json!([1, 2]))]),
+            "column_types": {"tags": {"kind": "array", "item": {"kind": "big_integer"}}}
+        });
+        assert_eq!(serde_json::to_value(key(wire.clone())).unwrap(), wire);
+        let mut index = index_with("ix_tags", vec![wire]);
+        index.rename_column("tags", "labels");
+        let op = MigrationOp::CreateIndex {
+            table: "t".into(),
+            index,
+        };
+        let sql = op.to_sql(Dialect::Postgres).unwrap();
+        assert!(
+            sql[0].contains("COALESCE(\"labels\", ARRAY [1,2])"),
+            "{sql:?}"
+        );
+    }
+
+    #[test]
+    fn changed_expression_or_opclass_recreates_the_index() {
+        let changed = [
+            index_with(
+                "ix_lower",
+                vec![json!({"expr": func("upper", vec![col("email")])})],
+            ),
+            index_with(
+                "ix_lower",
+                vec![json!({
+                    "expr": func("lower", vec![col("email")]),
+                    "opclass": "text_pattern_ops",
+                })],
+            ),
+            index_with("ix_lower", vec![json!("email")]),
+        ];
+        for new_index in changed {
+            let old = snapshot_with_index(&["id", "email"], Some(lower_email("ix_lower")));
+            let new = snapshot_with_index(&["id", "email"], Some(new_index.clone()));
+            let ops = compute_diff(&old, &new).unwrap();
+            assert_eq!(ops.len(), 2, "{ops:?}");
+            assert!(
+                matches!(&ops[0], MigrationOp::DropIndex { name, index_def: Some(old_def), .. }
+                if name == "ix_lower" && *old_def == lower_email("ix_lower"))
+            );
+            assert!(matches!(&ops[1], MigrationOp::CreateIndex { index, .. }
+                if *index == new_index));
+        }
+    }
+
+    // The final order is a topological sort seeded with the natural order, so
+    // these pin the invariants (they hold with or without the explicit edges).
+    #[test]
+    fn index_on_an_expression_orders_around_its_columns() {
+        let dropped_column = compute_diff(
+            &snapshot_with_index(&["id", "email"], Some(lower_email("ix_lower"))),
+            &snapshot_with_index(&["id"], None),
+        )
+        .unwrap();
+        let position = |ops: &[MigrationOp], wanted: fn(&MigrationOp) -> bool| {
+            ops.iter().position(wanted).expect("op present")
+        };
+        assert!(
+            position(&dropped_column, |op| matches!(
+                op,
+                MigrationOp::DropIndex { .. }
+            )) < position(&dropped_column, |op| matches!(
+                op,
+                MigrationOp::DropColumn { .. }
+            ))
+        );
+
+        let added_column = compute_diff(
+            &snapshot_with_index(&["id"], None),
+            &snapshot_with_index(&["id", "email"], Some(lower_email("ix_lower"))),
+        )
+        .unwrap();
+        assert!(
+            position(&added_column, |op| matches!(
+                op,
+                MigrationOp::AddColumn { .. }
+            )) < position(&added_column, |op| matches!(
+                op,
+                MigrationOp::CreateIndex { .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn unsupported_function_in_an_index_expression_fails_sql_generation() {
+        let expr: ScalarExpr =
+            serde_json::from_value(func("frobnicate", vec![col("email")])).unwrap();
+        let op = MigrationOp::CreateIndex {
+            table: "users".into(),
+            index: IndexDef {
+                name: "ix_bad".into(),
+                fields: vec![IndexKey::Expr {
+                    expr,
+                    opclass: None,
+                    column_types: std::collections::BTreeMap::new(),
+                }],
+                unique: false,
+                nulls_not_distinct: false,
+                method: None,
+                where_clause: None,
+            },
+        };
+        let error = op.to_sql(Dialect::Postgres).unwrap_err().to_string();
+        assert!(error.contains("invalid index expression"), "{error}");
+        assert!(error.contains("frobnicate"), "{error}");
+    }
+
+    // ── Readable key errors ────────────────────────────────────────────────
+
+    #[test]
+    fn malformed_keys_report_the_actual_problem() {
+        let unknown = key_error(json!({"columns": "email"}));
+        assert!(unknown.contains("unknown field `columns`"), "{unknown}");
+        assert!(!unknown.contains("did not match any variant"), "{unknown}");
+
+        let bad_expr = key_error(json!({"expr": {"type": "colum", "name": "email"}}));
+        assert!(bad_expr.contains("colum"), "{bad_expr}");
+        assert!(
+            !bad_expr.contains("did not match any variant"),
+            "{bad_expr}"
+        );
+
+        let empty_opclass = key_error(json!({"column": "name", "opclass": ""}));
+        assert!(
+            empty_opclass.contains("invalid operator class"),
+            "{empty_opclass}"
+        );
+
+        let wrong_shape = key_error(json!(42));
+        assert!(wrong_shape.contains("an index key"), "{wrong_shape}");
+    }
+
+    // ── Model snapshot validation ──────────────────────────────────────────
+
+    fn model_snapshot(tables: Vec<(&str, Vec<&str>, Vec<IndexDef>)>) -> Snapshot {
+        let mut snapshot = Snapshot::new();
+        for (name, columns, indexes) in tables {
+            let table: TableDef = serde_json::from_value(json!({
+                "name": name,
+                "fields": columns.iter().map(|column| json!({
+                    "name": column, "column_type": {"kind": "text"}, "nullable": true,
+                    "primary_key": false, "unique": false, "default": null,
+                })).collect::<Vec<_>>(),
+                "indexes": indexes,
+                "foreign_keys": [],
+                "checks": [],
+                "comment": null,
+            }))
+            .unwrap();
+            snapshot.add_table(table);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn model_validation_accepts_a_consistent_schema() {
+        let snapshot = model_snapshot(vec![
+            (
+                "users",
+                vec!["id", "email"],
+                vec![
+                    index_with("users_email_idx", vec![json!("email")]),
+                    index_with(
+                        "users_email_lower",
+                        vec![json!({"expr": func("lower", vec![col("email")])})],
+                    ),
+                    // Raw SQL is opaque: its columns are not checked.
+                    index_with(
+                        "users_raw",
+                        vec![json!({"expr": {"type": "raw", "sql": "lower(anything)"}})],
+                    ),
+                ],
+            ),
+            (
+                "posts",
+                vec!["id"],
+                vec![index_with("posts_id_idx", vec![json!("id")])],
+            ),
+        ]);
+        snapshot.validate_model_schema().unwrap();
+    }
+
+    #[test]
+    fn model_validation_rejects_unknown_index_columns() {
+        let plain = model_snapshot(vec![(
+            "users",
+            vec!["id", "email_addr"],
+            vec![index_with("users_email_idx", vec![json!("email")])],
+        )]);
+        let error = plain.validate_model_schema().unwrap_err().to_string();
+        assert!(error.contains("users_email_idx"), "{error}");
+        assert!(error.contains("'users'"), "{error}");
+        assert!(error.contains("'email'"), "{error}");
+
+        let nested = model_snapshot(vec![(
+            "users",
+            vec!["id"],
+            vec![index_with(
+                "users_lower",
+                vec![json!({"expr": func("lower", vec![func("upper", vec![col("missing")])])})],
+            )],
+        )]);
+        let error = nested.validate_model_schema().unwrap_err().to_string();
+        assert!(error.contains("'missing'"), "{error}");
+    }
+
+    #[test]
+    fn model_validation_rejects_duplicate_index_names() {
+        let within = model_snapshot(vec![(
+            "users",
+            vec!["email"],
+            vec![
+                index_with("users_email_idx", vec![json!("email")]),
+                index_with(
+                    "users_email_idx",
+                    vec![json!({"column": "email", "opclass": "text_pattern_ops"})],
+                ),
+            ],
+        )]);
+        let error = within.validate_model_schema().unwrap_err().to_string();
+        assert!(error.contains("users_email_idx"), "{error}");
+        assert!(error.contains("name="), "{error}");
+
+        // PostgreSQL index names share one namespace across tables.
+        let across = model_snapshot(vec![
+            (
+                "a",
+                vec!["x"],
+                vec![index_with("shared_idx", vec![json!("x")])],
+            ),
+            (
+                "b",
+                vec!["x"],
+                vec![index_with("shared_idx", vec![json!("x")])],
+            ),
+        ]);
+        let error = across.validate_model_schema().unwrap_err().to_string();
+        assert!(error.contains("shared_idx"), "{error}");
+        assert!(error.contains("'a'") && error.contains("'b'"), "{error}");
+    }
+
+    fn flag(snapshot: &mut Snapshot, table: &str, column: &str, set: impl FnOnce(&mut FieldDef)) {
+        let field = snapshot
+            .tables
+            .get_mut(table)
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|field| field.name == column)
+            .unwrap();
+        set(field);
+    }
+
+    /// `users(id bigserial pk, email unique)` plus an empty `orders`, with one
+    /// explicit index on `users.email` named `index_name`.
+    fn users_with_index_named(index_name: &str) -> Snapshot {
+        let mut snapshot = model_snapshot(vec![
+            (
+                "users",
+                vec!["id", "email"],
+                vec![index_with(index_name, vec![json!("email")])],
+            ),
+            ("orders", vec!["id"], vec![]),
+        ]);
+        // An integer primary key renders as BIGSERIAL, which owns a sequence.
+        flag(&mut snapshot, "users", "id", |field| {
+            field.primary_key = true;
+            field.column_type = ColumnTypeSpec::BigInteger;
+        });
+        flag(&mut snapshot, "users", "email", |field| field.unique = true);
+        snapshot
+    }
+
+    #[test]
+    fn model_validation_rejects_index_names_taken_by_other_relations() {
+        // Indexes, tables and sequences share one PostgreSQL namespace, and
+        // CREATE TABLE has already taken these names for the relations it
+        // creates itself.
+        for (name, owner) in [
+            ("users_email_key", "unique constraint"),
+            ("users_pkey", "primary key"),
+            ("users_id_seq", "sequence"),
+            ("orders", "table"),
+            ("users", "table"),
+        ] {
+            let error = users_with_index_named(name)
+                .validate_model_schema()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("'{name}'")), "{name}: {error}");
+            assert!(error.contains(owner), "{name}: {error}");
+            assert!(error.contains("name="), "{name}: {error}");
+        }
+        users_with_index_named("users_email_idx")
+            .validate_model_schema()
+            .unwrap();
+    }
+
+    #[test]
+    fn implicit_relation_names_are_only_reserved_when_they_exist() {
+        // `email` is not unique, `id` is no primary key and not serial.
+        let snapshot = model_snapshot(vec![(
+            "users",
+            vec!["id", "email"],
+            vec![
+                index_with("users_email_key", vec![json!("email")]),
+                index_with("users_pkey", vec![json!("id")]),
+                index_with("users_id_seq", vec![json!("id")]),
+            ],
+        )]);
+        snapshot.validate_model_schema().unwrap();
+    }
+
+    #[test]
+    fn long_implicit_names_are_shortened_the_way_postgres_does() {
+        // PostgreSQL does not cut `<table>_<column>_key` at 63 bytes: it
+        // shortens the longer of table and column name and keeps the suffix.
+        let table = "a".repeat(60);
+        let build = |index_name: &str| {
+            let mut snapshot = model_snapshot(vec![(
+                table.as_str(),
+                vec!["id"],
+                vec![index_with(index_name, vec![json!("id")])],
+            )]);
+            flag(&mut snapshot, &table, "id", |field| field.unique = true);
+            snapshot
+        };
+
+        let shortened = format!("{}_id_key", "a".repeat(56));
+        assert_eq!(shortened.len(), 63);
+        let error = build(&shortened)
+            .validate_model_schema()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unique constraint"), "{error}");
+
+        // A plain 63-byte cut is a different name and does not clash.
+        build(&format!("{table}_id")).validate_model_schema().unwrap();
+
+        // `<table>_pkey` keeps the whole suffix too.
+        let long_table = "b".repeat(80);
+        let mut pk = model_snapshot(vec![(
+            long_table.as_str(),
+            vec!["id"],
+            vec![index_with(
+                &format!("{}_pkey", "b".repeat(58)),
+                vec![json!("id")],
+            )],
+        )]);
+        flag(&mut pk, &long_table, "id", |field| field.primary_key = true);
+        let error = pk.validate_model_schema().unwrap_err().to_string();
+        assert!(error.contains("primary key"), "{error}");
+    }
+
+    #[test]
+    fn model_validation_rejects_names_equal_after_truncation() {
+        let long = |tail: &str| format!("{}{tail}", "a".repeat(63));
+        let clash = model_snapshot(vec![(
+            "t",
+            vec!["x"],
+            vec![
+                index_with(&long("_one"), vec![json!("x")]),
+                index_with(&long("_two"), vec![json!("x")]),
+            ],
+        )]);
+        let error = clash.validate_model_schema().unwrap_err().to_string();
+        assert!(error.contains("truncates"), "{error}");
+
+        // The cut lands inside a multibyte character and moves back to the
+        // boundary: 62 ASCII bytes + 'é' (2 bytes) truncates to the 62 bytes.
+        let prefix = "b".repeat(62);
+        let multibyte = model_snapshot(vec![(
+            "t",
+            vec!["x"],
+            vec![
+                index_with(&format!("{prefix}é_one"), vec![json!("x")]),
+                index_with(&format!("{prefix}é_two"), vec![json!("x")]),
+            ],
+        )]);
+        assert!(multibyte.validate_model_schema().is_err());
+
+        // A long name on its own is fine; PostgreSQL truncates it silently.
+        let single = model_snapshot(vec![(
+            "t",
+            vec!["x"],
+            vec![index_with(&"c".repeat(80), vec![json!("x")])],
+        )]);
+        single.validate_model_schema().unwrap();
+    }
+
+    #[test]
+    fn historical_snapshots_still_load_and_diff_without_validation() {
+        // Validation is a separate gate: an index on a column that is not in
+        // `fields` must still deserialize and replay.
+        let snapshot = model_snapshot(vec![(
+            "users",
+            vec!["id"],
+            vec![index_with("users_old_idx", vec![json!("gone")])],
+        )]);
+        let round_trip = Snapshot::from_json(&snapshot.to_json().unwrap()).unwrap();
+        assert_eq!(round_trip, snapshot);
+    }
+
+    #[test]
+    fn references_column_matches_referenced_columns() {
+        let nested = index_with(
+            "ix",
+            vec![
+                json!("a"),
+                json!({"expr": func("coalesce", vec![col("b"), lit(json!(1))])}),
+                json!({"expr": {"type": "raw", "sql": "c + 1"}}),
+            ],
+        );
+        for column in ["a", "b", "c", "missing"] {
+            assert_eq!(
+                nested.references_column(column),
+                nested.referenced_columns().contains(&column),
+                "{column}"
+            );
+        }
+    }
 }
