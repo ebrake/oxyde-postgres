@@ -121,6 +121,42 @@ def compute_column_type(
     )
 
 
+def bind_spec_for_db_type_override(
+    python_type: Any,
+    db_type: str | None,
+    *,
+    max_length: int | None = None,
+    max_digits: int | None = None,
+    decimal_places: int | None = None,
+) -> ColumnSpec | None:
+    """Binding-only spec for a column whose explicit ``db_type`` has no column spec.
+
+    Such a column (MONEY, CITEXT, a domain) is left out of ``column_types`` so
+    Rust decodes it natively, but a Decimal or UUID value still needs its
+    Python type to bind correctly: msgpack carries both as strings. The hint
+    comes from the annotation. Enums are excluded: an explicit ``db_type`` on
+    an enum field means a plain verbatim column.
+    """
+    if not db_type or _spec_from_db_type(db_type) is not None:
+        return None
+    spec = _spec_from_annotation(
+        python_type,
+        max_length=max_length,
+        max_digits=max_digits,
+        decimal_places=decimal_places,
+    )
+    if spec is None or _spec_has_enum(spec):
+        return None
+    return spec
+
+
+def _spec_has_enum(spec: ColumnSpec) -> bool:
+    if spec.get("kind") == "enum":
+        return True
+    item = spec.get("item")
+    return isinstance(item, dict) and _spec_has_enum(item)
+
+
 def spec_for_literal(value_type: type) -> ColumnSpec | None:
     """Spec for an F-expression literal by its Python type.
 

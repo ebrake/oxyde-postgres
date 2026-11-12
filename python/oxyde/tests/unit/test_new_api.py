@@ -85,26 +85,22 @@ def test_aggregates():
 def test_concat():
     """Test Concat expression."""
     concat = Concat("first_name", "last_name", separator=" ")
-    assert concat.func_name == "concat"
-    ir = concat.to_ir()
-    assert ir["func"] == "concat"
-    assert ir["separator"] == " "
+    assert concat._expr["name"] == "concat_ws"
+    assert concat._expr["args"][0]["value"] == " "
 
 
 def test_coalesce():
     """Test Coalesce expression."""
     coalesce = Coalesce("nickname", "username", "email")
-    assert coalesce.func_name == "coalesce"
-    ir = coalesce.to_ir()
-    assert ir["func"] == "coalesce"
+    assert coalesce._expr["type"] == "func"
+    assert coalesce._expr["name"] == "coalesce"
+    assert len(coalesce._expr["args"]) == 3
 
 
 def test_raw_sql():
     """Test RawSQL expression."""
     raw = RawSQL("COUNT(*) > 10")
-    ir = raw.to_ir()
-    assert ir["type"] == "raw"
-    assert ir["sql"] == "COUNT(*) > 10"
+    assert raw._expr == {"type": "raw", "sql": "COUNT(*) > 10"}
 
 
 def test_query_introspection():

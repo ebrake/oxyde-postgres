@@ -66,7 +66,7 @@ from oxyde.exceptions import (
     NotNullViolationError,
     UniqueViolationError,
 )
-from oxyde.models.metadata import ColumnMeta
+from oxyde.models.metadata import ColumnMeta, db_column_for
 from oxyde.models.registry import registered_tables
 from oxyde.models.serializers import _get_virtual_fields
 
@@ -144,6 +144,11 @@ def _build_column_types(model_class: type[Model]) -> dict[str, dict] | None:
     return model_class._db_meta.column_types
 
 
+def _build_bind_types(model_class: type[Model]) -> dict[str, dict] | None:
+    """Get cached binding-only type hints by column from model metadata."""
+    return model_class._db_meta.bind_types
+
+
 def _build_column_db_types(model_class: type[Model]) -> dict[str, str] | None:
     """Get cached db_type overrides by column from model metadata."""
     return model_class._db_meta.column_db_types
@@ -168,13 +173,7 @@ def _map_values_to_columns(
     values: dict[str, Any],
 ) -> dict[str, Any]:
     """Map field names to database column names."""
-    metadata = model_class._db_meta.field_metadata
-    mapped: dict[str, Any] = {}
-    for key, value in values.items():
-        meta = metadata.get(key)
-        column = meta.db_column if meta else key
-        mapped[column] = value
-    return mapped
+    return {db_column_for(model_class, key): value for key, value in values.items()}
 
 
 async def _resolve_execution_client(
@@ -241,6 +240,7 @@ __all__ = [
     "_resolve_registered_model",
     "_primary_key_meta",
     "_collect_model_columns",
+    "_build_bind_types",
     "_map_values_to_columns",
     "_resolve_execution_client",
     "_resolve_pool_name",

@@ -50,7 +50,10 @@ from typing import Any
 
 from pydantic.fields import PydanticUndefined
 
-from oxyde.core.column_types import compute_column_type
+from oxyde.core.column_types import (
+    bind_spec_for_db_type_override,
+    compute_column_type,
+)
 from oxyde.models.decorators import Check, Index
 
 
@@ -124,6 +127,9 @@ class ModelMeta:
     column_types: dict[str, dict] | None = None
     # Column db_type overrides for PostgreSQL array casts and JSON lookups
     column_db_types: dict[str, str] | None = None
+    # Binding-only specs for columns whose db_type has no column spec (never
+    # used for decoding results); see bind_spec_for_db_type_override
+    bind_types: dict[str, dict] | None = None
     # Reverse mapping: db_column → field_name (only where they differ)
     reverse_column_map: dict[str, str] = dataclass_field(default_factory=dict)
     # Primary key field name and db column (cached at finalization)
@@ -141,6 +147,27 @@ def is_column_field(meta: ColumnMeta) -> bool:
         meta.extra.get("reverse_fk")
         or meta.extra.get("m2m")
         or meta.foreign_key is not None
+    )
+
+
+def db_column_for(model_class: Any, name: str) -> str:
+    """Database column of a model field; unknown names pass through unchanged
+    (so ``F("db_col")`` and raw column names keep working)."""
+    meta = model_class._db_meta.field_metadata.get(name)
+    return meta.db_column if meta is not None else name
+
+
+def bind_type_for_meta(meta: ColumnMeta) -> dict[str, Any] | None:
+    """Binding-only ColumnTypeSpec dict of a field's column, or None (see
+    ``bind_spec_for_db_type_override``)."""
+    if not is_column_field(meta):
+        return None
+    return bind_spec_for_db_type_override(
+        meta.python_type,
+        meta.db_type,
+        max_length=meta.max_length,
+        max_digits=meta.max_digits,
+        decimal_places=meta.decimal_places,
     )
 
 
@@ -170,6 +197,8 @@ __all__ = [
     "RelationInfo",
     "ModelMeta",
     "RelationDescriptorBase",
+    "bind_type_for_meta",
     "column_type_for_meta",
+    "db_column_for",
     "is_column_field",
 ]

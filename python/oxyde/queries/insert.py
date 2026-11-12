@@ -19,6 +19,7 @@ from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.queries.base import (
     SupportsExecute,
+    _build_bind_types,
     _build_column_types,
     _map_values_to_columns,
     _model_key,
@@ -71,6 +72,7 @@ class InsertQuery:
         table_name = self.model_class.get_table_name()
         pk_column = self._get_pk_column()
         column_types = _build_column_types(self.model_class)
+        bind_types = _build_bind_types(self.model_class)
 
         if self._bulk_values is not None:
             if not self._bulk_values:
@@ -81,7 +83,8 @@ class InsertQuery:
             for row_values in self._bulk_values:
                 mapped = _map_values_to_columns(self.model_class, row_values)
                 serialized = {
-                    key: _serialize_value_for_ir(value) for key, value in mapped.items()
+                    key: _serialize_value_for_ir(value, self.model_class)
+                    for key, value in mapped.items()
                 }
                 serialized_bulk.append(serialized)
 
@@ -90,6 +93,7 @@ class InsertQuery:
                 table=table_name,
                 bulk_values=serialized_bulk,
                 column_types=column_types,
+                bind_types=bind_types,
                 model=_model_key(self.model_class),
                 pk_column=pk_column,
             )
@@ -99,7 +103,7 @@ class InsertQuery:
 
             mapped_values = _map_values_to_columns(self.model_class, self._values)
             serialized_values = {
-                key: _serialize_value_for_ir(value)
+                key: _serialize_value_for_ir(value, self.model_class)
                 for key, value in mapped_values.items()
             }
 
@@ -108,6 +112,7 @@ class InsertQuery:
                 table=table_name,
                 values=serialized_values,
                 column_types=column_types,
+                bind_types=bind_types,
                 model=_model_key(self.model_class),
                 pk_column=pk_column,
                 returning=True,

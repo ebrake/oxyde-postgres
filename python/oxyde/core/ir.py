@@ -128,6 +128,7 @@ def build_select_ir(
     table: str,
     columns: Sequence[str] | None = None,
     column_types: dict[str, dict] | None = None,
+    bind_types: dict[str, dict] | None = None,
     column_db_types: dict[str, str] | None = None,
     model: str | None = None,
     column_mappings: dict[str, str] | None = None,
@@ -140,6 +141,7 @@ def build_select_ir(
     group_by: Sequence[str] | None = None,
     having: FilterNode | None = None,
     aggregates: Sequence[dict[str, Any]] | None = None,
+    annotations: Sequence[dict[str, Any]] | None = None,
     returning: bool | None = None,
     exists: bool | None = None,
     count: bool | None = None,
@@ -153,10 +155,17 @@ def build_select_ir(
     Args:
         column_types: Optional mapping of column name to ColumnTypeSpec dict
             ({"kind": ...}). Used by Rust for typed binding and decoding
+        bind_types: Binding-only ColumnTypeSpec dicts (keyed like column_types)
+            for columns that have no column spec; never used to decode results.
         column_db_types: Optional mapping of column name (keyed like
             column_types) to its db_type override. PostgreSQL filters cast
             array values and array-lookup operands to an array override.
         pk_column: Primary key column name, used for deduplication in JOIN queries.
+        annotations: Scalar expression annotations
+            ({"alias": ..., "expr": <ScalarExpr dict>}), emitted after the
+            plain columns. Mutually exclusive with ``aggregates``. An empty
+            ``columns`` list together with annotations means an alias-only
+            SELECT; without annotations an empty list is omitted.
     """
     payload: dict[str, Any] = {
         "proto": IR_PROTO_VERSION,
@@ -166,8 +175,12 @@ def build_select_ir(
     # cols is optional when count=True or exists=True
     if columns:
         payload["cols"] = list(columns)
+    elif columns is not None and annotations:
+        payload["cols"] = []
     if column_types:
         payload["column_types"] = dict(column_types)
+    if bind_types:
+        payload["bind_types"] = dict(bind_types)
     if column_db_types:
         payload["column_db_types"] = dict(column_db_types)
     if filter_tree:
@@ -192,6 +205,8 @@ def build_select_ir(
         payload["having"] = having
     if aggregates:
         payload["aggregates"] = [dict(agg) for agg in aggregates]
+    if annotations:
+        payload["annotations"] = [dict(a) for a in annotations]
     if returning is not None:
         payload["returning"] = bool(returning)
     if exists is not None:
@@ -215,6 +230,7 @@ def build_insert_ir(
     values: dict[str, Any] | None = None,
     bulk_values: Sequence[dict[str, Any]] | None = None,
     column_types: dict[str, dict] | None = None,
+    bind_types: dict[str, dict] | None = None,
     model: str | None = None,
     returning: bool | None = None,
     pk_column: str | None = None,
@@ -243,6 +259,8 @@ def build_insert_ir(
         payload["bulk_values"] = [dict(row) for row in bulk_values]
     if column_types:
         payload["column_types"] = dict(column_types)
+    if bind_types:
+        payload["bind_types"] = dict(bind_types)
     if model:
         payload["model"] = model
     if returning is not None:
@@ -258,6 +276,7 @@ def build_update_ir(
     values: dict[str, Any] | None = None,
     filter_tree: FilterNode | None = None,
     column_types: dict[str, dict] | None = None,
+    bind_types: dict[str, dict] | None = None,
     column_db_types: dict[str, str] | None = None,
     model: str | None = None,
     returning: bool | None = None,
@@ -305,6 +324,8 @@ def build_update_ir(
         payload["bulk_update"] = {"rows": normalized_rows}
     if column_types:
         payload["column_types"] = dict(column_types)
+    if bind_types:
+        payload["bind_types"] = dict(bind_types)
     if column_db_types:
         payload["column_db_types"] = dict(column_db_types)
     if filter_tree:
@@ -321,6 +342,7 @@ def build_delete_ir(
     table: str,
     filter_tree: FilterNode | None = None,
     column_types: dict[str, dict] | None = None,
+    bind_types: dict[str, dict] | None = None,
     column_db_types: dict[str, str] | None = None,
     model: str | None = None,
     returning: bool | None = None,
@@ -335,6 +357,8 @@ def build_delete_ir(
         payload["filter_tree"] = filter_tree
     if column_types:
         payload["column_types"] = dict(column_types)
+    if bind_types:
+        payload["bind_types"] = dict(bind_types)
     if column_db_types:
         payload["column_db_types"] = dict(column_db_types)
     if model:

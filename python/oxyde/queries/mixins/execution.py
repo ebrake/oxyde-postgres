@@ -24,6 +24,7 @@ from oxyde.queries.base import (
     _resolve_execution_client,
     _resolve_registered_model,
 )
+from oxyde.queries.expressions import _is_scalar_annotation
 from oxyde.queries.joins import _JoinDescriptor
 
 if TYPE_CHECKING:
@@ -41,6 +42,18 @@ def _remap_columns(columns: list[str], model_class: type[Model]) -> list[str]:
     return [rmap.get(c, c) for c in columns]
 
 
+def _merge_relation_columns(
+    rows: list[dict[str, Any]], relations_map: dict[str, Any]
+) -> None:
+    """Flatten Rust's dedup relation encoding back into ``rows`` in place."""
+    for prefix, rel in relations_map.items():
+        columns, data, refs = rel["columns"], rel["data"], rel["refs"]
+        for row, ref in zip(rows, refs):
+            values = data.get(ref) if ref is not None else None
+            for column, value in zip(columns, values or [None] * len(columns)):
+                row[f"{prefix}__{column}"] = value
+
+
 class ExecutionMixin(Generic[TModel]):
     """Mixin providing query execution capabilities."""
 
@@ -55,6 +68,7 @@ class ExecutionMixin(Generic[TModel]):
     _offset_value: int | None
     _order_by_fields: list[tuple[str, str]]
     _group_by_fields: list[str]
+    _annotations: dict[str, Any]
     _exists: bool
 
     def _clone(self) -> Self:
@@ -80,11 +94,17 @@ class ExecutionMixin(Generic[TModel]):
     async def fetch_all(self, client: SupportsExecute) -> list[Any]:
         """Execute query and return all results as dicts."""
         result_bytes = await self.fetch_msgpack(client)
-        data = msgpack.unpackb(result_bytes, raw=False)
+        # strict_map_key=False: join results carry a relations map keyed by int
+        data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
 
         # Columnar format from Rust: [columns, rows]
         columns = _remap_columns(data[0], self.model_class)
         rows = [dict(zip(columns, row)) for row in data[1]]
+        if len(data) == 3 and self._selected_fields is None:
+            # JOIN without an explicit field list: Rust moved the joined
+            # columns into a deduplicated relations map; put them back as
+            # flat "<prefix>__<column>" keys.
+            _merge_relation_columns(rows, data[2])
 
         if self._result_mode == "dict":
             return rows
@@ -143,6 +163,13 @@ class ExecutionMixin(Generic[TModel]):
 
         JOIN relations use Rust-side dedup encoding (3-element msgpack array).
         """
+        if any(_is_scalar_annotation(obj) for obj in self._annotations.values()):
+            raise TypeError(
+                "Scalar expression annotations (Coalesce, Greatest, Value, F) "
+                "cannot be hydrated into model instances. Use .values() or "
+                ".values_list() instead. "
+                "Example: .annotate(x=Coalesce('a', 0)).values('id', 'x').all()"
+            )
         if self._group_by_fields:
             raise TypeError(
                 "group_by() returns partial rows that cannot be hydrated "

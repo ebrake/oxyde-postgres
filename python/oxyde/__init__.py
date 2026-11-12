@@ -18,7 +18,7 @@ Public API:
 
     Aggregates:
         Count, Sum, Avg, Max, Min: SQL aggregate functions.
-        Concat, Coalesce: SQL scalar functions.
+        Coalesce, Concat, Greatest, Value: scalar expressions (annotate(), update()).
         RawSQL: Raw SQL expression wrapper.
 
     Database:
@@ -84,6 +84,7 @@ from oxyde.queries import (
     Concat,
     Count,
     F,
+    Greatest,
     Max,
     Min,
     Q,
@@ -91,10 +92,11 @@ from oxyde.queries import (
     QueryManager,
     RawSQL,
     Sum,
+    Value,
     execute_raw,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 def __getattr__(name: str) -> type:
@@ -146,6 +148,8 @@ __all__ = [
     "Min",
     "Concat",
     "Coalesce",
+    "Greatest",
+    "Value",
     "RawSQL",
     "execute_raw",
 ]

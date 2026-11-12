@@ -30,13 +30,19 @@ from oxyde.models.utils import _unpack_annotated, _unwrap_optional
 from oxyde.queries.base import (
     SupportsExecute,
     _build_column_db_types,
+    _build_bind_types,
     _build_column_types,
     _map_values_to_columns,
     _model_key,
     _resolve_execution_client,
     _translate_core_error,
 )
-from oxyde.queries.expressions import F, _Expression, _serialize_value_for_ir
+from oxyde.queries.expressions import (
+    F,
+    Value,
+    _Expression,
+    _serialize_value_for_ir,
+)
 from oxyde.queries.insert import InsertQuery
 
 if TYPE_CHECKING:
@@ -101,15 +107,19 @@ def _validate_enum_update_values(
     validated = dict(values)
     metadata = model_class._db_meta.field_metadata
     for field, value in values.items():
-        if isinstance(value, (F, _Expression)):
+        # A bare Value() is a plain literal for the target column: validate it
+        # like a raw value. Any other expression is computed by the database.
+        is_literal = isinstance(value, Value)
+        if not is_literal and isinstance(value, (F, _Expression)):
             continue
         meta = metadata.get(field)
         if meta is not None and _is_enum_annotation(meta.python_type):
-            if value is None and meta.nullable:
-                validated[field] = None
+            raw = value._expr["value"] if is_literal else value
+            if raw is None and meta.nullable:
+                checked = None
             else:
-                adapter = _enum_type_adapter(meta.python_type)
-                validated[field] = adapter.validate_python(value)
+                checked = _enum_type_adapter(meta.python_type).validate_python(raw)
+            validated[field] = Value(checked) if is_literal else checked
     return validated
 
 
@@ -151,9 +161,13 @@ class MutationMixin(Generic[TModel]):
         column_types = _build_column_types(self.model_class)
         update_ir = ir.build_update_ir(
             table=self.model_class.get_table_name(),
-            values={field: _serialize_value_for_ir(F(field) + by)},
+            values=_map_values_to_columns(
+                self.model_class,
+                {field: _serialize_value_for_ir(F(field) + by, self.model_class)},
+            ),
             filter_tree=self._build_filter_tree(),
             column_types=column_types,
+            bind_types=_build_bind_types(self.model_class),
             column_db_types=_build_column_db_types(self.model_class),
             model=_model_key(self.model_class),
         )
@@ -215,7 +229,8 @@ class MutationMixin(Generic[TModel]):
         values = _validate_enum_update_values(self.model_class, values)
         mapped_values = _map_values_to_columns(self.model_class, values)
         serialized_values = {
-            key: _serialize_value_for_ir(value) for key, value in mapped_values.items()
+            key: _serialize_value_for_ir(value, self.model_class)
+            for key, value in mapped_values.items()
         }
 
         update_ir = ir.build_update_ir(
@@ -223,6 +238,7 @@ class MutationMixin(Generic[TModel]):
             values=serialized_values,
             filter_tree=self._build_filter_tree(),
             column_types=column_types,
+            bind_types=_build_bind_types(self.model_class),
             column_db_types=_build_column_db_types(self.model_class),
             model=_model_key(self.model_class),
             returning=returning,
@@ -259,6 +275,7 @@ class MutationMixin(Generic[TModel]):
             table=self.model_class.get_table_name(),
             filter_tree=self._build_filter_tree(),
             column_types=_build_column_types(self.model_class),
+            bind_types=_build_bind_types(self.model_class),
             column_db_types=_build_column_db_types(self.model_class),
             model=_model_key(self.model_class),
         )
@@ -500,6 +517,7 @@ class MutationMixin(Generic[TModel]):
             table=self.model_class.get_table_name(),
             bulk_update=bulk_entries,
             column_types=column_types,
+            bind_types=_build_bind_types(self.model_class),
             model=_model_key(self.model_class),
         )
 

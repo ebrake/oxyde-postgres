@@ -48,9 +48,9 @@ Example:
     )
 """
 
-from .aggregates import Aggregate, Avg, Coalesce, Concat, Count, Max, Min, RawSQL, Sum
+from .aggregates import Aggregate, Avg, Concat, Count, Max, Min, RawSQL, Sum
 from .base import SupportsExecute
-from .expressions import F
+from .expressions import Coalesce, F, Greatest, Value
 from .manager import QueryManager
 from .q import Q
 from .raw import execute_raw
@@ -71,6 +71,8 @@ __all__ = [
     "Min",
     "Concat",
     "Coalesce",
+    "Greatest",
+    "Value",
     "RawSQL",
     "execute_raw",
     "ValuesQuery",

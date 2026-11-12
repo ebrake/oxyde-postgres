@@ -11,11 +11,12 @@ Aggregate Functions:
     Min(field)                       → MIN(field)
 
 Scalar Functions:
-    Concat(*fields, separator="")    → Concatenate strings
-    Coalesce(*fields)                → First non-NULL value
+    Concat(*fields, separator="")    → Concatenate strings (an expression)
+    Coalesce(*args)                  → First non-NULL value (an expression;
+                                       see oxyde.queries.expressions)
 
 Raw SQL:
-    RawSQL(sql)                      → Inject raw SQL expression
+    RawSQL(sql)                      → Inject raw SQL expression (an expression)
 
 Usage with annotate():
     # Add computed columns to query results
@@ -45,6 +46,8 @@ IR Format:
 from __future__ import annotations
 
 from typing import Any
+
+from oxyde.queries.expressions import Coalesce, Concat, RawSQL
 
 
 class Aggregate:
@@ -89,49 +92,6 @@ class Min(Aggregate):
     """MIN aggregate function."""
 
 
-class Concat(Aggregate):
-    """String concatenation."""
-
-    def __init__(self, *fields: str, separator: str = ""):
-        self.fields = fields
-        self.separator = separator
-        self.func_name = "concat"
-
-    def to_ir(self) -> dict[str, Any]:
-        return {
-            "func": "concat",
-            "fields": list(self.fields),
-            "separator": self.separator,
-        }
-
-
-class Coalesce(Aggregate):
-    """COALESCE function - returns first non-NULL value."""
-
-    def __init__(self, *fields: str):
-        self.fields = fields
-        self.func_name = "coalesce"
-
-    def to_ir(self) -> dict[str, Any]:
-        return {
-            "func": "coalesce",
-            "fields": list(self.fields),
-        }
-
-
-class RawSQL:
-    """Raw SQL expression."""
-
-    def __init__(self, sql: str):
-        self.sql = sql
-
-    def to_ir(self) -> dict[str, Any]:
-        return {
-            "type": "raw",
-            "sql": self.sql,
-        }
-
-
 __all__ = [
     "Aggregate",
     "Count",
@@ -142,4 +102,4 @@ __all__ = [
     "Concat",
     "Coalesce",
     "RawSQL",
-]
+]  # Coalesce, Concat, RawSQL live in expressions.py; re-exported for compatibility

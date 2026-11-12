@@ -60,6 +60,27 @@ await Order.objects.filter(id=1).update(total=F("price") * F("quantity"))
 await Player.objects.filter(id=1).update(score=F("base_score") + F("bonus"))
 ```
 
+## Column Names
+
+Names inside an expression are field names. `update()`, `increment()` and
+`annotate()` map them to the field's `db_column`; a name that is not a model
+field passes through unchanged, so `F("db_col")` keeps working. Related-field
+names (`F("author__id")`) are rejected.
+
+## Coalesce, Greatest and Value
+
+`Coalesce(...)`, `Greatest(...)` and `Value(x)` are expressions too. `str`
+arguments are columns, other objects are literals, and `Value("text")` forces a
+string literal:
+
+```python
+from oxyde import Coalesce, F, Greatest, Value
+
+await Item.objects.update(qty=Greatest(Coalesce("qty", F("default_qty")), 1))
+```
+
+They also work in `annotate()`; see [Aggregation](aggregation.md).
+
 ## Use with update()
 
 The most common use case:

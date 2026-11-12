@@ -15,6 +15,7 @@ use oxyde_driver::{
     explain_query, pool_backend as driver_pool_backend, ExplainFormat, ExplainOptions,
     RelationInfo,
 };
+use oxyde_sql::utils::apply_annotation_result_types;
 use oxyde_sql::{build_sql, emits_returning, Dialect};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -23,6 +24,18 @@ use pyo3::types::{PyBytes, PyString, PyTuple};
 /// Check if profiling is enabled via OXYDE_PROFILE env var
 fn is_profiling_enabled() -> bool {
     std::env::var("OXYDE_PROFILE").is_ok_and(|v| v == "1")
+}
+
+/// Decode, validate and finalize a msgpack IR. Every entry point that builds
+/// SQL goes through here so IR post-processing (annotation result types) is
+/// applied exactly once, in one place.
+fn decode_ir(bytes: &[u8]) -> PyResult<QueryIR> {
+    let mut ir =
+        QueryIR::from_msgpack(bytes).map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+    ir.validate()
+        .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+    apply_annotation_result_types(&mut ir);
+    Ok(ir)
 }
 
 /// Execute a query: deserialize IR → validate → build SQL → execute → msgpack bytes → Coroutine[bytes].
@@ -38,13 +51,8 @@ pub(crate) fn execute<'py>(
         let profile = is_profiling_enabled();
         let total_start = Instant::now();
 
-        // Stage 1: Deserialize IR from msgpack
-        let ir = QueryIR::from_msgpack(&ir_data)
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-
-        // Stage 2: Validate IR
-        ir.validate()
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+        // Stages 1-2: Deserialize and validate IR
+        let ir = decode_ir(&ir_data)?;
 
         // Stage 3: Get backend/dialect
         let backend = driver_pool_backend(&pool_name)
@@ -175,11 +183,7 @@ pub(crate) fn execute_in_transaction<'py>(
     let ir_data = ir_bytes.as_bytes().to_vec();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let ir = QueryIR::from_msgpack(&ir_data)
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-
-        ir.validate()
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+        let ir = decode_ir(&ir_data)?;
 
         let backend = driver_pool_backend(&pool_name)
             .await
@@ -274,10 +278,7 @@ pub(crate) fn render_sql<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let ir_data = ir_bytes.as_bytes().to_vec();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let ir = QueryIR::from_msgpack(&ir_data)
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-        ir.validate()
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+        let ir = decode_ir(&ir_data)?;
 
         let backend = driver_pool_backend(&pool_name)
             .await
@@ -309,11 +310,7 @@ pub(crate) fn render_sql_debug<'py>(
 ) -> PyResult<Bound<'py, PyTuple>> {
     let ir_data = ir_bytes.as_bytes();
 
-    let ir =
-        QueryIR::from_msgpack(ir_data).map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-
-    ir.validate()
-        .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+    let ir = decode_ir(ir_data)?;
 
     // Parse dialect name (default to Postgres)
     let dialect = match dialect_name {
@@ -360,10 +357,7 @@ pub(crate) fn explain<'py>(
     };
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let ir = QueryIR::from_msgpack(&ir_data)
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-        ir.validate()
-            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+        let ir = decode_ir(&ir_data)?;
 
         let backend = driver_pool_backend(&pool_name)
             .await

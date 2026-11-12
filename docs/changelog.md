@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.3.1 — Scalar expressions (unreleased)
+
+- Add `Greatest` and `Value`, and rebuild `Coalesce` as a scalar expression that
+  composes with `F` arithmetic. `Coalesce` in `annotate()` previously failed at
+  decode time; it now works, alongside `Greatest`, `Value` and `F` arithmetic.
+- Scalar annotations are values-only: read them with `.values()`,
+  `.values_list()` or `fetch_all()`. `.all()`, `.first()` and `.get()` raise
+  `TypeError`. They cannot be mixed with aggregates in one query, `having()`
+  rejects them, and an alias may not equal a model field or column name.
+- `Concat` (`CONCAT_WS`, skips NULLs) and `RawSQL` are now scalar expressions and
+  work in `annotate()` and `update()`. `Concat` accepts columns, `F` and `Value`
+  arguments. `RawSQL` is sent verbatim with database column names and no
+  parameters. `Concat.to_ir()` / `RawSQL.to_ir()` are gone.
+- Map field names inside expressions to `db_column` in `update()`, `increment()`
+  and `annotate()`. `increment()` on a field with a custom `db_column` now updates
+  the right column. Related-field names (`a__b`) are rejected.
+- `Coalesce`, `Concat` and `RawSQL` moved to `oxyde.queries.expressions`; imports
+  from `oxyde`, `oxyde.queries` and `oxyde.queries.aggregates` still work.
+  `to_ir()`, `.fields` and `.func_name` are gone from them.
+- Map an aggregate's field name to its `db_column` (`annotate(Sum("stock"))`,
+  `sum("stock")`); previously only the column name worked.
+- Enum handling in expressions now lives in the core: a string or enum literal
+  next to an enum column in `Coalesce`/`Greatest` (including nested calls) is
+  cast to that column's enum type, a bare `Value(...)` assigned in `update()` or
+  `create()` binds by the target column, and enum-valued annotations are decoded
+  as enums. Non-enum annotation results use native decoding (previously a
+  `Greatest(int_col, 1.5)` decoded as `None`). A `str`-based `Enum` member passed
+  to `Coalesce`/`Greatest` is a literal, not a column name.
+- A `NULL` literal in `Coalesce`/`Greatest` now takes the type of a sibling column
+  (`Coalesce("qty", None)` no longer fails with "bigint and text cannot be
+  matched") or of the `update()` target column. String literals in a nested
+  `Coalesce` under an enum `Greatest`, and in an `update()` expression assigned
+  to an enum column, are now cast to the enum type. A bare
+  `Value(Decimal(...))` assigned to a column with an unrecognised `db_type`
+  (MONEY, CITEXT, domains) now binds by its own type instead of as text.
+  `update(field=Value(...))` on an enum field validates the value like a raw one.
+- A plain `Decimal` or `UUID` value assigned to or filtered on a column with an
+  unrecognised `db_type` (MONEY, CITEXT, a domain) now binds by the field's
+  annotation instead of as text. The core receives these as binding-only
+  `bind_types`; they never change how results are decoded, and an explicit
+  column spec wins. A `str` column no longer has an RFC 3339-looking value
+  reinterpreted as a timestamp, and an enum field with an explicit `db_type`
+  stays a plain verbatim column.
+- An annotation alias that starts with a joined relation's `<prefix>__` is
+  rejected; the encoder would have moved it into the relation. `fetch_all()` /
+  `.values()` on a joined query without a field list now includes the joined
+  `<prefix>__<column>` keys instead of silently omitting them.
+- Expression nodes are decoded into a typed `ScalarExpr` in the core, and
+  `QueryIR` gains `annotations`. The IR protocol is unchanged, so an older core
+  would drop `annotations` silently: require `oxyde-postgres-core>=0.3.1,<0.4.0`.
+
 ## 0.3.0 — Rust schema replay (2026-11-11)
 
 - Replay migration schemas in Rust, sharing typed operations with schema diffing

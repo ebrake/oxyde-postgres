@@ -8,9 +8,9 @@ use sea_query::{
 };
 
 use crate::aggregate::build_aggregate;
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 use crate::filter::build_filter_node;
-use crate::utils::{ColumnIdent, TableIdent};
+use crate::utils::{compile_scalar, ColumnIdent, TableIdent};
 use crate::Dialect;
 
 /// Build a `SelectStatement` from QueryIR (without serializing to string).
@@ -22,6 +22,30 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
 
     if ir.distinct.unwrap_or(false) {
         query.distinct();
+    }
+
+    let annotations = ir.annotations.as_deref().unwrap_or(&[]);
+    if ir.aggregates.is_some() && !annotations.is_empty() {
+        return Err(QueryError::InvalidQuery(
+            "Scalar annotations cannot be combined with aggregates".into(),
+        ));
+    }
+
+    // `{result_prefix}__*` result columns are routed into the joined relation
+    // by the encoder, so an annotation alias in that namespace would vanish
+    // from the main rows.
+    for annotation in annotations {
+        if let Some(join) = ir.joins.iter().flatten().find(|j| {
+            annotation
+                .alias
+                .strip_prefix(j.result_prefix.as_str())
+                .is_some_and(|rest| rest.starts_with("__"))
+        }) {
+            return Err(QueryError::InvalidQuery(format!(
+                "Annotation alias '{}' collides with the result columns of join '{}'",
+                annotation.alias, join.path
+            )));
+        }
     }
 
     // Add aggregates or columns
@@ -47,6 +71,15 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
         }
     } else {
         query.column(Asterisk);
+    }
+
+    // Scalar annotations follow the plain columns (or `*`). Columns are
+    // qualified with the base table when joins are present, matching the
+    // qualification of plain columns above.
+    let expr_table = ir.joins.as_ref().map(|_| &table);
+    for annotation in annotations {
+        let expr = compile_scalar(&annotation.expr, expr_table, ir.column_types.as_ref())?;
+        query.expr_as(expr, Alias::new(annotation.alias.clone()));
     }
 
     let default_table = if ir.joins.is_some() {
@@ -117,7 +150,10 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
                 "DESC" => Order::Desc,
                 _ => Order::Asc,
             };
-            if ir.joins.is_some() {
+            // An annotation alias is an output column, not a table column:
+            // never qualify it.
+            let is_alias = annotations.iter().any(|a| &a.alias == field);
+            if ir.joins.is_some() && !is_alias {
                 let col_ref = (table.clone(), ColumnIdent(field.clone())).into_column_ref();
                 query.order_by(col_ref, order);
             } else {

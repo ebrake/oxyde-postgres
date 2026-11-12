@@ -28,7 +28,7 @@ State Attributes:
     _selected_fields: Explicit field list or None for all
     _distinct: DISTINCT flag
     _join_specs: JOIN descriptors
-    _annotations: Aggregate aliases {alias: Aggregate}
+    _annotations: Annotation aliases {alias: Aggregate | scalar expression}
     _group_by_fields: GROUP BY columns
     _lock_type: "update" | "share" | None for row locking
 
@@ -58,6 +58,12 @@ from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 from oxyde.core import ir
 from oxyde.models.utils import _unwrap_optional
 from oxyde.queries.base import _model_key
+from oxyde.queries.expressions import (
+    F,
+    _is_scalar_annotation,
+    _map_expression_columns,
+    _resolve_column_name,
+)
 from oxyde.queries.joins import _JoinDescriptor
 from oxyde.queries.mixins import (
     AggregationMixin,
@@ -226,6 +232,20 @@ class Query(
 
         return column_types or None
 
+    def _bind_types_for_query(self) -> dict[str, dict] | None:
+        """Return base and joined binding-only type hints keyed by SQL column
+        reference ("alias.column" for joined columns, as filters name them)."""
+        bind_types = dict(self.model_class._db_meta.bind_types or {})
+
+        for descriptor in self._join_specs:
+            target_hints = descriptor.target_model._db_meta.bind_types or {}
+            for _field, column in descriptor.columns:
+                hint = target_hints.get(column)
+                if hint is not None:
+                    bind_types[f"{descriptor.alias}.{column}"] = hint
+
+        return bind_types or None
+
     def _column_db_types_for_query(self) -> dict[str, str] | None:
         """Return base and joined db_type overrides keyed by SQL column
         reference ("alias.column" for joined columns, as filters name them)."""
@@ -246,7 +266,16 @@ class Query(
 
         table_name = self.model_class.get_table_name()
 
+        # Scalar annotations (Coalesce/Greatest/F-arithmetic) are emitted through
+        # `annotations`, not `cols`; aggregates go through `aggregates`.
+        scalar_annotations = {
+            alias: obj
+            for alias, obj in self._annotations.items()
+            if _is_scalar_annotation(obj)
+        }
+
         # Get fields to select (exclude virtual relation fields and FK model fields)
+        emitted_annotations: list[str] = []
         if self._selected_fields is None:
             fields = []
             for field_name, field_info in self.model_class.model_fields.items():
@@ -262,38 +291,83 @@ class Query(
                     if isinstance(inner_type, type) and issubclass(inner_type, Model):
                         continue
                 fields.append(field_name)
+            emitted_annotations = list(scalar_annotations)
         else:
             if not self._selected_fields:
                 raise ValueError("SELECT query must include at least one column")
-            fields = self._selected_fields
+            fields = []
+            for name in self._selected_fields:
+                if name in scalar_annotations:
+                    if name not in emitted_annotations:
+                        emitted_annotations.append(name)
+                else:
+                    fields.append(name)
+
+        for field, _direction in self._order_by_fields:
+            if field in scalar_annotations and field not in emitted_annotations:
+                raise ValueError(
+                    f"order_by({field!r}) refers to an annotation that is not "
+                    f"selected; include it in values()/values_list()"
+                )
 
         # Convert field names to db_columns for Rust (Rust operates on columns only)
         db_columns = [self._column_for_field(f) for f in fields]
         order_by = [
-            (field if field == "?" else self._column_for_field(field), direction)
+            (
+                field
+                if field == "?" or field in scalar_annotations
+                else self._column_for_field(field),
+                direction,
+            )
             for field, direction in self._order_by_fields
         ]
 
         # Build filter_tree
         final_filter_tree = self._build_filter_tree()
 
-        # Convert annotations to aggregates IR format (supports multiple aggregates)
+        # Convert aggregate annotations to aggregates IR format
         aggregates_ir = None
-        if self._annotations:
+        aggregate_annotations = {
+            alias: obj
+            for alias, obj in self._annotations.items()
+            if alias not in scalar_annotations
+        }
+        if aggregate_annotations:
             aggregates_ir = []
-            for alias, agg_obj in self._annotations.items():
+            for alias, agg_obj in aggregate_annotations.items():
                 if not hasattr(agg_obj, "to_ir"):
                     raise TypeError(f"annotate() received non-expression: {agg_obj!r}")
                 agg_spec = agg_obj.to_ir()
                 func_name = agg_spec.get("func", "").lower()
                 agg_ir: dict[str, Any] = {
                     "op": func_name,
-                    "field": agg_spec.get("field"),
+                    # Field name -> db column ("*" and unknown names pass through)
+                    "field": (
+                        None
+                        if agg_spec.get("field") is None
+                        else self._column_for_field(agg_spec["field"])
+                    ),
                     "alias": alias,
                 }
                 if agg_spec.get("distinct"):
                     agg_ir["distinct"] = True
                 aggregates_ir.append(agg_ir)
+
+        annotations_ir = None
+        if emitted_annotations:
+            annotations_ir = []
+            for alias in emitted_annotations:
+                obj = scalar_annotations[alias]
+                node = obj._expression._expr if isinstance(obj, F) else obj._expr
+                annotations_ir.append(
+                    {
+                        "alias": alias,
+                        "expr": _map_expression_columns(
+                            node,
+                            lambda name: _resolve_column_name(name, self.model_class),
+                        ),
+                    }
+                )
 
         # Convert group_by fields to column names
         group_by_columns = None
@@ -303,6 +377,7 @@ class Query(
             ]
 
         # Use cached col_types from model metadata plus joined column aliases.
+        # (Rust adds enum result types for Coalesce/Greatest annotations.)
         column_types = self._column_types_for_query()
 
         # Pass pk_column only for JOIN queries (needed for deduplication)
@@ -319,6 +394,7 @@ class Query(
             table=table_name,
             columns=db_columns,
             column_types=column_types,
+            bind_types=self._bind_types_for_query(),
             column_db_types=self._column_db_types_for_query(),
             model=_model_key(self.model_class),
             column_mappings=None,
@@ -331,6 +407,7 @@ class Query(
             group_by=group_by_columns,
             having=self._having,
             aggregates=aggregates_ir,
+            annotations=annotations_ir,
             lock=self._lock_type,
             pk_column=pk_column,
             union_query=union_ir,

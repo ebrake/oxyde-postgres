@@ -80,6 +80,11 @@ pub fn emits_returning(ir: &QueryIR, dialect: Dialect) -> bool {
 /// This is the main entry point for SQL generation. It dispatches to the
 /// appropriate builder based on the operation type.
 pub fn build_sql(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value>)> {
+    // Binding-only hints become ordinary column specs for SQL building; the
+    // original IR (and its `column_types`) stays the source for decoding.
+    if let Some(folded) = ir.with_binding_types() {
+        return build_sql(&folded, dialect);
+    }
     match ir.op {
         Operation::Select => builder::build_select(ir, dialect),
         Operation::Insert => builder::build_insert(ir, dialect),
@@ -461,6 +466,154 @@ mod tests {
         assert!(sql.contains("author__name"), "{}", sql);
     }
 
+    fn annotation(alias: &str, json: serde_json::Value) -> oxyde_codec::Annotation {
+        oxyde_codec::Annotation {
+            alias: alias.into(),
+            expr: serde_json::from_value(json).unwrap(),
+        }
+    }
+
+    fn eff_min() -> oxyde_codec::Annotation {
+        annotation(
+            "eff_min",
+            serde_json::json!({
+                "type": "func", "name": "greatest", "args": [
+                    {"type": "func", "name": "coalesce", "args": [
+                        {"type": "column", "name": "id"},
+                        {"type": "value", "value": 1},
+                    ]},
+                    {"type": "value", "value": 1},
+                ],
+            }),
+        )
+    }
+
+    fn author_join() -> JoinSpec {
+        JoinSpec {
+            path: "author".into(),
+            alias: "author".into(),
+            parent: None,
+            table: "authors".into(),
+            source_column: "author_id".into(),
+            target_column: "id".into(),
+            result_prefix: "author".into(),
+            columns: vec![JoinColumn {
+                field: "id".into(),
+                column: "id".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn test_select_annotation_follows_cols() {
+        let ir = QueryIR {
+            table: "posts".into(),
+            cols: Some(vec!["id".into()]),
+            annotations: Some(vec![eff_min()]),
+            ..Default::default()
+        };
+        let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            r#"SELECT "posts"."id" AS "id", GREATEST(COALESCE("id", $1), $2) AS "eff_min" FROM "posts""#
+        );
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_select_annotation_only_with_empty_cols() {
+        let ir = QueryIR {
+            table: "posts".into(),
+            cols: Some(vec![]),
+            annotations: Some(vec![eff_min()]),
+            ..Default::default()
+        };
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(
+            sql.starts_with(r#"SELECT GREATEST(COALESCE("id", $1), $2) AS "eff_min" FROM"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_annotation_alias_in_join_result_namespace_is_rejected() {
+        let ir = QueryIR {
+            table: "posts".into(),
+            cols: Some(vec!["id".into()]),
+            annotations: Some(vec![annotation(
+                "author__x",
+                serde_json::json!({"type": "value", "value": 1}),
+            )]),
+            joins: Some(vec![author_join()]),
+            ..Default::default()
+        };
+        let err = build_sql(&ir, Dialect::Postgres).unwrap_err().to_string();
+        assert!(err.contains("author__x"), "{err}");
+        // Without a matching join the alias is fine.
+        let ok = QueryIR { joins: None, ..ir };
+        assert!(build_sql(&ok, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn test_select_annotation_after_star() {
+        let ir = QueryIR {
+            table: "posts".into(),
+            annotations: Some(vec![eff_min()]),
+            ..Default::default()
+        };
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.starts_with("SELECT *, GREATEST("), "{sql}");
+    }
+
+    #[test]
+    fn test_select_annotation_qualifies_columns_under_joins() {
+        let ir = QueryIR {
+            table: "posts".into(),
+            cols: Some(vec!["id".into()]),
+            annotations: Some(vec![eff_min()]),
+            joins: Some(vec![author_join()]),
+            ..Default::default()
+        };
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.contains(r#"COALESCE("posts"."id", $1)"#), "{sql}");
+    }
+
+    #[test]
+    fn test_order_by_annotation_alias_is_unqualified_under_joins() {
+        let ir = QueryIR {
+            table: "posts".into(),
+            cols: Some(vec!["id".into()]),
+            annotations: Some(vec![eff_min()]),
+            joins: Some(vec![author_join()]),
+            order_by: Some(vec![
+                ("eff_min".into(), "DESC".into()),
+                ("id".into(), "ASC".into()),
+            ]),
+            ..Default::default()
+        };
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(
+            sql.contains(r#"ORDER BY "eff_min" DESC, "posts"."id" ASC"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_annotations_with_aggregates_is_an_error() {
+        let ir = QueryIR {
+            table: "posts".into(),
+            aggregates: Some(vec![oxyde_codec::Aggregate {
+                op: oxyde_codec::AggregateOp::Sum,
+                field: Some("id".into()),
+                alias: Some("total".into()),
+                distinct: None,
+            }]),
+            annotations: Some(vec![eff_min()]),
+            ..Default::default()
+        };
+        assert!(build_sql(&ir, Dialect::Postgres).is_err());
+    }
+
     #[test]
     fn test_on_conflict_update_requires_values() {
         let ir = QueryIR {
@@ -670,6 +823,95 @@ mod tests {
         let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
         assert!(sql.contains("LIKE") && sql.contains("ESCAPE"), "{sql}");
         assert_eq!(params.len(), 1);
+    }
+
+    // ── bind_types: binding-only hints for columns without a column spec ──
+
+    fn spec_json(json: serde_json::Value) -> ColumnTypeSpec {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn money_update(column_types: Option<HashMap<String, ColumnTypeSpec>>) -> QueryIR {
+        QueryIR {
+            op: Operation::Update,
+            table: "prices".into(),
+            values: Some(HashMap::from([("amount".into(), rmpv_str("2.50"))])),
+            filter_tree: Some(filter_cond("id", "=", rmpv_int(1))),
+            column_types,
+            bind_types: Some(HashMap::from([(
+                "amount".into(),
+                spec_json(serde_json::json!({"kind": "decimal"})),
+            )])),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_bind_types_bind_a_column_without_a_spec() {
+        // A MONEY column has no column spec, so a Decimal (msgpack-encoded as a
+        // string) would bind as text; the hint recovers the Decimal.
+        let (_, params) = build_sql(&money_update(None), Dialect::Postgres).unwrap();
+        assert!(
+            matches!(&params[0], Value::Decimal(Some(_))),
+            "expected Decimal, got {params:?}"
+        );
+    }
+
+    #[test]
+    fn test_bind_types_apply_to_filters() {
+        let ir = QueryIR {
+            table: "prices".into(),
+            cols: Some(vec!["id".into()]),
+            filter_tree: Some(filter_cond("amount", "=", rmpv_str("2.50"))),
+            bind_types: Some(HashMap::from([(
+                "amount".into(),
+                spec_json(serde_json::json!({"kind": "decimal"})),
+            )])),
+            ..Default::default()
+        };
+        let (_, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(
+            matches!(&params[0], Value::Decimal(Some(_))),
+            "expected Decimal, got {params:?}"
+        );
+    }
+
+    #[test]
+    fn test_column_types_win_over_bind_types() {
+        let ir = money_update(Some(HashMap::from([(
+            "amount".into(),
+            spec_json(serde_json::json!({"kind": "text"})),
+        )])));
+        let (_, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(
+            matches!(&params[0], Value::String(Some(_))),
+            "expected String, got {params:?}"
+        );
+    }
+
+    #[test]
+    fn test_bind_types_reach_union_subqueries() {
+        let sub = QueryIR {
+            table: "prices".into(),
+            cols: Some(vec!["id".into()]),
+            filter_tree: Some(filter_cond("amount", "=", rmpv_str("2.50"))),
+            bind_types: Some(HashMap::from([(
+                "amount".into(),
+                spec_json(serde_json::json!({"kind": "decimal"})),
+            )])),
+            ..Default::default()
+        };
+        let ir = QueryIR {
+            table: "prices".into(),
+            cols: Some(vec!["id".into()]),
+            union_query: Some(Box::new(sub)),
+            ..Default::default()
+        };
+        let (_, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(
+            matches!(&params[0], Value::Decimal(Some(_))),
+            "expected Decimal, got {params:?}"
+        );
     }
 }
 

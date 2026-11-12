@@ -5,7 +5,7 @@ use sea_query::{PostgresQueryBuilder, Query, Value};
 
 use crate::error::Result;
 use crate::filter::build_filter_node;
-use crate::utils::{bind_value, rmpv_to_simple_expr, typed_value_expr, ColumnIdent, TableIdent};
+use crate::utils::{assignment_expr, ColumnIdent, TableIdent};
 use crate::Dialect;
 
 /// Build UPDATE query from QueryIR
@@ -29,15 +29,10 @@ pub fn build_update(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
 
     if let Some(values) = &ir.values {
         for (col, val) in values {
-            if let Some(expr) = rmpv_to_simple_expr(val)? {
-                query.value(ColumnIdent(col.clone()), expr);
-            } else {
-                let spec = get_spec(col);
-                query.value(
-                    ColumnIdent(col.clone()),
-                    typed_value_expr(bind_value(val, spec), spec, dialect),
-                );
-            }
+            query.value(
+                ColumnIdent(col.clone()),
+                assignment_expr(val, get_spec(col), ir.column_types.as_ref(), dialect)?,
+            );
         }
     }
 

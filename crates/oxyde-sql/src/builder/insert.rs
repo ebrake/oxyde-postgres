@@ -4,7 +4,7 @@ use oxyde_codec::{ColumnTypeSpec, ConflictAction, QueryIR};
 use sea_query::{PostgresQueryBuilder, Query, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};
-use crate::utils::{bind_value, rmpv_to_simple_expr, typed_value_expr, ColumnIdent, TableIdent};
+use crate::utils::{assignment_expr, ColumnIdent, TableIdent};
 use crate::Dialect;
 
 /// Build INSERT query from QueryIR
@@ -28,12 +28,12 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
 
         for (col, val) in values {
             columns.push(ColumnIdent(col.clone()));
-            if let Some(expr) = rmpv_to_simple_expr(val)? {
-                vals.push(expr);
-            } else {
-                let spec = get_spec(col);
-                vals.push(typed_value_expr(bind_value(val, spec), spec, dialect));
-            }
+            vals.push(assignment_expr(
+                val,
+                get_spec(col),
+                ir.column_types.as_ref(),
+                dialect,
+            )?);
         }
 
         query.columns(columns);
@@ -65,12 +65,12 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
                         col.0
                     ))
                 })?;
-                if let Some(expr) = rmpv_to_simple_expr(val)? {
-                    vals.push(expr);
-                } else {
-                    let spec = get_spec(&col.0);
-                    vals.push(typed_value_expr(bind_value(val, spec), spec, dialect));
-                }
+                vals.push(assignment_expr(
+                    val,
+                    get_spec(&col.0),
+                    ir.column_types.as_ref(),
+                    dialect,
+                )?);
             }
             query.values(vals)?;
         }
@@ -110,15 +110,15 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
 
                         let mut conflict = sea_query::OnConflict::columns(target_cols);
                         for (col, val) in update_vals {
-                            if let Some(expr) = rmpv_to_simple_expr(val)? {
-                                conflict.value(ColumnIdent(col.clone()), expr);
-                            } else {
-                                let spec = get_spec(col);
-                                conflict.value(
-                                    ColumnIdent(col.clone()),
-                                    typed_value_expr(bind_value(val, spec), spec, dialect),
-                                );
-                            }
+                            conflict.value(
+                                ColumnIdent(col.clone()),
+                                assignment_expr(
+                                    val,
+                                    get_spec(col),
+                                    ir.column_types.as_ref(),
+                                    dialect,
+                                )?,
+                            );
                         }
 
                         query.on_conflict(conflict.clone());

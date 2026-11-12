@@ -209,6 +209,43 @@ pub struct Aggregate {
     pub distinct: Option<bool>,
 }
 
+/// Scalar (non-aggregate) expression tree.
+///
+/// Shared by F-expressions in UPDATE/INSERT values (wire-wrapped as
+/// `{"__expr__": ...}`) and by SELECT annotations. Internally tagged by `type`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScalarExpr {
+    /// Column reference.
+    Column { name: String },
+    /// Literal. `value_type` is an optional raw `ColumnTypeSpec` dict; it is
+    /// decoded leniently by the SQL layer (unparseable = `Unknown`).
+    Value {
+        value: rmpv::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_type: Option<rmpv::Value>,
+    },
+    /// Binary arithmetic: `op` is one of add|sub|mul|div.
+    Op {
+        op: String,
+        lhs: Box<ScalarExpr>,
+        rhs: Box<ScalarExpr>,
+    },
+    /// Arithmetic negation.
+    Neg { expr: Box<ScalarExpr> },
+    /// Scalar function call: `name` is one of coalesce|greatest|concat_ws.
+    Func { name: String, args: Vec<ScalarExpr> },
+    /// Verbatim SQL fragment (caller-trusted; never built from user input).
+    Raw { sql: String },
+}
+
+/// A named scalar expression added to the SELECT list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Annotation {
+    pub alias: String,
+    pub expr: ScalarExpr,
+}
+
 /// Lock type for pessimistic locking
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -303,6 +340,15 @@ pub struct QueryIR {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_db_types: Option<HashMap<String, String>>,
 
+    /// Binding-only type hints, keyed like `column_types`, for columns that
+    /// have no column spec (an unrecognised `db_type` such as MONEY or a
+    /// domain): the Python annotation says how to bind a value that msgpack
+    /// carries as a string (Decimal, UUID). Never used to decode results, and
+    /// `column_types` wins where both name a column. See
+    /// [`QueryIR::with_binding_types`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_types: Option<HashMap<String, ColumnTypeSpec>>,
+
     // Filters using FilterNode tree (supports AND/OR/NOT logic)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_tree: Option<FilterNode>,
@@ -338,6 +384,10 @@ pub struct QueryIR {
     // Aggregates (for COUNT, SUM, AVG, MAX, MIN)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregates: Option<Vec<Aggregate>>,
+
+    // Scalar expression annotations (SELECT only; mutually exclusive with aggregates)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Vec<Annotation>>,
 
     // RETURNING clause for INSERT/UPDATE/DELETE
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -411,6 +461,7 @@ impl Default for QueryIR {
             cols: None,
             column_types: None,
             column_db_types: None,
+            bind_types: None,
             filter_tree: None,
             limit: None,
             offset: None,
@@ -423,6 +474,7 @@ impl Default for QueryIR {
             column_mappings: None,
             joins: None,
             aggregates: None,
+            annotations: None,
             returning: None,
             group_by: None,
             having: None,
@@ -440,6 +492,32 @@ impl Default for QueryIR {
 }
 
 impl QueryIR {
+    /// A copy of this IR for SQL building, with `bind_types` folded into
+    /// `column_types` (explicit specs win) and the same done for `UNION`
+    /// sub-queries. `None` when there is nothing to fold.
+    ///
+    /// Result decoding must keep using the original `column_types`: a hint
+    /// only says how to bind a value, not what the column returns.
+    pub fn with_binding_types(&self) -> Option<QueryIR> {
+        let folded_union = self
+            .union_query
+            .as_deref()
+            .and_then(QueryIR::with_binding_types);
+        let has_hints = self.bind_types.as_ref().is_some_and(|h| !h.is_empty());
+        if !has_hints && folded_union.is_none() {
+            return None;
+        }
+        let mut ir = self.clone();
+        if let Some(mut merged) = ir.bind_types.take().filter(|h| !h.is_empty()) {
+            merged.extend(ir.column_types.take().unwrap_or_default());
+            ir.column_types = Some(merged);
+        }
+        if let Some(union_query) = folded_union {
+            ir.union_query = Some(Box::new(union_query));
+        }
+        Some(ir)
+    }
+
     /// Parse IR from MessagePack bytes
     pub fn from_msgpack(bytes: &[u8]) -> Result<Self> {
         rmp_serde::from_slice(bytes).map_err(|e| {
@@ -752,5 +830,41 @@ mod tests {
             join_spec("parent_pk", &[]).pk_result_column(),
             "parent__parent_pk"
         );
+    }
+
+    #[test]
+    fn test_annotations_roundtrip_msgpack() {
+        let expr: ScalarExpr = serde_json::from_value(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "column", "name": "a"},
+                {"type": "value", "value": 1, "value_type": {"kind": "big_integer"}},
+            ],
+        }))
+        .unwrap();
+        let ir = QueryIR {
+            table: "t".into(),
+            annotations: Some(vec![Annotation {
+                alias: "x".into(),
+                expr,
+            }]),
+            ..Default::default()
+        };
+        let bytes = rmp_serde::to_vec_named(&ir).unwrap();
+        let decoded = QueryIR::from_msgpack(&bytes).unwrap();
+        let ann = &decoded.annotations.unwrap()[0];
+        assert_eq!(ann.alias, "x");
+        assert!(
+            matches!(&ann.expr, ScalarExpr::Func { name, args } if name == "coalesce" && args.len() == 2)
+        );
+    }
+
+    #[test]
+    fn test_ir_without_annotations_decodes() {
+        let bytes = rmp_serde::to_vec_named(&QueryIR {
+            table: "t".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(QueryIR::from_msgpack(&bytes).unwrap().annotations.is_none());
     }
 }

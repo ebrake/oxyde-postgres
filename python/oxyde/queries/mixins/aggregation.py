@@ -10,6 +10,7 @@ from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.queries.aggregates import Avg, Max, Min, Sum
 from oxyde.queries.base import SupportsExecute, _resolve_execution_client
+from oxyde.queries.expressions import _is_scalar_annotation
 from oxyde.queries.q import Q
 
 if TYPE_CHECKING:
@@ -59,15 +60,47 @@ class AggregationMixin(Generic[TModel]):
 
     def annotate(self, **annotations: Any) -> Self:
         """
-        Add computed fields using aggregate functions.
+        Add computed fields.
+
+        Two kinds of annotations, which cannot be mixed in one query:
+
+        * Aggregates (Count, Sum, Avg, Max, Min) - usable with group_by()
+          and having().
+        * Scalar expressions (Coalesce, Greatest, Concat, Value, RawSQL, F arithmetic) - a
+          per-row value. Read them with .values()/.values_list()/.fetch_all();
+          .all()/.first()/.get() raise TypeError because the extra column has
+          no model field. Column names refer to the model's own fields.
 
         Args:
-            **annotations: Named aggregate expressions
+            **annotations: Named expressions
 
         Examples:
             from oxyde.queries.aggregates import Count, Avg
             User.objects.annotate(post_count=Count("posts"), avg_age=Avg("age"))
+
+            from oxyde import Coalesce, Greatest
+            await (
+                Product.objects
+                .annotate(eff_min=Greatest(Coalesce("minimum_quantity", 1), 1))
+                .values("id", "eff_min")
+                .all()
+            )
         """
+        field_meta = self.model_class._db_meta.field_metadata
+        taken = set(field_meta) | {meta.db_column for meta in field_meta.values()}
+        merged = {**self._annotations, **annotations}
+        for alias, obj in annotations.items():
+            if _is_scalar_annotation(obj) and alias in taken:
+                raise ValueError(
+                    f"annotate() alias {alias!r} conflicts with a model field "
+                    "or column; choose another name"
+                )
+        scalar = [a for a, o in merged.items() if _is_scalar_annotation(o)]
+        if scalar and len(scalar) != len(merged):
+            raise ValueError(
+                "annotate() cannot mix aggregate annotations with scalar "
+                "expression annotations (Coalesce, Greatest, Value, F) in one query"
+            )
         clone = self._clone()
         clone._annotations.update(annotations)
         return clone
@@ -116,6 +149,12 @@ class AggregationMixin(Generic[TModel]):
             for key, value in kwargs.items():
                 field_name, _ = _split_having_key(key, self._annotations)
                 if field_name in self._annotations:
+                    if _is_scalar_annotation(self._annotations[field_name]):
+                        raise ValueError(
+                            f"having() only accepts aggregate annotations; "
+                            f"{field_name!r} is a scalar expression - use filter() "
+                            "on the underlying columns instead"
+                        )
                     annotation_kwargs[key] = value
                 else:
                     model_kwargs[key] = value
@@ -163,6 +202,13 @@ class AggregationMixin(Generic[TModel]):
 
         # Build aggregate query (without limit/offset/order)
         agg_query = self._clone()
+        # Scalar annotations don't take part in a terminal aggregate (and
+        # can't be mixed with one).
+        agg_query._annotations = {
+            alias: obj
+            for alias, obj in agg_query._annotations.items()
+            if not _is_scalar_annotation(obj)
+        }
         agg_query._limit_value = None
         agg_query._offset_value = None
         agg_query._order_by_fields = []

@@ -135,46 +135,86 @@ results = await Post.objects.values("author_id").annotate(
 ).group_by("author_id").order_by("-count").limit(10).all()
 ```
 
-## Scalar Functions
+## Scalar Expressions
 
-### Concat
+Scalar expressions compute one value per row. They are annotated with
+`annotate()` and read back with `.values()`, `.values_list()` or `fetch_all()`.
+`.all()`, `.first()` and `.get()` raise `TypeError` for them, because the
+extra column has no model field to hydrate. A query cannot mix scalar
+annotations with aggregates, and `having()` only accepts aggregate aliases.
 
-Concatenate string fields:
-
-```python
-from oxyde import Concat
-
-results = await User.objects.annotate(
-    full_name=Concat("first_name", "last_name", separator=" ")
-).all()
-```
+Column names refer to the model's own fields (mapped to `db_column`);
+related-field names such as `author__id` are not supported. An alias may not
+equal a model field or column name.
 
 ### Coalesce
 
-Return first non-NULL value:
+Return the first non-NULL value. `str` arguments are columns; use `Value` for a
+string literal:
 
 ```python
-from oxyde import Coalesce
+from oxyde import Coalesce, Value
 
-results = await User.objects.annotate(
-    display_name=Coalesce("nickname", "username", "email")
-).all()
+rows = await User.objects.annotate(
+    display_name=Coalesce("nickname", "username", Value("anonymous"))
+).values("id", "display_name").all()
+```
+
+### Greatest
+
+```python
+from oxyde import Coalesce, Greatest
+
+rows = await Product.objects.annotate(
+    eff_min=Greatest(Coalesce("minimum_quantity", 1), 1)
+).values("id", "eff_min").order_by("-eff_min").all()
+```
+
+`Coalesce` and `Greatest` also work in `update()` values, and compose with `F`
+arithmetic: `update(qty=Coalesce("qty", F("default_qty"), 0))`.
+
+### Value
+
+`Value(x)` is an explicit literal. A `str` inside `Value` is never read as a
+column name.
+
+### Concat
+
+Join strings with an optional separator. Compiles to `CONCAT_WS(separator, ...)`,
+so NULL arguments are skipped rather than turning the whole result NULL. `str`
+arguments are columns; use `Value` for literals:
+
+```python
+from oxyde import Concat, Value
+
+rows = await User.objects.annotate(
+    full_name=Concat("first_name", "last_name", separator=" ")
+).values("id", "full_name").all()
 ```
 
 ## RawSQL
 
-For unsupported functions, use raw SQL:
+For functions Oxyde doesn't wrap, embed a raw SQL fragment. It is a scalar
+expression like the ones above, so it is read back with `.values()`:
 
 ```python
 from oxyde import RawSQL
 
-results = await User.objects.annotate(
+rows = await User.objects.annotate(
     name_length=RawSQL("LENGTH(name)")
-).all()
+).values("id", "name_length").all()
 ```
+
+The fragment is sent verbatim, so column names are database column names (not
+mapped from field names), and it takes no parameters.
 
 !!! warning "SQL Injection"
     Be careful with user input in RawSQL. Never interpolate user data directly.
+
+!!! note
+    `RawSQL` is sent verbatim and never qualified. In a query with `join()`, qualify
+    columns yourself (`RawSQL('LENGTH("posts"."name")')`); an unqualified name that
+    exists in several tables is ambiguous.
 
 ## Examples
 

@@ -141,47 +141,53 @@ class TestMinAggregate:
         assert ir["field"] == "price"
 
 
-class TestConcatAggregate:
-    """Test Concat function."""
+class TestConcatExpression:
+    """Concat is a scalar expression: CONCAT_WS(separator, ...)."""
 
-    def test_concat_to_ir(self):
-        """Test Concat.to_ir()."""
-        c = Concat("first_name", "last_name")
-        ir = c.to_ir()
-
-        assert ir["func"] == "concat"
-        assert ir["fields"] == ["first_name", "last_name"]
-
-    def test_concat_with_separator(self):
-        """Test Concat with separator."""
+    def test_concat_expression_tree(self):
         c = Concat("first_name", "last_name", separator=" ")
-        ir = c.to_ir()
 
-        assert ir["separator"] == " "
+        assert c._expr["name"] == "concat_ws"
+        assert c._expr["args"][0]["value"] == " "
+        assert [a["name"] for a in c._expr["args"][1:]] == ["first_name", "last_name"]
+
+    def test_default_separator_is_empty(self):
+        assert Concat("a", "b")._expr["args"][0]["value"] == ""
+
+    def test_requires_fields(self):
+        with pytest.raises(ValueError):
+            Concat()
 
 
-class TestCoalesceAggregate:
-    """Test Coalesce function."""
+class TestCoalesceExpression:
+    """Coalesce is a scalar expression (not an aggregate)."""
 
-    def test_coalesce_to_ir(self):
-        """Test Coalesce.to_ir()."""
+    def test_coalesce_expression_tree(self):
+        """Str args are column references."""
         c = Coalesce("nickname", "name", "email")
-        ir = c.to_ir()
 
-        assert ir["func"] == "coalesce"
-        assert ir["fields"] == ["nickname", "name", "email"]
+        assert c._expr == {
+            "type": "func",
+            "name": "coalesce",
+            "args": [
+                {"type": "column", "name": "nickname"},
+                {"type": "column", "name": "name"},
+                {"type": "column", "name": "email"},
+            ],
+        }
 
 
 class TestRawSQL:
-    """Test RawSQL expression."""
+    """RawSQL is a scalar expression carrying a verbatim fragment."""
 
-    def test_raw_sql_to_ir(self):
-        """Test RawSQL.to_ir()."""
+    def test_raw_sql_expression_node(self):
         raw = RawSQL("CURRENT_TIMESTAMP")
-        ir = raw.to_ir()
 
-        assert ir["type"] == "raw"
-        assert ir["sql"] == "CURRENT_TIMESTAMP"
+        assert raw._expr == {"type": "raw", "sql": "CURRENT_TIMESTAMP"}
+
+    def test_raw_sql_rejects_empty(self):
+        with pytest.raises(ValueError):
+            RawSQL("  ")
 
 
 class TestAnnotateMethod:

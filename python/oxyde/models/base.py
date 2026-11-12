@@ -98,6 +98,7 @@ from oxyde.models.metadata import (
     ModelMeta,
     RelationDescriptorBase,
     RelationInfo,
+    bind_type_for_meta,
     column_type_for_meta,
     is_column_field,
 )
@@ -322,6 +323,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
 
         column_types: dict[str, dict] = {}
         column_db_types: dict[str, str] = {}
+        bind_types: dict[str, dict] = {}
         reverse_map: dict[str, str] = {}
         for field_name, meta in cls._db_meta.field_metadata.items():
             # Virtual relation fields and FK model fields (author: Author)
@@ -331,6 +333,8 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             spec = column_type_for_meta(meta)
             if spec is not None:
                 column_types[meta.db_column] = spec
+            elif (hint := bind_type_for_meta(meta)) is not None:
+                bind_types[meta.db_column] = hint
             # Preserve db_type overrides for array casts and JSON array lookups.
             if meta.db_type is not None:
                 column_db_types[meta.db_column] = meta.db_type
@@ -340,6 +344,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
 
         cls._db_meta.column_types = column_types if column_types else None
         cls._db_meta.column_db_types = column_db_types or None
+        cls._db_meta.bind_types = bind_types or None
         cls._db_meta.reverse_column_map = reverse_map
 
     @classmethod

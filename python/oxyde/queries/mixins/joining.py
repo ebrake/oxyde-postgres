@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from oxyde.exceptions import FieldLookupError
+from oxyde.models.metadata import db_column_for
 from oxyde.queries.base import (
     _collect_model_columns,
     _primary_key_meta,
@@ -70,10 +71,7 @@ class JoiningMixin(Generic[TModel]):
 
     def _column_for_field(self, field: str) -> str:
         """Get database column name for a field."""
-        meta = self.model_class._db_meta.field_metadata.get(field)
-        if meta is not None:
-            return meta.db_column
-        return field
+        return db_column_for(self.model_class, field)
 
     def _column_mappings_for_fields(self, fields: Iterable[str]) -> dict[str, str]:
         """Get column mappings for fields where column differs from field name."""
