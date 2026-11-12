@@ -364,6 +364,80 @@ class TestDropForeignKeyPipeline:
         )
 
 
+class TestAlterColumnDowngradePipeline:
+    """A plain alter_column rolls back: its downgrade undoes the change."""
+
+    @staticmethod
+    def _coded(unique: bool = False, nullable: bool = False) -> type[Model]:
+        class Coded(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            code: str | None = Field(default=None, max_length=20, db_unique=unique)
+
+            class Meta:
+                is_table = True
+                table_name = "coded"
+
+        if not nullable:
+            Coded._db_meta.field_metadata["code"].nullable = False
+        return Coded
+
+    @pytest.mark.parametrize(
+        "before,after,up_fragment,down_fragment",
+        [
+            (
+                {"unique": False},
+                {"unique": True},
+                'ADD CONSTRAINT "coded_code_key" UNIQUE ("code")',
+                'DROP CONSTRAINT "coded_code_key"',
+            ),
+            (
+                {"unique": True},
+                {"unique": False},
+                'DROP CONSTRAINT "coded_code_key"',
+                'ADD CONSTRAINT "coded_code_key" UNIQUE ("code")',
+            ),
+            (
+                {"nullable": False},
+                {"nullable": True},
+                'ALTER COLUMN "code" DROP NOT NULL',
+                'ALTER COLUMN "code" SET NOT NULL',
+            ),
+            (
+                {"nullable": True},
+                {"nullable": False},
+                'ALTER COLUMN "code" SET NOT NULL',
+                'ALTER COLUMN "code" DROP NOT NULL',
+            ),
+        ],
+    )
+    def test_change_and_its_rollback(
+        self, tmp_path, before, after, up_fragment, down_fragment
+    ):
+        old = _snapshot_from_models([self._coded(**before)], "postgres")
+        new = _snapshot_from_models([self._coded(**after)], "postgres")
+        ops = json.loads(migration_compute_diff(json.dumps(old), json.dumps(new)))
+        assert [op["type"] for op in ops] == ["alter_column"]
+        path = generate_migration_file(ops, migrations_dir=tmp_path, name="alter_coded")
+        module = load_migration_module(path)
+        assert module is not None
+
+        def statements(run, schema):
+            # Execute mode resolves the alteration against the schema it
+            # starts from, as `migrate` and `downgrade` do.
+            state = SchemaState()
+            for table in deepcopy(schema["tables"]).values():
+                state.apply_operation({"type": "create_table", "table": table})
+            ctx = MigrationContext(mode="execute", schema_state=state)
+            run(ctx)
+            return ctx._sql_statements
+
+        up_sql = statements(module.upgrade, old)
+        down_sql = statements(module.downgrade, new)
+        assert len(up_sql) == 1 and up_fragment in up_sql[0], up_sql
+        # Without a downgrade, rolling back would silently leave the change.
+        assert len(down_sql) == 1 and down_fragment in down_sql[0], down_sql
+
+
 class TestNullsDistinctPipeline:
     @pytest.mark.parametrize(
         "old_unique,old_nulls,new_unique,new_nulls",

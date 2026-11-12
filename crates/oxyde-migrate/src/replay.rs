@@ -566,7 +566,10 @@ mod tests {
         assert_eq!(users.foreign_keys, Vec::new());
         // A foreign key in another table that points at the column is not
         // dropped with it: DROP COLUMN without CASCADE refuses to run.
-        assert_eq!(state.tables["posts"].foreign_keys[0].ref_columns, vec!["email"]);
+        assert_eq!(
+            state.tables["posts"].foreign_keys[0].ref_columns,
+            vec!["email"]
+        );
     }
 
     #[test]

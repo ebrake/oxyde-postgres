@@ -441,17 +441,21 @@ def generate_migration_file(
         elif op_type == "rename_column":
             t, new, old = op["table"], op["new_name"], op["old_name"]
             downgrade_lines.append(f'    ctx.rename_column("{t}", "{new}", "{old}")')
-        elif op_type == "alter_column" and (
-            op.get("old_field", {}).get("nulls_not_distinct", False)
-            or op.get("new_field", {}).get("nulls_not_distinct", False)
-        ):
-            # Reverse the new unique-column option without changing generated
-            # downgrades for existing models that do not use it.
-            downgrade_lines.append(
-                _operation_to_python(
-                    {**op, "old_field": op["new_field"], "new_field": op["old_field"]}
+        elif op_type == "alter_column":
+            old_field, new_field = op.get("old_field"), op.get("new_field")
+            if old_field and new_field:
+                # Undo the change by applying it the other way round.
+                downgrade_lines.append(
+                    _operation_to_python(
+                        {**op, "old_field": new_field, "new_field": old_field}
+                    )
                 )
-            )
+            else:
+                # An op written as column + changes carries no previous value.
+                downgrade_lines.append(
+                    f"    # TODO: Reverse alter_column for "
+                    f"{op['table']}.{op.get('column')}"
+                )
         elif op_type == "create_index":
             downgrade_lines.append(
                 f'    ctx.drop_index("{op["table"]}", "{op["index"]["name"]}")'

@@ -778,9 +778,9 @@ impl RelationOwner<'_> {
             RelationOwner::PrimaryKey(table) => {
                 format!("the primary key index PostgreSQL creates for table '{table}'")
             }
-            RelationOwner::UniqueConstraint { table, column } => format!(
-                "the unique constraint index PostgreSQL creates for '{table}.{column}'"
-            ),
+            RelationOwner::UniqueConstraint { table, column } => {
+                format!("the unique constraint index PostgreSQL creates for '{table}.{column}'")
+            }
             RelationOwner::Sequence { table, column } => {
                 format!("the sequence PostgreSQL creates for '{table}.{column}'")
             }

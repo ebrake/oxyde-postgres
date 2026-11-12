@@ -786,7 +786,10 @@ fn alter_unique_uses_the_name_postgres_gives_an_inline_unique() {
     }
     .to_sql(Dialect::Postgres)
     .unwrap();
-    assert!(short[0].ends_with("DROP CONSTRAINT \"users_code_key\""), "{short:?}");
+    assert!(
+        short[0].ends_with("DROP CONSTRAINT \"users_code_key\""),
+        "{short:?}"
+    );
 }
 
 #[test]
@@ -2431,7 +2434,9 @@ mod index_keys {
         assert!(error.contains("unique constraint"), "{error}");
 
         // A plain 63-byte cut is a different name and does not clash.
-        build(&format!("{table}_id")).validate_model_schema().unwrap();
+        build(&format!("{table}_id"))
+            .validate_model_schema()
+            .unwrap();
 
         // `<table>_pkey` keeps the whole suffix too.
         let long_table = "b".repeat(80);

@@ -150,9 +150,10 @@ fn index_column(key: &IndexKey) -> Result<IndexColumn> {
                 .iter()
                 .map(|(name, spec)| (name.clone(), spec.clone()))
                 .collect();
-            let compiled = compile_scalar(expr, None, ExprTypes::from(Some(&types))).map_err(
-                |e| MigrateError::MigrationError(format!("invalid index expression: {e}")),
-            )?;
+            let compiled =
+                compile_scalar(expr, None, ExprTypes::from(Some(&types))).map_err(|e| {
+                    MigrateError::MigrationError(format!("invalid index expression: {e}"))
+                })?;
             IndexColumn::from(compiled)
         }
     };

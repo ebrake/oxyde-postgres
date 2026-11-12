@@ -22,6 +22,12 @@
   names an inline `UNIQUE` (`<table>_<column>_key`, shortened to fit 63 bytes), so
   `DROP CONSTRAINT` finds the constraint `CREATE TABLE` made on long table or
   column names. Names that already fit are unchanged.
+- `makemigrations` now writes a `downgrade` for every column change
+  (`unique`, `nullable`, type, length, default). Before, only a change involving
+  `nulls_not_distinct` was reversed, so rolling back a migration that added or
+  removed a `unique` constraint (or changed nullability) silently left the schema
+  as it was. A change written as `column` plus `changes`, which has no previous
+  value to restore, leaves a `# TODO` comment.
 - Expression index keys no longer contain an enum's list of values, so adding an
   enum member does not recreate the index. Their `column_types` are written in a
   fixed order, so generated migration files are reproducible.
