@@ -1,6 +1,6 @@
 # Oxyde for PostgreSQL
 
-PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and Python 3.13+. See the [release notes](changelog.md) for dependency upgrades and all fork additions.
+PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and **Python 3.13+**. Version **0.3.1** adds scalar expressions to annotations and updates; see the [expression guide](guide/expressions.md) and [release notes](changelog.md).
 
 
 <p align="center">
@@ -12,17 +12,17 @@ PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requir
 <p align="center"> Inspired by the elegance of <a href="https://www.djangoproject.com/">Django’s ORM</a>, Oxyde focuses on explicitness over magic, providing a modern developer-friendly workflow with predictable behavior and strong typing throughout. </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/license/mr-fatalyst/oxyde">
-  <img src="https://github.com/mr-fatalyst/oxyde/actions/workflows/test.yml/badge.svg">
-  <img src="https://img.shields.io/pypi/v/oxyde">
-  <img src="https://img.shields.io/pypi/pyversions/oxyde">
-  <img src="https://static.pepy.tech/badge/oxyde" alt="PyPI Downloads">
+  <img src="https://img.shields.io/github/license/ebrake/oxyde-postgres" alt="License">
+  <img src="https://github.com/ebrake/oxyde-postgres/actions/workflows/test.yml/badge.svg" alt="Tests">
+  <img src="https://img.shields.io/pypi/v/oxyde-postgres" alt="PyPI version">
+  <img src="https://img.shields.io/pypi/pyversions/oxyde-postgres" alt="Python versions">
+  <img src="https://static.pepy.tech/badge/oxyde-postgres" alt="PyPI Downloads">
 </p>
 
 ---
 
 !!! warning "Heads up!"
-    Oxyde is a young project under active development. The API may evolve between minor versions. Feedback, bug reports, and ideas are very welcome. Feel free to [open an issue](https://github.com/mr-fatalyst/oxyde/issues)!
+    Oxyde for PostgreSQL is under active development. The API may evolve between minor versions. Report fork issues in [ebrake/oxyde-postgres](https://github.com/ebrake/oxyde-postgres/issues).
 
 ## Quick Links
 
@@ -68,9 +68,15 @@ PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requir
 - **Pydantic v2 models** — Full validation, type hints, serialization
 - **Async-first** — Built for modern async Python with `asyncio`
 - **Rust performance** — SQL generation and execution in native Rust
-- **Multi-database** — PostgreSQL 18+ support
+- **PostgreSQL 18+** — Native arrays, JSONB, enums, row locks, and `RETURNING`
+- **[Scalar expressions](guide/expressions.md)** — `Coalesce`, `Greatest`, `Concat`, `Value`, `RawSQL`, and `F` arithmetic in annotations and updates
+- **[Typed containment](guide/filtering.md#array-lookups)** — `contains`, `contained_by`, and `overlap` for arrays and JSON arrays
+- **[NULL-aware uniqueness](guide/models.md#unique-indexes-and-nulls)** — `NULLS NOT DISTINCT` for unique fields and indexes
 - **Transactions** — `transaction.atomic()` context manager with savepoints
-- **Migrations** — Django-style `makemigrations` and `migrate` CLI
+- **[Migrations](guide/migrations.md#schema-replay)** — Rust schema replay, advisory locking, and Django-style migration commands
+- **[Generated stubs](guide/models.md#generated-type-stubs)** — Typed query methods with mypy, pyright, and ty coverage
+- **[Transaction depth](guide/transactions.md#inspecting-transaction-depth)** — Inspect the current task's nested `atomic()` blocks
+- **[PgBouncer support](guide/connections.md#postgresql-settings)** — Cache-disabled unnamed statements and deferred custom-type resolution
 
 ## Why Oxyde?
 
@@ -78,7 +84,7 @@ PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requir
 
 Oxyde's Rust core handles SQL generation and query execution, releasing Python's GIL during database I/O. This enables true parallelism for database operations.
 
-**Benchmarks vs popular Python ORMs** (avg ops/sec, higher is better):
+**Upstream Oxyde benchmarks vs popular Python ORMs** (avg ops/sec, higher is better; these are not measurements of this fork):
 
 | Database   | Oxyde | Tortoise | Piccolo | Django | SQLAlchemy | SQLModel | Peewee |
 |------------|-------|----------|---------|--------|------------|----------|--------|
@@ -118,21 +124,17 @@ async with transaction.atomic():
 
 | Database   | Min Version | Status | Notes |
 |------------|-------------|--------|-------|
-| PostgreSQL | 12+ | Full | RETURNING, UPSERT, FOR UPDATE/SHARE, JSON, Arrays |
+| PostgreSQL | 18+ | Full | RETURNING, UPSERT, FOR UPDATE/SHARE, JSONB, Arrays |
 
 
 ## Ecosystem
 
 ### Oxyde Admin
 
-Auto-generated admin panel for Oxyde ORM with zero boilerplate.
+Upstream Oxyde offers an auto-generated admin panel. Its compatibility with this fork must be checked separately because both distributions use the `oxyde` import namespace.
 
 - Automatic CRUD, search, filters, export
 - FastAPI, Litestar, Sanic, Quart, Falcon
 - Theming, authentication, bulk operations
-
-```bash
-pip install oxyde-postgres-admin
-```
 
 [:octicons-arrow-right-24: GitHub](https://github.com/mr-fatalyst/oxyde-admin)

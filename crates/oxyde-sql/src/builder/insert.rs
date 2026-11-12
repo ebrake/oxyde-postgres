@@ -1,10 +1,10 @@
 //! INSERT query building
 
-use oxyde_codec::{ColumnTypeSpec, ConflictAction, QueryIR};
+use oxyde_codec::{ConflictAction, QueryIR};
 use sea_query::{PostgresQueryBuilder, Query, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};
-use crate::utils::{assignment_expr, ColumnIdent, TableIdent};
+use crate::utils::{assignment_expr, ColumnIdent, ExprTypes, TableIdent};
 use crate::Dialect;
 
 /// Build INSERT query from QueryIR
@@ -13,13 +13,7 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
     let mut query = Query::insert();
     query.into_table(table);
 
-    // Helper to get the column spec; Unknown = native conversion
-    let get_spec = |col: &str| -> &ColumnTypeSpec {
-        ir.column_types
-            .as_ref()
-            .and_then(|ct| ct.get(col))
-            .unwrap_or(&ColumnTypeSpec::Unknown)
-    };
+    let types = ExprTypes::of(ir);
 
     // Single row insert
     if let Some(values) = &ir.values {
@@ -28,12 +22,7 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
 
         for (col, val) in values {
             columns.push(ColumnIdent(col.clone()));
-            vals.push(assignment_expr(
-                val,
-                get_spec(col),
-                ir.column_types.as_ref(),
-                dialect,
-            )?);
+            vals.push(assignment_expr(val, col, types, dialect)?);
         }
 
         query.columns(columns);
@@ -65,12 +54,7 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
                         col.0
                     ))
                 })?;
-                vals.push(assignment_expr(
-                    val,
-                    get_spec(&col.0),
-                    ir.column_types.as_ref(),
-                    dialect,
-                )?);
+                vals.push(assignment_expr(val, &col.0, types, dialect)?);
             }
             query.values(vals)?;
         }
@@ -112,12 +96,7 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
                         for (col, val) in update_vals {
                             conflict.value(
                                 ColumnIdent(col.clone()),
-                                assignment_expr(
-                                    val,
-                                    get_spec(col),
-                                    ir.column_types.as_ref(),
-                                    dialect,
-                                )?,
+                                assignment_expr(val, col, types, dialect)?,
                             );
                         }
 

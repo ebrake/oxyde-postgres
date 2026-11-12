@@ -73,7 +73,7 @@ nav:
     - Database Connections: guide/connections.md
     - Queries: guide/queries.md
     - Filtering: guide/filtering.md
-    - F-Expressions: guide/expressions.md
+    - Expressions: guide/expressions.md
     - Aggregation: guide/aggregation.md
     - Relations: guide/relations.md
     - Transactions: guide/transactions.md
@@ -93,7 +93,7 @@ extra:
     provider: mike
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/mr-fatalyst/oxyde
+      link: https://github.com/ebrake/oxyde-postgres
     - icon: fontawesome/brands/linkedin
       link: https://linkedin.com/in/nikita-ryzhenkov
     - icon: fontawesome/solid/envelope

@@ -416,6 +416,35 @@ class User(Model):
         is_table = True
 ```
 
+## Generated Type Stubs
+
+Configure model modules in `oxyde_config.py`, then generate `.pyi` files beside
+them for typed manager and query methods:
+
+```python
+# oxyde_config.py
+MODELS = ["myapp.models"]
+```
+
+```bash
+oxyde generate-stubs
+```
+
+Generated methods include field-specific filter operands, array and JSON
+`contains` / `contained_by` / `overlap` lookups, and the keyword-only
+`create(..., _skip_hooks=False)` parameter. Unknown field names remain type
+errors.
+
+A generated stub shadows the whole Python module, so it also preserves public
+constants, aliases, supporting classes, intentional reexports, decorators,
+PEP 695 type parameters, and imports guarded by `TYPE_CHECKING`. Async generator
+signatures retain async iteration and `asynccontextmanager` compatibility;
+Python 3.15 lazy imports become ordinary imports in portable stubs.
+
+Regenerate stubs when model fields or module interfaces change. The repository
+checks the generated interfaces and expected type errors with mypy, pyright,
+and ty.
+
 ## Next Steps
 
 - [Fields](fields.md) — Complete field reference

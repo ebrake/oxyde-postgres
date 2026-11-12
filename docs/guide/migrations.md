@@ -10,6 +10,30 @@ Migrations track database schema changes:
 2. Run `oxyde makemigrations` to generate migration files
 3. Run `oxyde migrate` to apply changes to the database
 
+## Schema Replay
+
+Migration history is replayed in Rust with the same typed operations used for
+schema diffing and SQL generation. `sqlmigrate` resolves column alterations
+against this history. Execution tracks renames before later operations in the
+same migration, so altering a renamed column uses its current definition.
+
+Replay validates the historical migration contract. Errors identify the
+filename, operation number (starting at 1), and operation type. Invalid
+operations previously recorded with `--fake` must be corrected in that
+historical file before replay or squashing can proceed.
+
+For programmatic users, `SchemaState.tables` is a read-only snapshot view:
+each access returns a fresh canonical dictionary. Mutate state through
+`apply_operation()`; changing a returned dictionary does not change the replay
+state. Snapshots omit legacy metadata and omitted-key provenance. Legacy field
+formats are normalized before replay and can be converted with
+[migration squashing](#squashing-migration-history).
+
+Migration execution acquires a PostgreSQL advisory lock on a dedicated
+connection to prevent concurrent migration runners. Ordinary DDL runs in a
+transaction; see [Enum Migrations](#enum-migrations) for operations that make
+Oxyde execute a migration without a transaction.
+
 ## CLI Commands
 
 ### makemigrations
@@ -405,7 +429,7 @@ oxyde migrate
 ### PostgreSQL
 
 - Full ALTER TABLE support
-- Transactional DDL — except migrations containing `ALTER TYPE ... ADD VALUE`, which PostgreSQL forbids inside a transaction (see [Enum Migrations](#enum-migrations))
+- Transactional DDL — Oxyde executes migrations containing `ALTER TYPE ... ADD VALUE` without a transaction (see [Enum Migrations](#enum-migrations))
 - Concurrent index creation
 - Type changes emit a `USING "col"::text::<type>` clause, so conversions such as text ↔ enum work
 
@@ -511,7 +535,7 @@ def upgrade(ctx):
 | PostgreSQL | `ALTER TYPE "post_status_enum" ADD VALUE IF NOT EXISTS 'archived'` |
 
 !!! warning "PostgreSQL runs this migration without a transaction"
-    PostgreSQL forbids `ALTER TYPE ... ADD VALUE` inside a transaction block. When a migration contains such an operation, Oxyde executes the **entire** migration without a transaction, so a failure halfway through leaves the already-executed statements applied.
+    PostgreSQL allows `ALTER TYPE ... ADD VALUE` in a transaction, but the new label cannot be used until that transaction commits ([PostgreSQL documentation](https://www.postgresql.org/docs/18/sql-altertype.html#SQL-ALTERTYPE-NOTES)). When a migration contains such an operation, Oxyde executes the **entire** migration without a transaction, so a failure halfway through leaves the already-executed statements applied.
 
     Keep enum value additions in their own migration so the non-transactional window stays as small as possible:
 
@@ -647,7 +671,10 @@ oxyde makemigrations --name "various_changes"
 
 ### 4. Don't Edit Applied Migrations
 
-Once a migration is applied to production, create new migrations for fixes.
+Once a migration is applied to production, create new migrations for schema
+changes. If strict replay reports an invalid historical operation, correct the
+identified file so its declared history matches the migration contract; a
+later migration cannot repair a failure to replay that earlier file.
 
 ### 5. Keep Migrations in Version Control
 

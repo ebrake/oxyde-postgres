@@ -10,7 +10,7 @@ use sea_query::{
 use crate::aggregate::build_aggregate;
 use crate::error::{QueryError, Result};
 use crate::filter::build_filter_node;
-use crate::utils::{compile_scalar, ColumnIdent, TableIdent};
+use crate::utils::{compile_scalar, ColumnIdent, ExprTypes, TableIdent};
 use crate::Dialect;
 
 /// Build a `SelectStatement` from QueryIR (without serializing to string).
@@ -78,7 +78,7 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
     // qualification of plain columns above.
     let expr_table = ir.joins.as_ref().map(|_| &table);
     for annotation in annotations {
-        let expr = compile_scalar(&annotation.expr, expr_table, ir.column_types.as_ref())?;
+        let expr = compile_scalar(&annotation.expr, expr_table, ExprTypes::of(ir))?;
         query.expr_as(expr, Alias::new(annotation.alias.clone()));
     }
 

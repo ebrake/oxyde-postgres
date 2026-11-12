@@ -1,6 +1,9 @@
-# F-Expressions
+# Expressions
 
-F expressions reference database columns for atomic operations executed entirely in the database.
+Expressions compute values in PostgreSQL for annotations and atomic updates.
+`F` references a column and supports arithmetic; `Coalesce`, `Greatest`,
+`Concat`, `Value`, and `RawSQL` compose with it. Scalar annotations require
+`oxyde-postgres-core>=0.3.1,<0.4.0`.
 
 ## Why F Expressions?
 
@@ -71,15 +74,74 @@ names (`F("author__id")`) are rejected.
 
 `Coalesce(...)`, `Greatest(...)` and `Value(x)` are expressions too. `str`
 arguments are columns, other objects are literals, and `Value("text")` forces a
-string literal:
+string literal. Enum members are literals, including string-based enums:
 
 ```python
 from oxyde import Coalesce, F, Greatest, Value
 
-await Item.objects.update(qty=Greatest(Coalesce("qty", F("default_qty")), 1))
+await Item.objects.query().update(qty=Greatest(Coalesce("qty", F("default_qty")), 1))
 ```
 
 They also work in `annotate()`; see [Aggregation](aggregation.md).
+
+## Use with annotate()
+
+Compute a value for each row and select it with `.values()`:
+
+```python
+from oxyde import Coalesce, F, Greatest
+
+rows = await Product.objects.annotate(
+    available=Greatest(Coalesce("stock", 0) - F("reserved"), 0),
+).values("id", "available").order_by("-available").all()
+```
+
+Use `.values(...).all()`, `.values_list(...).all()`, or `fetch_all()` for
+scalar results. Model-returning `.all()`, `.first()`, and `.get()` raise
+`TypeError`. A query cannot mix scalar annotations and aggregates, and
+`having()` accepts aggregate aliases only. See
+[Aggregation](aggregation.md#scalar-expressions) for alias and decoding rules.
+
+## Strings and Raw SQL
+
+`Concat` uses `CONCAT_WS`, skipping NULL arguments:
+
+```python
+from oxyde import Concat, Value
+
+await User.objects.query().update(
+    display_name=Concat("first_name", "last_name", Value("(member)"), separator=" ")
+)
+```
+
+`RawSQL("LENGTH(name)")` is a scalar expression usable in annotations and
+updates. It uses database column names verbatim, does not map `db_column`, and
+takes no parameters. In joined queries, qualify ambiguous columns yourself.
+Use bound literals for data; never interpolate user input into the fragment.
+
+## Typed Literals and NULLs
+
+The core types sibling literals in `Coalesce` and `Greatest` from known column
+types, including nested calls. Enum literals are cast to the column's native
+enum type. A bare `Value(...)` assigned in `create()` or `update()` uses the
+target column type, and enum values in `update()` are validated like raw values.
+
+An array column can supply the type of an empty list fallback:
+
+```python
+await Article.objects.query().update(tags=Coalesce("tags", Value([])))
+```
+
+Incompatible array elements raise an error instead of silently becoming NULL
+elements. NULL literals use a known sibling or target type when available;
+otherwise the compiler emits SQL `NULL` and lets PostgreSQL resolve the type.
+PostgreSQL still requires compatible argument types for each function.
+
+A custom `db_type` with no recognized column spec (such as MONEY, CITEXT, or
+a domain) supplies no sibling expression type. Python Decimal and UUID hints
+guide parameter binding on those fields without changing result decoding.
+Known explicit column specs take precedence. String values remain strings,
+including text that looks like a timestamp.
 
 ## Use with update()
 
@@ -120,12 +182,15 @@ await Post.objects.filter(id=1).increment("views", by=-1)
 
 F expressions work with bulk updates:
 
+Use `Model.objects.query().update(...)` to update every row, or start with
+`filter(...)` to limit the rows. `update()` belongs to the query builder.
+
 ```python
 # Give everyone a 5% raise
-await Employee.objects.update(salary=F("salary") * 1.05)
+await Employee.objects.query().update(salary=F("salary") * 1.05)
 
 # Reset all counters
-await Stats.objects.update(count=F("count") * 0)  # Set to 0
+await Stats.objects.query().update(count=F("count") * 0)  # Set to 0
 ```
 
 ## Complex Expressions
@@ -214,17 +279,13 @@ await Product.objects.filter(on_sale=True).update(
     price=F("price") * 0.8
 )
 
-# Round up to nearest dollar
-await Product.objects.update(
-    price=F("price") + 0.99  # Simple approach
-)
 ```
 
 ### Score Calculation
 
 ```python
 # Calculate weighted score
-await Score.objects.update(
+await Score.objects.query().update(
     total=F("correct") * 10 - F("wrong") * 5
 )
 ```
@@ -233,7 +294,8 @@ await Score.objects.update(
 
 ### No Filtering with F
 
-F expressions are for UPDATE values, not for filtering:
+F expressions work in update values and scalar annotations. They are not
+accepted as filter operands:
 
 ```python
 # This won't work
@@ -251,12 +313,13 @@ F expressions only support numeric operations:
 # F("first_name") + " " + F("last_name")  # String concat
 # F("name").lower()  # String methods
 
-# Use database functions or compute in application
+# Use Concat for string concatenation or RawSQL for database functions
 ```
 
-### Read-Only in Select
+### Scalar Results Need a Projection
 
-F expressions are primarily for UPDATE statements. For computed columns in SELECT, use annotations with aggregate functions.
+Use `.values()` or `.values_list()` before executing a scalar-annotated query,
+or use `fetch_all()` directly. Extra computed columns cannot hydrate model fields.
 
 ## Next Steps
 

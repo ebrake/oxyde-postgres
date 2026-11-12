@@ -209,6 +209,18 @@ pub struct Aggregate {
     pub distinct: Option<bool>,
 }
 
+/// Deserialize an optional `ColumnTypeSpec`, mapping a value that does not
+/// parse as one to `None` rather than failing the whole IR.
+fn lenient_column_type<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ColumnTypeSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<rmpv::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|v| rmpv::ext::from_value::<ColumnTypeSpec>(v).ok()))
+}
+
 /// Scalar (non-aggregate) expression tree.
 ///
 /// Shared by F-expressions in UPDATE/INSERT values (wire-wrapped as
@@ -218,12 +230,17 @@ pub struct Aggregate {
 pub enum ScalarExpr {
     /// Column reference.
     Column { name: String },
-    /// Literal. `value_type` is an optional raw `ColumnTypeSpec` dict; it is
-    /// decoded leniently by the SQL layer (unparseable = `Unknown`).
+    /// Literal. `value_type` is an optional `ColumnTypeSpec` dict, decoded once
+    /// and leniently: an absent or unparseable hint is `None` (treated as
+    /// `Unknown` by the SQL layer).
     Value {
         value: rmpv::Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        value_type: Option<rmpv::Value>,
+        #[serde(
+            default,
+            deserialize_with = "lenient_column_type",
+            skip_serializing_if = "Option::is_none"
+        )]
+        value_type: Option<ColumnTypeSpec>,
     },
     /// Binary arithmetic: `op` is one of add|sub|mul|div.
     Op {
@@ -345,7 +362,9 @@ pub struct QueryIR {
     /// domain): the Python annotation says how to bind a value that msgpack
     /// carries as a string (Decimal, UUID). Never used to decode results, and
     /// `column_types` wins where both name a column. See
-    /// [`QueryIR::with_binding_types`].
+    /// [`QueryIR::with_binding_types`]; on the folded copy this holds only the
+    /// keys whose `column_types` entry *is* such a hint, so expression typing
+    /// can tell them from real column specs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_types: Option<HashMap<String, ColumnTypeSpec>>,
 
@@ -496,8 +515,13 @@ impl QueryIR {
     /// `column_types` (explicit specs win) and the same done for `UNION`
     /// sub-queries. `None` when there is nothing to fold.
     ///
-    /// Result decoding must keep using the original `column_types`: a hint
-    /// only says how to bind a value, not what the column returns.
+    /// The copy keeps `bind_types`, reduced to the keys that `column_types` did
+    /// not define: those entries of the folded `column_types` are only binding
+    /// hints. They say how to bind a value, but not what the column's type is,
+    /// so a literal next to such a column must not take that type. Only the
+    /// copy has this meaning, so it must not be folded again.
+    ///
+    /// Result decoding must keep using the original `column_types`.
     pub fn with_binding_types(&self) -> Option<QueryIR> {
         let folded_union = self
             .union_query
@@ -508,9 +532,13 @@ impl QueryIR {
             return None;
         }
         let mut ir = self.clone();
-        if let Some(mut merged) = ir.bind_types.take().filter(|h| !h.is_empty()) {
-            merged.extend(ir.column_types.take().unwrap_or_default());
+        if let Some(mut hints) = ir.bind_types.take().filter(|h| !h.is_empty()) {
+            let specs = ir.column_types.take().unwrap_or_default();
+            hints.retain(|k, _| !specs.contains_key(k));
+            let mut merged = hints.clone();
+            merged.extend(specs);
             ir.column_types = Some(merged);
+            ir.bind_types = Some(hints).filter(|h| !h.is_empty());
         }
         if let Some(union_query) = folded_union {
             ir.union_query = Some(Box::new(union_query));

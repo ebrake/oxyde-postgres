@@ -11,7 +11,7 @@ use super::pg_array::{out_of_range_element, pg_array_type};
 use super::render::render_col;
 use crate::aggregate::build_aggregate;
 use crate::error::{QueryError, Result};
-use crate::utils::bind::mismatched_array_element;
+use crate::utils::bind::ensure_array_elements;
 use crate::utils::{bind_value, typed_value_expr, ColumnIdent, TableIdent};
 use crate::Dialect;
 
@@ -119,15 +119,7 @@ fn filter_value_expr(
     array_cast: Option<&Result<String>>,
     dialect: Dialect,
 ) -> Result<SimpleExpr> {
-    {
-        if let (Value::Array(arr_type, _), Some(element)) =
-            (&value, mismatched_array_element(&value))
-        {
-            return Err(QueryError::InvalidQuery(format!(
-                "Array element {element:?} does not match the array's element type {arr_type:?}"
-            )));
-        }
-    }
+    ensure_array_elements(&value)?;
     match (array_cast, &value) {
         (Some(Ok(array_type)), Value::Array(..)) => {
             if let Some(shown) = out_of_range_element(&value, array_type) {

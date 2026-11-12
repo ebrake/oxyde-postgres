@@ -41,10 +41,11 @@ graph TD
 
 **Location**: `crates/oxyde-codec/src/lib.rs`
 
-Key types:
+Key types (selected fields):
 
 ```rust
 pub struct QueryIR {
+    pub proto: u32,
     pub op: Operation,
     pub table: String,
     pub cols: Option<Vec<String>>,
@@ -53,9 +54,12 @@ pub struct QueryIR {
     pub offset: Option<i64>,
     pub order_by: Option<Vec<(String, String)>>,
     pub values: Option<HashMap<String, rmpv::Value>>,
-    pub col_types: Option<HashMap<String, String>>,
+    pub column_types: Option<HashMap<String, ColumnTypeSpec>>,
+    pub column_db_types: Option<HashMap<String, String>>,
+    pub bind_types: Option<HashMap<String, ColumnTypeSpec>>,
     pub joins: Option<Vec<JoinSpec>>,
     pub aggregates: Option<Vec<Aggregate>>,
+    pub annotations: Option<Vec<Annotation>>,
     pub group_by: Option<Vec<String>>,
     pub having: Option<FilterNode>,
     pub returning: Option<bool>,
@@ -85,6 +89,19 @@ pub struct Filter {
     pub column: Option<String>,
 }
 ```
+
+`ColumnTypeSpec` is a tagged type contract shared by binding, decoding, and
+migrations. `column_db_types` retains verbatim SQL overrides for typed filter
+casts. `bind_types` supplies binding-only hints for custom SQL types; explicit
+`column_types` entries win, and hints never alter result decoding.
+
+Scalar annotations use a typed `ScalarExpr` tree (column, literal, arithmetic,
+function, and raw SQL nodes), decoded once at the core boundary. Literal type
+hints are decoded leniently; invalid or absent hints become unknown. The SQL
+compiler distinguishes real column specs from binding-only hints when typing
+sibling literals. Annotation result types follow pass-through columns when
+safe and otherwise use native decoding. The protocol number remains 1, so the
+Python dependency requires core 0.3.1 or newer for scalar annotations.
 
 ### oxyde-sql
 
@@ -150,11 +167,15 @@ pub(crate) struct TransactionInner {
 
 ### oxyde-migrate
 
-**Purpose**: Schema diffing and migration generation.
+**Purpose**: Schema replay, diffing, and migration SQL generation.
 
 **Location**: `crates/oxyde-migrate/src/`
 
-Modules: `diff.rs` (schema diff), `op.rs` (migration operations), `sql.rs` (SQL generation via sea-query), `types.rs` (Dialect, Snapshot, errors).
+Rust replay shares typed migration operations with diffing and SQL generation.
+The Python `SchemaState` wrapper normalizes legacy operations and exposes
+canonical snapshots through `tables` and `to_snapshot()`. State changes go
+through `apply_operation()`, and field-level reads avoid serializing the whole
+schema for each alteration. See [Schema Replay](../guide/migrations.md#schema-replay).
 
 Key functions:
 

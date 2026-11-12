@@ -1,11 +1,11 @@
 //! UPDATE query building
 
-use oxyde_codec::{ColumnTypeSpec, QueryIR};
+use oxyde_codec::QueryIR;
 use sea_query::{PostgresQueryBuilder, Query, Value};
 
 use crate::error::Result;
 use crate::filter::build_filter_node;
-use crate::utils::{assignment_expr, ColumnIdent, TableIdent};
+use crate::utils::{assignment_expr, ColumnIdent, ExprTypes, TableIdent};
 use crate::Dialect;
 
 /// Build UPDATE query from QueryIR
@@ -19,19 +19,11 @@ pub fn build_update(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
     let mut query = Query::update();
     query.table(table);
 
-    // Helper to get the column spec; Unknown = native conversion
-    let get_spec = |col: &str| -> &ColumnTypeSpec {
-        ir.column_types
-            .as_ref()
-            .and_then(|ct| ct.get(col))
-            .unwrap_or(&ColumnTypeSpec::Unknown)
-    };
-
     if let Some(values) = &ir.values {
         for (col, val) in values {
             query.value(
                 ColumnIdent(col.clone()),
-                assignment_expr(val, get_spec(col), ir.column_types.as_ref(), dialect)?,
+                assignment_expr(val, col, ExprTypes::of(ir), dialect)?,
             );
         }
     }

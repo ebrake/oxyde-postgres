@@ -14,6 +14,7 @@ export PATH := $(if $(RUST_TOOLCHAIN_BIN),$(RUST_TOOLCHAIN_BIN):)$(VENV_BIN):$(P
 CARGO := $(or $(wildcard $(RUST_TOOLCHAIN_BIN)/cargo),cargo)
 MATURIN := $(or $(wildcard $(VENV_BIN)/maturin),maturin)
 PYTEST := $(or $(wildcard $(VENV_BIN)/pytest),pytest)
+PRE_COMMIT := $(or $(wildcard $(VENV_BIN)/pre-commit),pre-commit)
 
 PYTHON_DIR = python
 TEST_DIR = $(PYTHON_DIR)/oxyde/tests
@@ -38,7 +39,7 @@ coverage:
 	$(PYTEST) $(TEST_DIR) --cov=$(COV_PKG) --cov-report=term-missing
 
 lint:
-	pre-commit run --all-files
+	$(PRE_COMMIT) run --all-files
 
 lint-rust:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
@@ -49,7 +50,7 @@ format:
 	$(CARGO) fmt --all
 
 build-core:
-	cd crates/oxyde-core-py && $(MATURIN) develop --release
+	$(MATURIN) develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
 
 build-core-dev:
 	$(MATURIN) develop --manifest-path crates/oxyde-core-py/Cargo.toml

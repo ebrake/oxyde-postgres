@@ -15,7 +15,9 @@ Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.
 - Rust SQL generation, connection pooling, and execution, with Python 3.15 wheel support.
 - Cache-disabled unnamed statements for PostgreSQL/PgBouncer, including cold custom-type decoding without replaying queries.
 
-Version **0.3.0** moves migration replay into Rust, resolves `sqlmigrate` alterations, and exposes canonical schema snapshots. [Release notes](https://github.com/ebrake/oxyde-postgres/blob/main/docs/changelog.md) describe compatibility changes and the original fork additions.
+Version **0.3.1** adds scalar expressions (`Coalesce`, `Greatest`, `Concat`, `Value`, `RawSQL`, and `F` arithmetic) to annotations and updates, with typed NULL, enum, and array handling. The [expression guide](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/expressions.md) covers usage, and the [release notes](https://github.com/ebrake/oxyde-postgres/blob/main/docs/changelog.md) describe compatibility changes.
+
+The fork also includes [typed array and JSON containment](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/filtering.md#array-lookups), [NULLS NOT DISTINCT constraints](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/models.md#unique-indexes-and-nulls), [Rust migration replay](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/migrations.md#schema-replay), [transaction depth](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/transactions.md#inspecting-transaction-depth), and [complete generated type stubs](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/models.md#generated-type-stubs). The [connection guide](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/connections.md#postgresql-settings) explains the patched driver's statement-cache and PgBouncer behavior.
 
 ## Installation
 
@@ -42,6 +44,7 @@ import asyncio
 from oxyde import Field, Model, db
 from oxyde.db.schema import create_tables
 
+
 class User(Model):
     id: int | None = Field(default=None, db_pk=True)
     name: str
@@ -51,16 +54,20 @@ class User(Model):
     class Meta:
         is_table = True
 
+
 async def main():
     await db.init(default="postgresql://user:password@localhost:5432/app")
     try:
         connection = await db.get_connection()
         await create_tables(connection)
-        await User.objects.create(name="Alice", email="alice@example.com", tags=["python"])
+        await User.objects.create(
+            name="Alice", email="alice@example.com", tags=["python"]
+        )
         users = await User.objects.filter(tags__contains=["python"]).all()
         print(users)
     finally:
         await db.close()
+
 
 asyncio.run(main())
 ```

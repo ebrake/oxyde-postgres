@@ -317,7 +317,7 @@ IR payload should stay under 10KB for best performance. Large bulk operations ma
 
 ## Release preparation
 
-Both `oxyde-postgres-core` and `oxyde-postgres` use version 0.3.0. Push a single `v0.3.0` tag (or dispatch `release-core.yml` at that tag with version `0.3.0`). The coordinated release builds and publishes the native core first, stages one GitHub release with its wheels, then dispatches `release-python.yml` to publish the Python package and complete that same release. Configure PyPI publishing and repository hosting for the new project before pushing release tags. Release notes are maintained in `docs/changelog.md`.
+Both `oxyde-postgres-core` and `oxyde-postgres` use version 0.3.1. Push a single `v0.3.1` tag (or dispatch `release-core.yml` at that tag with version `0.3.1`). The coordinated release builds and publishes the native core first, stages one GitHub release with its wheels, then dispatches `release-python.yml` to publish the Python package and complete that same release. Configure PyPI publishing and repository hosting for the new project before pushing release tags. Release notes are maintained in `docs/changelog.md`.
 
 If publishing is blocked after all builds succeed, dispatch `release-core.yml` from `main` with the same version and `artifacts_run_id` set to the earlier run. The workflow requires all eight build jobs to have succeeded at the exact release tag, then repeats artifact validation before publishing. This permits fixes to release validation without rebuilding or moving the tag.
 

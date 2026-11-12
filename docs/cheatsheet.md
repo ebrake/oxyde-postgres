@@ -55,7 +55,7 @@ Complete API reference.
 <tr><td><code>distinct()</code></td><td><code>.distinct()</code></td><td><code>Query</code></td><td>DISTINCT</td></tr>
 <tr><td><code>group_by()</code></td><td><code>.group_by("status")</code></td><td><code>Query</code></td><td>GROUP BY</td></tr>
 <tr><td><code>having()</code></td><td><code>.having(count__gte=5)</code></td><td><code>Query</code></td><td>HAVING</td></tr>
-<tr><td><code>annotate()</code></td><td><code>.annotate(n=Count("posts"))</code></td><td><code>Query</code></td><td>Computed fields</td></tr>
+<tr><td><code>annotate()</code></td><td><code>.annotate(n=Count("id"))</code></td><td><code>Query</code></td><td>Aggregate or scalar expressions; scalar results need values()/values_list()/fetch_all()</td></tr>
 <tr><td><code>union()</code></td><td><code>.union(other_qs)</code></td><td><code>Query</code></td><td>UNION</td></tr>
 <tr><td><code>for_update()</code></td><td><code>.for_update()</code></td><td><code>Query</code></td><td>Row lock</td></tr>
 <tr><td><code>values()</code></td><td><code>.values("id", "name")</code></td><td><code>Query</code></td><td>Result as dicts</td></tr>
@@ -84,9 +84,12 @@ Complete API reference.
 <tr><td><code>Sum/Avg/Max/Min</code></td><td><code>Sum("amount")</code></td><td>—</td><td>Aggregates</td></tr>
 <tr><td><code>Concat</code></td><td><code>Concat("first", "last")</code></td><td>—</td><td>String concat</td></tr>
 <tr><td><code>Coalesce</code></td><td><code>Coalesce("nick", "name")</code></td><td>—</td><td>First non-NULL</td></tr>
+<tr><td><code>Greatest</code></td><td><code>Greatest(Coalesce("stock", 0), 1)</code></td><td>—</td><td>Greatest argument</td></tr>
+<tr><td><code>Value</code></td><td><code>Value("anonymous")</code></td><td>—</td><td>Bound literal; strings are data</td></tr>
 <tr><td><code>RawSQL</code></td><td><code>RawSQL("LOWER(name)")</code></td><td>—</td><td>Raw SQL</td></tr>
 <tr><th colspan="4">Transactions</th></tr>
 <tr><td><code>transaction.atomic()</code></td><td><code>async with transaction.atomic(): ...</code></td><td>—</td><td>Nested savepoints</td></tr>
+<tr><td><code>get_transaction_depth()</code></td><td><code>transaction.get_transaction_depth()</code></td><td><code>int</code></td><td>Current task's atomic() depth per database alias</td></tr>
 </tbody>
 </table>
 </div>

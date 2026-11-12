@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 — Scalar expressions (unreleased)
+## 0.3.1 — Scalar expressions (2026-11-12)
 
 - Add `Greatest` and `Value`, and rebuild `Coalesce` as a scalar expression that
   composes with `F` arithmetic. `Coalesce` in `annotate()` previously failed at
@@ -24,10 +24,19 @@
 - Enum handling in expressions now lives in the core: a string or enum literal
   next to an enum column in `Coalesce`/`Greatest` (including nested calls) is
   cast to that column's enum type, a bare `Value(...)` assigned in `update()` or
-  `create()` binds by the target column, and enum-valued annotations are decoded
-  as enums. Non-enum annotation results use native decoding (previously a
-  `Greatest(int_col, 1.5)` decoded as `None`). A `str`-based `Enum` member passed
-  to `Coalesce`/`Greatest` is a literal, not a column name.
+  `create()` binds by the target column. A `str`-based `Enum` member passed to
+  `Coalesce`/`Greatest` is a literal, not a column name.
+- Annotation results are decoded by the type of the column they pass through:
+  `annotate(x=F("tags"))` or `Coalesce("tags", None)` on an array column returns
+  the list (it was `None`), `F("duration")` on a `timedelta` field returns
+  seconds like the field itself (it was raw microseconds), and enum aliases are
+  decoded as enums, also when another argument is `RawSQL` or arithmetic (the
+  result is then the enum or a database error). Other expressions that can
+  change the type (`F` arithmetic, a literal of another type such as
+  `Greatest(int_col, 1.5)`, `Concat`, `RawSQL`) use native decoding.
+  `count()` / `exists()` on an annotated query no longer
+  decode their result through an annotation that shares the `_count` / `exists`
+  name (they returned `0` / `False`).
 - A `NULL` literal in `Coalesce`/`Greatest` now takes the type of a sibling column
   (`Coalesce("qty", None)` no longer fails with "bigint and text cannot be
   matched") or of the `update()` target column. String literals in a nested
@@ -36,6 +45,16 @@
   `Value(Decimal(...))` assigned to a column with an unrecognised `db_type`
   (MONEY, CITEXT, domains) now binds by its own type instead of as text.
   `update(field=Value(...))` on an enum field validates the value like a raw one.
+  A `NULL` with no sibling type (`Coalesce(None, 1)`, `Coalesce(F("qty") + 1,
+  None)`, or next to an `Unknown`-typed column such as MONEY) is a bare SQL
+  `NULL` that PostgreSQL types from context, instead of a text parameter that
+  failed with "text and bigint cannot be matched". A MONEY-like column (binding
+  hint only) never types a sibling or target, in `annotate()` or `update()`. A
+  list literal next to an array column (`Coalesce("tags", Value([]))`) binds as
+  that array type, so it works in `update()` and `annotate()`. A list whose
+  elements do not fit the array's element type (`Value(["1", 2.5])` for a
+  `BIGINT[]`, also as a bare `Value(...)` assigned to the column) now raises
+  instead of storing NULL elements.
 - A plain `Decimal` or `UUID` value assigned to or filtered on a column with an
   unrecognised `db_type` (MONEY, CITEXT, a domain) now binds by the field's
   annotation instead of as text. The core receives these as binding-only
@@ -50,6 +69,15 @@
 - Expression nodes are decoded into a typed `ScalarExpr` in the core, and
   `QueryIR` gains `annotations`. The IR protocol is unchanged, so an older core
   would drop `annotations` silently: require `oxyde-postgres-core>=0.3.1,<0.4.0`.
+- Expand the existing guides for scalar expressions, typed binding, migration
+  replay, and generated stubs. Refresh installation and PostgreSQL requirements,
+  query examples, and links to the fork's features.
+- Fix `make build-core` to use the root package metadata and `make lint` to find
+  the virtual environment's pre-commit executable.
+- Validation: 1,548 Python tests, 233 Rust workspace tests, 16 PostgreSQL driver
+  regressions, and 82 generated-stub type-check tests passed. All pre-commit
+  checks, strict documentation builds, and package license/metadata checks
+  passed; locally built wheels passed a fresh-environment PostgreSQL smoke test.
 
 ## 0.3.0 — Rust schema replay (2026-11-11)
 
@@ -172,7 +200,6 @@
 - Raise runtime and optional dependency baselines to their latest stable releases at preparation time. Update Ruff hooks, CI's mypy version, and native release builds to match.
 - Use standard-library `Self`, `dataclass_transform`, and `TimeoutError` with the Python 3.13 minimum. Keep explicit generic variance and runtime typing metadata.
 - Adapt primary-key narrowing for mypy 2 and emit the current `ty` override diagnostic name in generated stubs.
-- Put **E Brake <ebrake123@icloud.com>** first in both distribution author lists, retaining Nikita Ryzhenkov's author credit and the complete original Oxyde MIT license. Preserve SQLx's current license texts and its original LaunchBadge copyright notices.
 - Validate `Requires-Python` alongside package version, description links, authorship, and bundled licenses before publishing.
 
 ### Validation

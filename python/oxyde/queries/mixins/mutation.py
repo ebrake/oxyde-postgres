@@ -29,8 +29,8 @@ from oxyde.models.serializers import (
 from oxyde.models.utils import _unpack_annotated, _unwrap_optional
 from oxyde.queries.base import (
     SupportsExecute,
-    _build_column_db_types,
     _build_bind_types,
+    _build_column_db_types,
     _build_column_types,
     _map_values_to_columns,
     _model_key,

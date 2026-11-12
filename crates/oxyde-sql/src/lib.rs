@@ -80,11 +80,12 @@ pub fn emits_returning(ir: &QueryIR, dialect: Dialect) -> bool {
 /// This is the main entry point for SQL generation. It dispatches to the
 /// appropriate builder based on the operation type.
 pub fn build_sql(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value>)> {
-    // Binding-only hints become ordinary column specs for SQL building; the
-    // original IR (and its `column_types`) stays the source for decoding.
-    if let Some(folded) = ir.with_binding_types() {
-        return build_sql(&folded, dialect);
-    }
+    // Binding-only hints become column specs for SQL building (the folded copy
+    // still names them in `bind_types`, so expression typing can tell them from
+    // real specs); the original IR and its `column_types` stay the source for
+    // decoding. The copy must not be folded again.
+    let folded = ir.with_binding_types();
+    let ir = folded.as_ref().unwrap_or(ir);
     match ir.op {
         Operation::Select => builder::build_select(ir, dialect),
         Operation::Insert => builder::build_insert(ir, dialect),
@@ -912,6 +913,85 @@ mod tests {
             matches!(&params[0], Value::Decimal(Some(_))),
             "expected Decimal, got {params:?}"
         );
+    }
+
+    // A MONEY column reaches the builders as a binding-only hint, never as a
+    // real column spec: it must not type a sibling NULL (a NUMERIC parameter
+    // next to a MONEY column fails in PostgreSQL).
+
+    #[test]
+    fn test_bind_types_do_not_type_a_sibling_null_in_annotations() {
+        let ir = QueryIR {
+            table: "prices".into(),
+            annotations: Some(vec![annotation(
+                "a",
+                serde_json::json!({
+                    "type": "func", "name": "coalesce", "args": [
+                        {"type": "column", "name": "amount"},
+                        {"type": "value", "value": null},
+                    ],
+                }),
+            )]),
+            bind_types: Some(HashMap::from([(
+                "amount".into(),
+                spec_json(serde_json::json!({"kind": "decimal"})),
+            )])),
+            ..Default::default()
+        };
+        let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.contains(r#"COALESCE("amount", NULL)"#), "{sql}");
+        assert!(params.is_empty(), "{params:?}");
+    }
+
+    #[test]
+    fn test_bind_types_do_not_type_a_null_in_an_update_expression() {
+        let wrapper = rmpv::ext::to_value(serde_json::json!({"__expr__": {
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "column", "name": "amount"},
+                {"type": "value", "value": null},
+            ],
+        }}))
+        .unwrap();
+        let ir = QueryIR {
+            op: Operation::Update,
+            table: "prices".into(),
+            values: Some(HashMap::from([("amount".into(), wrapper)])),
+            filter_tree: Some(filter_cond("id", "=", rmpv_int(1))),
+            bind_types: Some(HashMap::from([(
+                "amount".into(),
+                spec_json(serde_json::json!({"kind": "decimal"})),
+            )])),
+            ..Default::default()
+        };
+        let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.contains(r#"COALESCE("amount", NULL)"#), "{sql}");
+        assert!(
+            !params.iter().any(|p| matches!(p, Value::Decimal(_))),
+            "{params:?}"
+        );
+    }
+
+    #[test]
+    fn test_column_types_still_type_a_sibling_null_despite_bind_types() {
+        // The same column as a real spec (a hint for it is ignored) does.
+        let decimal = spec_json(serde_json::json!({"kind": "decimal"}));
+        let ir = QueryIR {
+            table: "prices".into(),
+            annotations: Some(vec![annotation(
+                "a",
+                serde_json::json!({
+                    "type": "func", "name": "coalesce", "args": [
+                        {"type": "column", "name": "amount"},
+                        {"type": "value", "value": null},
+                    ],
+                }),
+            )]),
+            column_types: Some(HashMap::from([("amount".into(), decimal.clone())])),
+            bind_types: Some(HashMap::from([("amount".into(), decimal)])),
+            ..Default::default()
+        };
+        let (_, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(matches!(&params[0], Value::Decimal(None)), "{params:?}");
     }
 }
 

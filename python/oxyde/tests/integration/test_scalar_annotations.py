@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from enum import Enum
 
@@ -53,7 +54,8 @@ class SaItem(Model):
 
 
 class SaPrice(Model):
-    """`MONEY` is not a known db_type, so its column spec is Unknown."""
+    """`MONEY` is not a known db_type: it has no column spec, only a binding-only
+    Decimal hint, so it types neither sibling literals nor update targets."""
 
     id: int | None = Field(default=None, db_pk=True)
     label: str = ""
@@ -64,7 +66,22 @@ class SaPrice(Model):
         table_name = "sa_prices"
 
 
+class SaBag(Model):
+    """Array and interval columns, which only a known column spec can decode."""
+
+    id: int | None = Field(default=None, db_pk=True)
+    label: str = ""
+    nums: list[int] | None = Field(default=None, db_type="BIGINT[]", db_nullable=True)
+    tags: list[str] | None = Field(default=None, db_type="TEXT[]", db_nullable=True)
+    wait: timedelta | None = Field(default=None, db_nullable=True)
+
+    class Meta:
+        is_table = True
+        table_name = "sa_bags"
+
+
 async def _drop(database: AsyncDatabase) -> None:
+    await execute_raw("DROP TABLE IF EXISTS sa_bags CASCADE", client=database)
     await execute_raw("DROP TABLE IF EXISTS sa_prices CASCADE", client=database)
     await execute_raw("DROP TABLE IF EXISTS sa_items CASCADE", client=database)
     await execute_raw("DROP TABLE IF EXISTS sa_groups CASCADE", client=database)
@@ -77,6 +94,7 @@ async def sa_db(postgres_database_url):
     register_table(SaGroup, overwrite=True)
     register_table(SaItem, overwrite=True)
     register_table(SaPrice, overwrite=True)
+    register_table(SaBag, overwrite=True)
     database = AsyncDatabase(postgres_database_url, name="scalar_ann", overwrite=True)
     await database.connect()
     try:
@@ -201,6 +219,22 @@ class TestScalarAnnotations:
             .all(using=sa_db.name)
         )
         assert [str(getattr(r["st"], "value", r["st"])) for r in rows] == ["live"] * 3
+
+    @pytest.mark.asyncio
+    async def test_enum_alias_decodes_next_to_raw_sql_and_arithmetic(self, sa_db):
+        # PostgreSQL resolves the result to the enum whatever else is an
+        # argument, so the alias must still decode as an enum, not as None.
+        rows = await (
+            SaItem.objects.annotate(
+                st=Coalesce("status", RawSQL("'draft'")),
+                gt=Greatest("status", RawSQL("'draft'")),
+            )
+            .values("id", "st", "gt")
+            .order_by("id")
+            .all(using=sa_db.name)
+        )
+        assert [str(getattr(r["st"], "value", r["st"])) for r in rows] == ["live"] * 3
+        assert [str(getattr(r["gt"], "value", r["gt"])) for r in rows] == ["live"] * 3
 
     @pytest.mark.asyncio
     async def test_nested_functions_cast_outer_enum_literal(self, sa_db):
@@ -401,3 +435,104 @@ class TestExpressionMutations:
         )
         assert rows[0]["amount"] == "3.25"
 
+
+class TestAnnotationTypeInference:
+    @pytest.mark.asyncio
+    async def test_array_column_alias_decodes(self, sa_db):
+        await SaBag.objects.create(nums=[1, 2], using=sa_db.name)
+        rows = await (
+            SaBag.objects.annotate(copy=F("nums"), same=Coalesce("nums", None))
+            .values("copy", "same", "nums")
+            .all(using=sa_db.name)
+        )
+        assert rows == [{"copy": [1, 2], "same": [1, 2], "nums": [1, 2]}]
+
+    @pytest.mark.asyncio
+    async def test_interval_alias_matches_the_field(self, sa_db):
+        await SaBag.objects.create(wait=timedelta(seconds=90), using=sa_db.name)
+        rows = await (
+            SaBag.objects.annotate(w=F("wait"), g=Greatest("wait", "wait"))
+            .values("wait", "w", "g")
+            .all(using=sa_db.name)
+        )
+        assert rows[0]["w"] == rows[0]["wait"] == rows[0]["g"] == 90.0
+
+    @pytest.mark.asyncio
+    async def test_count_and_exists_ignore_annotations_with_special_names(self, sa_db):
+        counted = SaItem.objects.annotate(_count=F("status"))
+        assert await counted.count(using=sa_db.name) == 3
+        existing = SaItem.objects.annotate(exists=F("status"))
+        assert await existing.exists(using=sa_db.name) is True
+
+    @pytest.mark.asyncio
+    async def test_leading_null_literal_has_no_forced_text_type(self, sa_db):
+        rows = await (
+            SaItem.objects.annotate(
+                a=Coalesce(None, 1),
+                b=Coalesce(F("minimum_quantity") + 1, None),
+            )
+            .values("id", "a", "b")
+            .order_by("id")
+            .all(using=sa_db.name)
+        )
+        assert [r["a"] for r in rows] == [1, 1, 1]
+        assert [r["b"] for r in rows] == [None, 1, 6]
+
+    @pytest.mark.asyncio
+    async def test_null_literal_next_to_unknown_db_type_column(self, sa_db):
+        await execute_raw(
+            "INSERT INTO sa_prices (label, amount) VALUES ('a', 1)", client=sa_db
+        )
+        rows = await (
+            SaPrice.objects.annotate(a=Coalesce("amount", None))
+            .values("label")
+            .all(using=sa_db.name)
+        )
+        assert rows == [{"label": "a"}]
+
+    @pytest.mark.asyncio
+    async def test_null_literal_in_update_next_to_unknown_db_type_column(self, sa_db):
+        await execute_raw(
+            "INSERT INTO sa_prices (label, amount) VALUES ('a', 1)", client=sa_db
+        )
+        await SaPrice.objects.filter(label="a").update(
+            amount=Coalesce("amount", None), using=sa_db.name
+        )
+        rows = await execute_raw(
+            "SELECT amount::numeric::text AS amount FROM sa_prices WHERE label = 'a'",
+            client=sa_db,
+        )
+        assert rows[0]["amount"] == "1.00"
+
+    @pytest.mark.asyncio
+    async def test_list_literal_with_wrong_element_types_is_rejected(self, sa_db):
+        # "1" and 2.5 do not fit BIGINT[]; they used to be stored as NULLs.
+        bag = await SaBag.objects.create(label="bad", using=sa_db.name)
+        with pytest.raises(Exception, match="does not match"):
+            await SaBag.objects.filter(id=bag.id).update(
+                nums=Coalesce("nums", Value(["1", 2.5])), using=sa_db.name
+            )
+        assert (await SaBag.objects.get(id=bag.id, using=sa_db.name)).nums is None
+
+    @pytest.mark.asyncio
+    async def test_update_array_default_with_empty_list_literal(self, sa_db):
+        bag = await SaBag.objects.create(label="empty", using=sa_db.name)
+        full = await SaBag.objects.create(label="full", tags=["x"], using=sa_db.name)
+        await SaBag.objects.filter(id=bag.id).update(
+            tags=Coalesce("tags", Value([])), using=sa_db.name
+        )
+        await SaBag.objects.filter(id=full.id).update(
+            tags=Coalesce("tags", Value([])), using=sa_db.name
+        )
+        assert (await SaBag.objects.get(id=bag.id, using=sa_db.name)).tags == []
+        assert (await SaBag.objects.get(id=full.id, using=sa_db.name)).tags == ["x"]
+
+    @pytest.mark.asyncio
+    async def test_annotate_array_default_with_empty_list_literal(self, sa_db):
+        await SaBag.objects.create(label="empty", using=sa_db.name)
+        rows = await (
+            SaBag.objects.annotate(t=Coalesce("tags", Value([])))
+            .values("t")
+            .all(using=sa_db.name)
+        )
+        assert rows == [{"t": []}]

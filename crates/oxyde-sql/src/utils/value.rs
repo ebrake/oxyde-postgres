@@ -10,10 +10,10 @@ use sea_query::ExprTrait;
 use sea_query::{Expr, Func, IntoColumnRef, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};
-use crate::utils::bind::typed_value_expr;
+use crate::utils::bind::{ensure_array_elements, typed_value_expr};
 use crate::utils::identifier::{ColumnIdent, TableIdent};
 use crate::Dialect;
-use oxyde_codec::{ColumnTypeSpec, ScalarExpr};
+use oxyde_codec::{ColumnTypeSpec, QueryIR, ScalarExpr};
 
 /// Convert rmpv::Value to serde_json::Value for JSON column storage.
 /// Returns `None` for values that cannot be represented in JSON (NaN, Ext).
@@ -66,7 +66,64 @@ fn decode_expr_wrapper(value: &rmpv::Value) -> Result<Option<ScalarExpr>> {
         .map_err(|e| QueryError::InvalidQuery(format!("Invalid expression node: {e}")))
 }
 
-/// Build the SQL expression for a value assigned to column `spec` in
+/// Column name → type spec, as carried by `QueryIR.column_types`.
+pub type ColumnTypes = HashMap<String, ColumnTypeSpec>;
+
+/// What expression compilation knows about columns.
+///
+/// `specs` is `QueryIR.column_types`. `bind_only` names the entries of `specs`
+/// that are only *binding hints* (an unrecognised `db_type` such as MONEY: see
+/// `QueryIR::with_binding_types`). A hint says how to bind a value for the
+/// column but not what type the column has, so it is used for binding
+/// ([`binding`](Self::binding)) and never to type a sibling or target
+/// ([`known`](Self::known)): `COALESCE("amount", NULL)` must stay a bare NULL.
+#[derive(Clone, Copy, Default)]
+pub struct ExprTypes<'a> {
+    specs: Option<&'a ColumnTypes>,
+    bind_only: Option<&'a ColumnTypes>,
+}
+
+impl<'a> From<Option<&'a ColumnTypes>> for ExprTypes<'a> {
+    /// Plain column specs, none of them binding-only.
+    fn from(specs: Option<&'a ColumnTypes>) -> Self {
+        Self {
+            specs,
+            bind_only: None,
+        }
+    }
+}
+
+impl<'a> ExprTypes<'a> {
+    /// The types of an IR as the SQL builders see it, i.e. after
+    /// `QueryIR::with_binding_types` (whose `bind_types` are the hints).
+    #[must_use]
+    pub fn of(ir: &'a QueryIR) -> Self {
+        Self {
+            specs: ir.column_types.as_ref(),
+            bind_only: ir.bind_types.as_ref(),
+        }
+    }
+
+    /// The spec a value bound to `name` is converted by (`Unknown` = natively).
+    #[must_use]
+    pub fn binding(self, name: &str) -> &'a ColumnTypeSpec {
+        self.specs
+            .and_then(|specs| specs.get(name))
+            .unwrap_or(&ColumnTypeSpec::Unknown)
+    }
+
+    /// The column's real type: neither missing, `Unknown` nor binding-only.
+    fn known(self, name: &str) -> Option<&'a ColumnTypeSpec> {
+        if self.bind_only.is_some_and(|hints| hints.contains_key(name)) {
+            return None;
+        }
+        self.specs
+            .and_then(|specs| specs.get(name))
+            .filter(|spec| !matches!(spec, ColumnTypeSpec::Unknown))
+    }
+}
+
+/// Build the SQL expression for a value assigned to `column` in
 /// INSERT / UPDATE / ON CONFLICT:
 ///
 /// * `{"__expr__": <literal node>}` (a bare `Value(...)`) is a plain literal
@@ -77,15 +134,17 @@ fn decode_expr_wrapper(value: &rmpv::Value) -> Result<Option<ScalarExpr>> {
 ///   UUID, ...) decides the binding. An enum hint never applies there, since
 ///   it names a Python enum, not the column's type;
 /// * any other `{"__expr__": ...}` compiles as a scalar expression, with the
-///   target column's enum type (if any) inherited by its string/NULL literals
-///   inside `coalesce`/`greatest`;
+///   target column's type (if it has a real one) inherited by the literals
+///   inside `coalesce`/`greatest` that [`retypes_to`] lets take it;
 /// * everything else binds by the column's spec.
-pub fn assignment_expr(
+pub fn assignment_expr<'a>(
     value: &rmpv::Value,
-    spec: &ColumnTypeSpec,
-    column_types: Option<&ColumnTypes>,
+    column: &str,
+    types: impl Into<ExprTypes<'a>>,
     dialect: Dialect,
 ) -> Result<SimpleExpr> {
+    let types = types.into();
+    let spec = types.binding(column);
     let Some(node) = decode_expr_wrapper(value)? else {
         return Ok(typed_value_expr(
             super::bind::bind_value(value, spec),
@@ -99,81 +158,70 @@ pub fn assignment_expr(
             value_type,
         } => {
             let bind_spec = match (spec, literal_spec(value_type.as_ref())) {
-                (ColumnTypeSpec::Unknown, ColumnTypeSpec::Enum { .. }) => ColumnTypeSpec::Unknown,
+                (ColumnTypeSpec::Unknown, ColumnTypeSpec::Enum { .. }) => spec,
                 (ColumnTypeSpec::Unknown, hint) => hint,
-                _ => spec.clone(),
+                _ => spec,
             };
-            Ok(typed_value_expr(
-                super::bind::bind_value(&literal, &bind_spec),
-                spec,
-                dialect,
-            ))
+            let bound = super::bind::bind_value(&literal, bind_spec);
+            ensure_array_elements(&bound)?;
+            Ok(typed_value_expr(bound, spec, dialect))
         }
-        other => compile(
-            &other,
-            None,
-            column_types,
-            (!matches!(spec, ColumnTypeSpec::Unknown)).then_some(spec),
-        ),
+        other => compile(&other, None, types, types.known(column)),
     }
 }
-
-/// Column name → type spec, as carried by `QueryIR.column_types`.
-pub type ColumnTypes = HashMap<String, ColumnTypeSpec>;
 
 /// Compile a [`ScalarExpr`] tree into a sea-query expression.
 ///
 /// `table` qualifies column references (`"table"."col"`); pass `None` for
-/// UPDATE/INSERT and for SELECTs without joins. `column_types` lets a string
-/// or NULL literal next to an enum column in `coalesce`/`greatest` bind as
-/// that enum (PostgreSQL cannot match `enum` with `text`).
-pub fn compile_scalar(
-    node: &ScalarExpr,
+/// UPDATE/INSERT and for SELECTs without joins. `types` lets a literal next to
+/// a typed column in `coalesce`/`greatest` take that column's type (PostgreSQL
+/// cannot match `enum` with `text`); see [`retypes_to`].
+pub fn compile_scalar<'a>(
+    node: &'a ScalarExpr,
     table: Option<&TableIdent>,
-    column_types: Option<&ColumnTypes>,
+    types: impl Into<ExprTypes<'a>>,
 ) -> Result<SimpleExpr> {
-    compile(node, table, column_types, None)
+    compile(node, table, types.into(), None)
 }
 
 /// [`compile_scalar`] with an `inherited` type: the type an enclosing
-/// `coalesce`/`greatest` (or the assignment target) imposes on NULL literals
-/// found directly under it, and on string literals when it is an enum.
-/// Arithmetic and `concat_ws` reset it.
+/// `coalesce`/`greatest` (or the assignment target) imposes on the literals
+/// found directly under it (see [`retypes_to`]: NULLs, enum strings, lists
+/// under an array type). Arithmetic and `concat_ws` reset it.
 fn compile<'a>(
     node: &'a ScalarExpr,
     table: Option<&TableIdent>,
-    column_types: Option<&'a ColumnTypes>,
+    types: ExprTypes<'a>,
     inherited: Option<&'a ColumnTypeSpec>,
 ) -> Result<SimpleExpr> {
     match node {
         ScalarExpr::Value { value, value_type } => {
-            if let Some(hint) = inherited {
-                // A NULL takes the sibling's type whatever it is (a text NULL
-                // next to a bigint fails in PostgreSQL); only an enum retypes
-                // a string, so `COALESCE(qty, 'x')` is left to the database.
-                let retype = value.is_nil()
-                    || (value.is_str() && matches!(hint, ColumnTypeSpec::Enum { .. }));
-                if retype && is_retypable_literal(value_type.as_ref()) {
-                    return Ok(typed_value_expr(
-                        super::bind::bind_value(value, hint),
-                        hint,
-                        Dialect::Postgres,
-                    ));
-                }
-            }
             // Optional per-literal ColumnTypeSpec hint (tagged dict), set by
             // Python for types that msgpack-encode as strings (Decimal, UUID,
             // datetime, ...). Absent or unparseable hint = native conversion.
-            let spec = literal_spec(value_type.as_ref());
-            Ok(Expr::val(super::bind::bind_value(value, &spec)))
+            let own = literal_spec(value_type.as_ref());
+            if let Some(hint) = inherited {
+                if retypes_to(value, own, hint) {
+                    let bound = super::bind::bind_value(value, hint);
+                    // A list of the wrong element kind would bind as NULLs.
+                    ensure_array_elements(&bound)?;
+                    return Ok(typed_value_expr(bound, hint, Dialect::Postgres));
+                }
+            }
+            // A NULL with no type to take is a bare SQL `NULL`, which
+            // PostgreSQL types from context; a bound NULL would be text.
+            if value.is_nil() && matches!(own, ColumnTypeSpec::Unknown) {
+                return Ok(Expr::null());
+            }
+            Ok(Expr::val(super::bind::bind_value(value, own)))
         }
         ScalarExpr::Column { name } => Ok(match table {
             Some(t) => Expr::col((t.clone(), ColumnIdent(name.clone())).into_column_ref()),
             None => Expr::col(ColumnIdent(name.clone())),
         }),
         ScalarExpr::Op { op, lhs, rhs } => {
-            let lhs = compile(lhs, table, column_types, None)?;
-            let rhs = compile(rhs, table, column_types, None)?;
+            let lhs = compile(lhs, table, types, None)?;
+            let rhs = compile(rhs, table, types, None)?;
             Ok(match op.as_str() {
                 "add" => Expr::expr(lhs).add(rhs),
                 "sub" => Expr::expr(lhs).sub(rhs),
@@ -187,7 +235,7 @@ fn compile<'a>(
             })
         }
         ScalarExpr::Neg { expr } => {
-            let inner = compile(expr, table, column_types, None)?;
+            let inner = compile(expr, table, types, None)?;
             Ok(Expr::val(Value::BigInt(Some(0))).sub(inner))
         }
         ScalarExpr::Raw { sql } => {
@@ -205,17 +253,14 @@ fn compile<'a>(
             // Only value-returning functions take their literals' type from a
             // sibling column (or an enclosing function / assignment target);
             // `concat_ws`'s separator must stay text.
-            let hint = if matches!(name.as_str(), "coalesce" | "greatest") {
-                args.iter()
-                    .find_map(|a| sibling_enum_spec(a, column_types))
-                    .or_else(|| args.iter().find_map(|a| sibling_spec(a, column_types)))
-                    .or(inherited)
+            let hint = if is_type_preserving(name) {
+                sibling_hint(args, types).or(inherited)
             } else {
                 None
             };
             let compiled = args
                 .iter()
-                .map(|a| compile(a, table, column_types, hint))
+                .map(|a| compile(a, table, types, hint))
                 .collect::<Result<Vec<_>>>()?;
             match name.as_str() {
                 "coalesce" => Ok(Func::coalesce(compiled).into()),
@@ -229,23 +274,31 @@ fn compile<'a>(
     }
 }
 
-/// Register the result type of enum-valued `coalesce`/`greatest` annotations.
+/// Register the result types of type-preserving annotations.
 ///
-/// The driver decodes result columns by `column_types`, and cannot classify
-/// enum values on its own, so an annotation such as `Coalesce("status", ...)`
-/// needs its alias mapped to the enum spec. Other result types (e.g. NUMERIC
-/// from `GREATEST(int_col, 1.5)`) are deliberately left to native decoding:
-/// the function's type can differ from its first column's.
-pub fn apply_annotation_result_types(ir: &mut oxyde_codec::QueryIR) {
+/// The driver decodes result columns by `column_types` and, without a spec,
+/// by the runtime DB type, which cannot read enums or arrays and returns an
+/// interval-as-BIGINT as raw microseconds. An alias therefore gets the spec of
+/// the column its expression passes through unchanged (see [`result_spec`]).
+/// Anything that can change the type (arithmetic, a literal of another type,
+/// `concat_ws`, raw SQL) is left to native decoding: e.g.
+/// `GREATEST(int_col, 1.5)` is NUMERIC, not the integer column's type.
+///
+/// `count()` / `exists()` build their own statement, whose only result column
+/// is `_count` / `exists`: no annotation is selected, so none may be applied
+/// (an alias that happens to share that name would mis-decode the result).
+pub fn apply_annotation_result_types(ir: &mut QueryIR) {
+    if ir.count.unwrap_or(false) || ir.exists.unwrap_or(false) {
+        return;
+    }
     let Some(annotations) = ir.annotations.as_deref() else {
         return;
     };
+    // Decoding sees `column_types` as sent: binding-only hints are not in it.
+    let types = ExprTypes::from(ir.column_types.as_ref());
     let inferred: Vec<(String, ColumnTypeSpec)> = annotations
         .iter()
-        .filter_map(|a| {
-            sibling_enum_spec(&a.expr, ir.column_types.as_ref())
-                .map(|spec| (a.alias.clone(), spec.clone()))
-        })
+        .filter_map(|a| result_spec(&a.expr, types).map(|s| (a.alias.clone(), s.clone())))
         .collect();
     if inferred.is_empty() {
         return;
@@ -255,54 +308,100 @@ pub fn apply_annotation_result_types(ir: &mut oxyde_codec::QueryIR) {
         .extend(inferred);
 }
 
-/// Leniently decode a literal's `value_type` hint (`Unknown` when absent or unparseable).
-fn literal_spec(value_type: Option<&rmpv::Value>) -> ColumnTypeSpec {
-    value_type
-        .and_then(|v| rmpv::ext::from_value::<ColumnTypeSpec>(v.clone()).ok())
-        .unwrap_or(ColumnTypeSpec::Unknown)
-}
-
-/// True when a string literal may be re-typed from a sibling enum column: its
-/// hint is absent, plain string/text, or an enum (a Python `Enum` member).
-fn is_retypable_literal(value_type: Option<&rmpv::Value>) -> bool {
-    matches!(
-        literal_spec(value_type),
-        ColumnTypeSpec::Unknown
-            | ColumnTypeSpec::Text
-            | ColumnTypeSpec::String { .. }
-            | ColumnTypeSpec::Enum { .. }
-    )
-}
-
-/// The type a `coalesce`/`greatest` argument contributes to its siblings'
-/// NULL literals: a column with a known type, or (recursively) the first such
-/// column inside a nested `coalesce`/`greatest`.
-fn sibling_spec<'a>(
-    node: &'a ScalarExpr,
-    column_types: Option<&'a ColumnTypes>,
-) -> Option<&'a ColumnTypeSpec> {
+/// The column type `node` evaluates to, when it is known.
+///
+/// * A bare column: its own type.
+/// * A `coalesce`/`greatest` with an enum column among its arguments: that
+///   enum. PostgreSQL cannot resolve an enum together with anything but
+///   unknown-typed literals, so whatever else the arguments are (raw SQL,
+///   arithmetic), the result is the enum or the query fails.
+/// * Otherwise only when every argument keeps the sibling column's type
+///   ([`preserves`]): `GREATEST(int_col, 1.5)` widens to NUMERIC.
+fn result_spec<'a>(node: &'a ScalarExpr, types: ExprTypes<'a>) -> Option<&'a ColumnTypeSpec> {
     match node {
-        ScalarExpr::Column { name } => column_types.and_then(|ct| ct.get(name)),
-        ScalarExpr::Func { name, args } if matches!(name.as_str(), "coalesce" | "greatest") => {
-            args.iter().find_map(|a| sibling_spec(a, column_types))
+        ScalarExpr::Column { name } => types.known(name),
+        ScalarExpr::Func { name, args } if is_type_preserving(name) => {
+            sibling_hint(args, types).filter(|h| is_enum(h) || preserves(node, types, h))
         }
         _ => None,
     }
 }
 
-/// The enum spec a `coalesce`/`greatest` argument contributes to its siblings:
-/// an enum-typed column, or (recursively) the first such column inside a nested
-/// `coalesce`/`greatest`. Literals and arithmetic contribute nothing.
-fn sibling_enum_spec<'a>(
+/// True when `node` yields a value of type `hint` inside a `coalesce`/`greatest`
+/// that is typed `hint`: a column of that type, a nested function that
+/// preserves it, or a literal that [`compile`] retypes to it.
+fn preserves(node: &ScalarExpr, types: ExprTypes<'_>, hint: &ColumnTypeSpec) -> bool {
+    match node {
+        ScalarExpr::Column { name } => types.known(name) == Some(hint),
+        ScalarExpr::Func { name, args } if is_type_preserving(name) => {
+            args.iter().all(|a| preserves(a, types, hint))
+        }
+        ScalarExpr::Value { value, value_type } => {
+            retypes_to(value, literal_spec(value_type.as_ref()), hint)
+        }
+        _ => false,
+    }
+}
+
+/// The value-returning functions whose result is the type of their arguments;
+/// only these hand a sibling's type to their literals.
+fn is_type_preserving(function: &str) -> bool {
+    matches!(function, "coalesce" | "greatest")
+}
+
+fn is_enum(spec: &ColumnTypeSpec) -> bool {
+    matches!(spec, ColumnTypeSpec::Enum { .. })
+}
+
+/// A literal's own `ColumnTypeSpec` hint; `Unknown` when absent or unparseable
+/// (decoded once, leniently, by the codec).
+fn literal_spec(value_type: Option<&ColumnTypeSpec>) -> &ColumnTypeSpec {
+    value_type.unwrap_or(&ColumnTypeSpec::Unknown)
+}
+
+/// Whether a literal takes the type `hint` imposed by its siblings or the
+/// assignment target. A NULL takes any type (a text NULL next to a bigint
+/// fails in PostgreSQL); a string only an enum's (`COALESCE(qty, 'x')` is left
+/// to the database); a list only an array's. And only if the literal's own
+/// hint leaves its type open: absent, plain string/text, or an enum (a Python
+/// `Enum` member). Used both to bind literals and to decide whether an
+/// expression's result type is preserved, so the two agree.
+fn retypes_to(value: &rmpv::Value, own: &ColumnTypeSpec, hint: &ColumnTypeSpec) -> bool {
+    let takes_hint = value.is_nil()
+        || (value.is_str() && is_enum(hint))
+        || (value.is_array() && matches!(hint, ColumnTypeSpec::Array { .. }));
+    takes_hint
+        && matches!(
+            own,
+            ColumnTypeSpec::Unknown
+                | ColumnTypeSpec::Text
+                | ColumnTypeSpec::String { .. }
+                | ColumnTypeSpec::Enum { .. }
+        )
+}
+
+/// The type the arguments of a `coalesce`/`greatest` impose on their literals:
+/// the first enum column, else the first column with a known type (recursing
+/// into nested `coalesce`/`greatest`). Literals and arithmetic contribute nothing.
+fn sibling_hint<'a>(args: &'a [ScalarExpr], types: ExprTypes<'a>) -> Option<&'a ColumnTypeSpec> {
+    let find = |accept: fn(&ColumnTypeSpec) -> bool| {
+        args.iter().find_map(|a| sibling_where(a, types, accept))
+    };
+    find(is_enum).or_else(|| find(|_| true))
+}
+
+/// The first column spec accepted by `accept` that a `coalesce`/`greatest`
+/// argument contributes: the column itself (when its type is known), or
+/// (recursively) one inside a nested `coalesce`/`greatest`.
+fn sibling_where<'a>(
     node: &'a ScalarExpr,
-    column_types: Option<&'a ColumnTypes>,
+    types: ExprTypes<'a>,
+    accept: fn(&ColumnTypeSpec) -> bool,
 ) -> Option<&'a ColumnTypeSpec> {
     match node {
-        ScalarExpr::Column { name } => column_types
-            .and_then(|ct| ct.get(name))
-            .filter(|spec| matches!(spec, ColumnTypeSpec::Enum { .. })),
-        ScalarExpr::Func { name, args } if matches!(name.as_str(), "coalesce" | "greatest") => {
-            args.iter().find_map(|a| sibling_enum_spec(a, column_types))
+        ScalarExpr::Column { name } => types.known(name).filter(|spec| accept(spec)),
+        ScalarExpr::Func { name, args } if is_type_preserving(name) => {
+            args.iter().find_map(|a| sibling_where(a, types, accept))
         }
         _ => None,
     }
@@ -657,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_annotation_result_types_registers_enum_aliases_only() {
+    fn test_apply_annotation_result_types_registers_enum_alias_and_skips_widened_greatest() {
         let mut ir = oxyde_codec::QueryIR {
             table: "t".into(),
             column_types: Some(status_types()),
@@ -699,12 +798,10 @@ mod tests {
             name: "status_enum".into(),
             values: vec!["draft".into()],
         };
-        let (sql, _) = render(assignment_expr(&node, &spec, None, Dialect::Postgres).unwrap());
+        let (sql, _) = render(assign(&node, &spec, None).unwrap());
         assert_eq!(sql, r#"SELECT $1::"status_enum" AS "x""#);
         // A text-backed column (no enum spec) gets a plain parameter.
-        let (plain, _) = render(
-            assignment_expr(&node, &ColumnTypeSpec::Unknown, None, Dialect::Postgres).unwrap(),
-        );
+        let (plain, _) = render(assign(&node, &ColumnTypeSpec::Unknown, None).unwrap());
         assert_eq!(plain, r#"SELECT $1 AS "x""#);
     }
 
@@ -718,6 +815,17 @@ mod tests {
     fn expr_wrapper(node: serde_json::Value) -> rmpv::Value {
         let node: rmpv::Value = rmpv::ext::to_value(node).unwrap();
         rmpv::Value::Map(vec![(rmpv::Value::String("__expr__".into()), node)])
+    }
+
+    /// `assignment_expr` for a target column holding `spec`, next to `others`.
+    fn assign(
+        value: &rmpv::Value,
+        spec: &ColumnTypeSpec,
+        others: Option<&ColumnTypes>,
+    ) -> Result<SimpleExpr> {
+        let mut types = others.cloned().unwrap_or_default();
+        types.insert("target".into(), spec.clone());
+        assignment_expr(value, "target", Some(&types), Dialect::Postgres)
     }
 
     #[test]
@@ -763,9 +871,7 @@ mod tests {
                 {"type": "value", "value": "draft"},
             ],
         }));
-        let (sql, _) = render(
-            assignment_expr(&wrapper, &status_enum_spec(), None, Dialect::Postgres).unwrap(),
-        );
+        let (sql, _) = render(assign(&wrapper, &status_enum_spec(), None).unwrap());
         assert_eq!(
             sql,
             r#"SELECT COALESCE($1::"status_enum", $2::"status_enum") AS "x""#
@@ -777,8 +883,7 @@ mod tests {
         let wrapper = expr_wrapper(serde_json::json!({
             "type": "value", "value": "2.50", "value_type": {"kind": "decimal"},
         }));
-        match assignment_expr(&wrapper, &ColumnTypeSpec::Unknown, None, Dialect::Postgres).unwrap()
-        {
+        match assign(&wrapper, &ColumnTypeSpec::Unknown, None).unwrap() {
             SimpleExpr::Value(Value::Decimal(Some(d))) => {
                 assert_eq!(d, Decimal::from_str("2.50").unwrap());
             }
@@ -795,16 +900,14 @@ mod tests {
                 "kind": "enum", "name": "status_enum", "values": ["draft"],
             },
         }));
-        let (sql, _) = render(
-            assignment_expr(&wrapper, &ColumnTypeSpec::Unknown, None, Dialect::Postgres).unwrap(),
-        );
+        let (sql, _) = render(assign(&wrapper, &ColumnTypeSpec::Unknown, None).unwrap());
         assert_eq!(sql, r#"SELECT $1 AS "x""#);
     }
 
     #[test]
     fn test_assignment_expr_rejects_bad_expression_node() {
         let bad = expr_wrapper(serde_json::json!({"type": "bogus"}));
-        assert!(assignment_expr(&bad, &ColumnTypeSpec::Unknown, None, Dialect::Postgres).is_err());
+        assert!(assign(&bad, &ColumnTypeSpec::Unknown, None).is_err());
     }
 
     #[test]
@@ -839,15 +942,356 @@ mod tests {
                 {"type": "value", "value": 5},
             ],
         }));
-        let (_, params) = render(
-            assignment_expr(
-                &wrapper,
-                &ColumnTypeSpec::BigInteger,
-                None,
-                Dialect::Postgres,
-            )
-            .unwrap(),
-        );
+        let (_, params) = render(assign(&wrapper, &ColumnTypeSpec::BigInteger, None).unwrap());
         assert!(matches!(params[0], Value::BigInt(None)), "{params:?}");
+    }
+
+    #[test]
+    fn test_untyped_null_literal_is_a_bare_sql_null() {
+        // No sibling column, no hint: a text-typed NULL parameter would make
+        // `COALESCE(NULL, bigint)` / `bigint + NULL` fail. A bare NULL is
+        // typed by PostgreSQL from context.
+        let coalesce = se(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "value", "value": null},
+                {"type": "value", "value": 1},
+            ],
+        }));
+        let (sql, params) = render(compile_scalar(&coalesce, None, None).unwrap());
+        assert_eq!(sql, r#"SELECT COALESCE(NULL, $1) AS "x""#);
+        assert_eq!(params.len(), 1);
+
+        let types = ColumnTypes::from([("qty".to_string(), ColumnTypeSpec::BigInteger)]);
+        let arithmetic = se(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "op", "op": "add",
+                 "lhs": {"type": "column", "name": "qty"},
+                 "rhs": {"type": "value", "value": 1}},
+                {"type": "value", "value": null},
+            ],
+        }));
+        let (sql, params) = render(compile_scalar(&arithmetic, None, Some(&types)).unwrap());
+        assert_eq!(sql, r#"SELECT COALESCE("qty" + $1, NULL) AS "x""#);
+        assert_eq!(params.len(), 1);
+    }
+
+    fn array_types() -> ColumnTypes {
+        ColumnTypes::from([
+            (
+                "nums".to_string(),
+                ColumnTypeSpec::Array {
+                    item: Box::new(ColumnTypeSpec::BigInteger),
+                },
+            ),
+            (
+                "tags".to_string(),
+                ColumnTypeSpec::Array {
+                    item: Box::new(ColumnTypeSpec::Text),
+                },
+            ),
+            ("wait".to_string(), ColumnTypeSpec::Timedelta),
+            ("qty".to_string(), ColumnTypeSpec::BigInteger),
+        ])
+    }
+
+    #[test]
+    fn test_array_literal_next_to_array_column_binds_as_that_array() {
+        let node = se(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "column", "name": "tags"},
+                {"type": "value", "value": []},
+            ],
+        }));
+        let (_, params) = render(compile_scalar(&node, None, Some(&array_types())).unwrap());
+        match &params[0] {
+            Value::Array(sea_query::value::ArrayType::String, Some(items)) => {
+                assert!(items.is_empty());
+            }
+            other => panic!("expected an empty text[] binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_assignment_array_literal_takes_target_array_spec() {
+        let wrapper = expr_wrapper(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "column", "name": "tags"},
+                {"type": "value", "value": []},
+            ],
+        }));
+        let spec = ColumnTypeSpec::Array {
+            item: Box::new(ColumnTypeSpec::Text),
+        };
+        let (_, params) = render(assign(&wrapper, &spec, Some(&array_types())).unwrap());
+        assert!(
+            matches!(
+                params[0],
+                Value::Array(sea_query::value::ArrayType::String, Some(_))
+            ),
+            "{params:?}"
+        );
+    }
+
+    fn annotated_ir(annotations: Vec<(&str, serde_json::Value)>) -> oxyde_codec::QueryIR {
+        let mut types = status_types();
+        types.extend(array_types());
+        oxyde_codec::QueryIR {
+            table: "t".into(),
+            column_types: Some(types),
+            annotations: Some(
+                annotations
+                    .into_iter()
+                    .map(|(alias, expr)| oxyde_codec::Annotation {
+                        alias: alias.into(),
+                        expr: se(expr),
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_annotation_result_types_preserve_known_column_types() {
+        let mut ir = annotated_ir(vec![
+            (
+                "copy",
+                serde_json::json!({"type": "column", "name": "nums"}),
+            ),
+            (
+                "wait_copy",
+                serde_json::json!({"type": "column", "name": "wait"}),
+            ),
+            (
+                "nums_or_null",
+                serde_json::json!({
+                    "type": "func", "name": "coalesce", "args": [
+                        {"type": "column", "name": "nums"},
+                        {"type": "value", "value": null},
+                    ],
+                }),
+            ),
+            (
+                "tags_or_empty",
+                serde_json::json!({
+                    "type": "func", "name": "coalesce", "args": [
+                        {"type": "column", "name": "tags"},
+                        {"type": "value", "value": []},
+                    ],
+                }),
+            ),
+        ]);
+        apply_annotation_result_types(&mut ir);
+        let types = ir.column_types.unwrap();
+        assert!(matches!(
+            types.get("copy"),
+            Some(ColumnTypeSpec::Array { .. })
+        ));
+        assert_eq!(types.get("wait_copy"), Some(&ColumnTypeSpec::Timedelta));
+        assert!(matches!(
+            types.get("nums_or_null"),
+            Some(ColumnTypeSpec::Array { .. })
+        ));
+        assert!(matches!(
+            types.get("tags_or_empty"),
+            Some(ColumnTypeSpec::Array { .. })
+        ));
+    }
+
+    #[test]
+    fn test_annotation_result_types_skip_expressions_that_change_the_type() {
+        let mut ir = annotated_ir(vec![
+            (
+                "widened",
+                serde_json::json!({
+                    "type": "func", "name": "greatest", "args": [
+                        {"type": "column", "name": "qty"},
+                        {"type": "value", "value": 1.5},
+                    ],
+                }),
+            ),
+            (
+                "defaulted",
+                serde_json::json!({
+                    "type": "func", "name": "coalesce", "args": [
+                        {"type": "column", "name": "qty"},
+                        {"type": "value", "value": 1},
+                    ],
+                }),
+            ),
+            (
+                "sum",
+                serde_json::json!({
+                    "type": "op", "op": "add",
+                    "lhs": {"type": "column", "name": "qty"},
+                    "rhs": {"type": "value", "value": 1},
+                }),
+            ),
+            (
+                "joined",
+                serde_json::json!({
+                    "type": "func", "name": "concat_ws", "args": [
+                        {"type": "value", "value": "-"},
+                        {"type": "column", "name": "status"},
+                    ],
+                }),
+            ),
+        ]);
+        apply_annotation_result_types(&mut ir);
+        let types = ir.column_types.unwrap();
+        for alias in ["widened", "defaulted", "sum", "joined"] {
+            assert!(!types.contains_key(alias), "{alias} must decode natively");
+        }
+    }
+
+    #[test]
+    fn test_annotation_result_types_ignore_count_and_exists_shortcuts() {
+        // The shortcut's own result column (`_count` / `exists`) shares the
+        // namespace with annotation aliases and must keep its native decoding.
+        for (count, exists) in [(Some(true), None), (None, Some(true))] {
+            let mut ir = annotated_ir(vec![
+                (
+                    "_count",
+                    serde_json::json!({"type": "column", "name": "status"}),
+                ),
+                (
+                    "exists",
+                    serde_json::json!({"type": "column", "name": "nums"}),
+                ),
+            ]);
+            ir.count = count;
+            ir.exists = exists;
+            let before = ir.column_types.clone();
+            apply_annotation_result_types(&mut ir);
+            assert_eq!(ir.column_types, before);
+        }
+    }
+
+    #[test]
+    fn test_enum_alias_survives_non_preserving_sibling_arguments() {
+        // An enum column among the arguments fixes the result type in
+        // PostgreSQL, whatever else is there (raw SQL, arithmetic).
+        let mut ir = annotated_ir(vec![
+            (
+                "raw",
+                serde_json::json!({
+                    "type": "func", "name": "coalesce", "args": [
+                        {"type": "column", "name": "status"},
+                        {"type": "raw", "sql": "'draft'"},
+                    ],
+                }),
+            ),
+            (
+                "arith",
+                serde_json::json!({
+                    "type": "func", "name": "greatest", "args": [
+                        {"type": "column", "name": "status"},
+                        {"type": "op", "op": "add",
+                         "lhs": {"type": "column", "name": "qty"},
+                         "rhs": {"type": "value", "value": 1}},
+                    ],
+                }),
+            ),
+            (
+                "widened",
+                serde_json::json!({
+                    "type": "func", "name": "greatest", "args": [
+                        {"type": "column", "name": "qty"},
+                        {"type": "raw", "sql": "1.5"},
+                    ],
+                }),
+            ),
+        ]);
+        apply_annotation_result_types(&mut ir);
+        let types = ir.column_types.unwrap();
+        assert!(matches!(
+            types.get("raw"),
+            Some(ColumnTypeSpec::Enum { .. })
+        ));
+        assert!(matches!(
+            types.get("arith"),
+            Some(ColumnTypeSpec::Enum { .. })
+        ));
+        assert!(!types.contains_key("widened"));
+    }
+
+    #[test]
+    fn test_list_literal_with_mismatched_elements_is_rejected() {
+        // `"1"` and `2.5` do not fit a BIGINT[]; PostgreSQL array binding would
+        // store them as NULL.
+        let node = se(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "column", "name": "nums"},
+                {"type": "value", "value": ["1", 2.5]},
+            ],
+        }));
+        let err = compile_scalar(&node, None, Some(&array_types())).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        let fits = se(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "column", "name": "nums"},
+                {"type": "value", "value": [1, 2]},
+            ],
+        }));
+        assert!(compile_scalar(&fits, None, Some(&array_types())).is_ok());
+    }
+
+    #[test]
+    fn test_assignment_bare_list_with_mismatched_elements_is_rejected() {
+        let spec = ColumnTypeSpec::Array {
+            item: Box::new(ColumnTypeSpec::BigInteger),
+        };
+        let bad = expr_wrapper(serde_json::json!({"type": "value", "value": ["1", 2.5]}));
+        assert!(assign(&bad, &spec, None).is_err());
+        let good = expr_wrapper(serde_json::json!({"type": "value", "value": [1, 2]}));
+        assert!(assign(&good, &spec, None).is_ok());
+    }
+
+    #[test]
+    fn test_binding_only_columns_type_neither_siblings_nor_targets() {
+        // A MONEY column reaches the builders as a `bind_types` hint folded
+        // into `column_types`: it binds a Decimal value, but must not make a
+        // sibling NULL a NUMERIC parameter.
+        let types = ColumnTypes::from([(
+            "amount".to_string(),
+            ColumnTypeSpec::Decimal {
+                precision: None,
+                scale: None,
+            },
+        )]);
+        let ir = oxyde_codec::QueryIR {
+            column_types: Some(types.clone()),
+            bind_types: Some(types),
+            ..Default::default()
+        };
+        let node = se(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "column", "name": "amount"},
+                {"type": "value", "value": null},
+            ],
+        }));
+        let (sql, params) = render(compile_scalar(&node, None, ExprTypes::of(&ir)).unwrap());
+        assert_eq!(sql, r#"SELECT COALESCE("amount", NULL) AS "x""#);
+        assert!(params.is_empty(), "{params:?}");
+
+        // As an assignment target it imposes nothing either, yet a bare value
+        // still binds by the hint.
+        let wrapper = expr_wrapper(serde_json::json!({
+            "type": "func", "name": "coalesce", "args": [
+                {"type": "value", "value": null},
+                {"type": "value", "value": 5},
+            ],
+        }));
+        let (_, params) = render(
+            assignment_expr(&wrapper, "amount", ExprTypes::of(&ir), Dialect::Postgres).unwrap(),
+        );
+        assert_eq!(params.len(), 1, "{params:?}");
+
+        let bare = rmpv::Value::String("2.50".into());
+        let (_, params) = render(
+            assignment_expr(&bare, "amount", ExprTypes::of(&ir), Dialect::Postgres).unwrap(),
+        );
+        assert!(matches!(params[0], Value::Decimal(Some(_))), "{params:?}");
     }
 }

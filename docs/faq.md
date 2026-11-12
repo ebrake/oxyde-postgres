@@ -6,7 +6,7 @@ Common questions and answers about Oxyde.
 
 ### What is Oxyde?
 
-Oxyde is a high-performance async Python ORM with a Rust core. It combines:
+Oxyde for PostgreSQL is a PostgreSQL-focused fork of Oxyde, an async Python ORM with a Rust core. It combines:
 
 - **Python API**: Pydantic v2 models with Django-style query syntax
 - **Rust Core**: High-performance SQL generation and execution via sqlx
@@ -16,7 +16,7 @@ Oxyde is a high-performance async Python ORM with a Rust core. It combines:
 
 The Rust core provides:
 
-- **Performance**: SQL generation and connection pooling are 5-10x faster than pure Python
+- **Native execution**: SQL generation, typed binding, and connection pooling run in Rust
 - **Memory Safety**: No GC pauses during I/O operations
 - **Concurrency**: True async I/O that releases Python's GIL
 
@@ -25,6 +25,9 @@ The Rust core provides:
 | Database | Status | Features |
 |----------|--------|----------|
 | PostgreSQL | Full support | RETURNING, JSONB, Arrays, UPSERT |
+
+PostgreSQL **18 or newer** is required and checked when a pool connects.
+See the [changelog](changelog.md) for the additions and compatibility notes.
 
 ### Is Oxyde production-ready?
 
@@ -45,6 +48,7 @@ pip install oxyde-postgres
 ### What are the system requirements?
 
 - Python 3.13+
+- PostgreSQL 18+
 - No Rust compiler needed (wheels are pre-built)
 
 ### How do I install from source?
@@ -57,11 +61,10 @@ cd oxyde-postgres
 # Install Rust (if not installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Build and install
-cd crates/oxyde-core-py
-maturin develop --release
-cd ../../python
-pip install -e .
+# Build and install from the repository root in an activated virtual environment
+pip install maturin
+maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
+pip install -e ./python
 ```
 
 ## Models

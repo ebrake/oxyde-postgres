@@ -139,13 +139,28 @@ results = await Post.objects.values("author_id").annotate(
 
 Scalar expressions compute one value per row. They are annotated with
 `annotate()` and read back with `.values()`, `.values_list()` or `fetch_all()`.
-`.all()`, `.first()` and `.get()` raise `TypeError` for them, because the
+Model-returning `.all()`, `.first()` and `.get()` raise `TypeError`, because the
 extra column has no model field to hydrate. A query cannot mix scalar
 annotations with aggregates, and `having()` only accepts aggregate aliases.
 
 Column names refer to the model's own fields (mapped to `db_column`);
 related-field names such as `author__id` are not supported. An alias may not
-equal a model field or column name.
+equal a model field or column name, or start with a joined relation's
+`<prefix>__` namespace. Aggregate arguments also map field names to `db_column`;
+this applies to both `annotate(total=Sum("stock"))` and `sum("stock")`.
+
+```python
+from oxyde import F
+
+query = Product.objects.annotate(double_stock=F("stock") * 2)
+rows = await query.values("id", "double_stock").all()
+numbers = await query.values_list("double_stock", flat=True).all()
+raw_rows = await query.fetch_all()
+```
+
+On joined queries, `.values()` and `fetch_all()` without a field list also
+include joined keys such as `author__name`. Scalar annotations require core
+`>=0.3.1,<0.4.0`; an older core can silently discard the annotation IR.
 
 ### Coalesce
 
@@ -177,6 +192,25 @@ arithmetic: `update(qty=Coalesce("qty", F("default_qty"), 0))`.
 
 `Value(x)` is an explicit literal. A `str` inside `Value` is never read as a
 column name.
+
+### Result Types
+
+Annotations that pass through a known column type preserve its decoding:
+`F("tags")` and `Coalesce("tags", None)` return the array as a list, and an
+interval field returns seconds as it does when selected directly. Enum aliases
+are decoded as enum values, including when another argument is `RawSQL` or
+arithmetic; PostgreSQL may reject incompatible argument types.
+
+Expressions that can change the result type, such as `F` arithmetic,
+`Greatest("integer_field", 1.5)`, `Concat`, and standalone `RawSQL`, use native
+result decoding. Binding-only hints for custom SQL types do not change the
+decoded result. See [Typed Literals and NULLs](expressions.md#typed-literals-and-nulls)
+for enum, array, and NULL binding rules.
+
+`Coalesce`, `Concat`, and `RawSQL` live in `oxyde.queries.expressions`.
+Imports from `oxyde`, `oxyde.queries`, and `oxyde.queries.aggregates` remain
+compatible. Their old aggregate interfaces (`to_ir()`, `.fields`, and
+`.func_name`) are no longer supported.
 
 ### Concat
 

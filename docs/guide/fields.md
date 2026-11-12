@@ -150,6 +150,20 @@ tags: list[str] = Field(db_type="TEXT[]")
 
 ```
 
+Recognized types guide parameter binding and result decoding. For a custom
+`db_type` with no recognized spec (such as MONEY, CITEXT, or a domain), the
+Python annotation still guides Decimal and UUID parameter binding. These
+binding-only hints do not change the returned type or type sibling literals
+inside expressions; an explicit known column spec takes precedence.
+
+Typed arrays retain their actual PostgreSQL element type in filters and joins,
+including `SMALLINT[]`, `INTEGER[]`, and `BYTEA[]`. Decimal exponent notation
+binds numerically, and mixed aware/naive datetime array elements normalize
+through UTC to the field's timezone flavor. Incompatible array elements are
+rejected instead of silently binding as NULL. See
+[Array Lookups](filtering.md#array-lookups) and
+[Typed Literals and NULLs](expressions.md#typed-literals-and-nulls).
+
 ### Array Inner Constraints
 
 For PostgreSQL array columns the inner element type can carry its own constraints via `Annotated`:

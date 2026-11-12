@@ -14,6 +14,7 @@ use sea_query::value::ArrayType;
 use sea_query::{Expr, SimpleExpr, Value};
 use uuid::Uuid;
 
+use crate::error::QueryError;
 use crate::Dialect;
 
 /// Convert an rmpv value without a column spec (raw SQL parameters).
@@ -312,6 +313,18 @@ pub(crate) fn element_array_type(item: &ColumnTypeSpec) -> Option<ArrayType> {
         ColumnTypeSpec::Decimal { .. } => Some(ArrayType::Decimal),
         ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => Some(ArrayType::Json),
         ColumnTypeSpec::Array { .. } | ColumnTypeSpec::Unknown => None,
+    }
+}
+
+/// Error when a bound array holds an element of another type than the array's
+/// (see [`mismatched_array_element`]): PostgreSQL array binding would turn it
+/// into a silent NULL, which stores or matches the wrong data.
+pub(crate) fn ensure_array_elements(value: &Value) -> crate::error::Result<()> {
+    match (value, mismatched_array_element(value)) {
+        (Value::Array(arr_type, _), Some(element)) => Err(QueryError::InvalidQuery(format!(
+            "Array element {element:?} does not match the array's element type {arr_type:?}"
+        ))),
+        _ => Ok(()),
     }
 }
 
