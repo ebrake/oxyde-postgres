@@ -2521,3 +2521,100 @@ mod index_keys {
         }
     }
 }
+
+#[test]
+fn extensions_serde_backwards_compatibility() {
+    let legacy = serde_json::json!({"version": 1, "tables": {}});
+    let snapshot: Snapshot = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(snapshot.extensions.is_empty());
+    assert_eq!(serde_json::to_value(&snapshot).unwrap(), legacy);
+    let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "version": 1, "tables": {}, "extensions": ["uuid-ossp", "pg_trgm", "pg_trgm"]
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot).unwrap()["extensions"],
+        serde_json::json!(["pg_trgm", "uuid-ossp"])
+    );
+}
+
+#[test]
+fn extension_diff_order_and_replay() {
+    let empty = Snapshot::new();
+    let mut target = Snapshot::new();
+    target.extensions = ["uuid-ossp", "pg_trgm"]
+        .into_iter()
+        .map(|name| name.to_string().try_into().unwrap())
+        .collect();
+    target.add_table(enum_table(&["draft", "published"]));
+    let ops = compute_diff(&empty, &target).unwrap();
+    assert_eq!(
+        serde_json::to_value(&ops).unwrap()[0],
+        serde_json::json!({"type": "ensure_extension", "name": "pg_trgm"})
+    );
+    assert!(matches!(&ops[1], MigrationOp::EnsureExtension { .. }));
+    assert!(matches!(&ops[2], MigrationOp::CreateEnumType { .. }));
+    assert!(matches!(&ops[3], MigrationOp::CreateTable { .. }));
+    let mut replayed = empty.clone();
+    for op in &ops {
+        oxyde_migrate::apply_operation(&mut replayed, op).unwrap();
+    }
+    assert!(compute_diff(&replayed, &target).unwrap().is_empty());
+    assert!(compute_diff(&target, &target).unwrap().is_empty());
+    let removals = compute_diff(&target, &empty).unwrap();
+    assert!(matches!(&removals[0], MigrationOp::DropTable { .. }));
+    assert!(matches!(&removals[1], MigrationOp::DropEnumType { .. }));
+    assert!(matches!(
+        &removals[2],
+        MigrationOp::RemoveExtensionRequirement { .. }
+    ));
+    assert!(matches!(
+        &removals[3],
+        MigrationOp::RemoveExtensionRequirement { .. }
+    ));
+    for op in &removals {
+        oxyde_migrate::apply_operation(&mut replayed, op).unwrap();
+    }
+    assert_eq!(replayed, empty);
+}
+
+#[test]
+fn model_validation_accepts_inferred_opclass_extensions() {
+    for opclass in [
+        "gin_trgm_ops",
+        "public.gin_trgm_ops",
+        "PUBLIC.GIST_TRGM_OPS",
+    ] {
+        let mut snapshot = Snapshot::new();
+        let mut table = table_with_fields("docs", &["title"]);
+        table.indexes.push(IndexDef {
+            name: "ix_docs_trgm".into(),
+            fields: vec![IndexKey::Column {
+                name: "title".into(),
+                opclass: Some(opclass.into()),
+            }],
+            unique: false,
+            nulls_not_distinct: false,
+            method: Some("gin".into()),
+            where_clause: None,
+        });
+        snapshot.add_table(table);
+        snapshot.validate_model_schema().unwrap();
+        let pg_trgm = "pg_trgm".to_string().try_into().unwrap();
+        assert_eq!(snapshot.required_extensions(), [pg_trgm].into());
+        assert!(snapshot.extensions.is_empty());
+        // Inference is materialized at model extraction, not historical diffing.
+        assert!(compute_diff(&snapshot, &snapshot).unwrap().is_empty());
+        snapshot
+            .extensions
+            .insert("pg_trgm".to_string().try_into().unwrap());
+        snapshot.validate_model_schema().unwrap();
+        snapshot.extensions.clear();
+        snapshot.tables.get_mut("docs").unwrap().indexes[0].fields = vec![IndexKey::Column {
+            name: "title".into(),
+            opclass: Some("text_pattern_ops".into()),
+        }];
+        snapshot.validate_model_schema().unwrap();
+        assert!(snapshot.required_extensions().is_empty());
+    }
+}

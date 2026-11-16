@@ -59,8 +59,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub mod extensions;
 pub mod migration;
 
+pub use extensions::{extension_for_opclass, extension_for_type, ExtensionName};
 pub use migration::{
     unique_constraint_name, CheckDef, EnumFieldRef, FieldDef, ForeignKeyDef, IndexDef, IndexKey,
     MigrateError, MigrationOp, Snapshot, TableDef,

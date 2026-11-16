@@ -15,6 +15,8 @@ def canonical_snapshot(snapshot):
     from oxyde.migrations.utils import normalize_op_fields
 
     replay = SchemaReplay()
+    for name in snapshot.get("extensions", []):
+        replay.apply(json.dumps({"type": "ensure_extension", "name": name}))
     for table in snapshot["tables"].values():
         replay.apply(
             json.dumps(normalize_op_fields({"type": "create_table", "table": table}))
@@ -25,6 +27,10 @@ def canonical_snapshot(snapshot):
 def assert_migration_parity(module, initial=None):
     """Compare final schema only; execute-mode state updates changed in 0.3."""
     python, rust = _PythonSchemaState(), SchemaState()
+    for name in (initial or {}).get("extensions", []):
+        op = {"type": "ensure_extension", "name": name}
+        python.apply_operation(op)
+        rust.apply_operation(op)
     for table in (initial or {}).get("tables", {}).values():
         op = {"type": "create_table", "table": deepcopy(table)}
         python.apply_operation(deepcopy(op))

@@ -84,7 +84,7 @@ from pydantic._internal._model_construction import ModelMetaclass
 from pydantic.errors import PydanticUndefinedAnnotation
 from pydantic.fields import FieldInfo, PydanticUndefined
 
-from oxyde.core import register_validator
+from oxyde.core import migration_validate_extension_name, register_validator
 
 if TYPE_CHECKING:
     from oxyde.queries.base import SupportsExecute
@@ -255,6 +255,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             "indexes",
             "unique_together",
             "constraints",
+            "extensions",
         }
         indexes = list(meta_dict.get("indexes", []) or [])
         unique_together = [
@@ -262,6 +263,19 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             for group in (meta_dict.get("unique_together", []) or [])
         ]
         constraints = list(meta_dict.get("constraints", []) or [])
+        raw_extensions = meta_dict.get("extensions", ())
+        if not isinstance(raw_extensions, (tuple, list)):
+            raise TypeError("Meta.extensions must be a tuple or list of strings")
+        if any(not isinstance(name, str) for name in raw_extensions):
+            raise TypeError("Meta.extensions items must be strings")
+        if "extensions" in meta_dict and not is_table:
+            raise TypeError("Meta.extensions can only be declared on a table model")
+        for name in raw_extensions:
+            try:
+                migration_validate_extension_name(name)
+            except ValueError as e:
+                raise ValueError(f"{cls.__qualname__}.Meta.extensions: {e}") from e
+        extensions = tuple(dict.fromkeys(raw_extensions))
         extra_meta = {
             key: value for key, value in meta_dict.items() if key not in known_meta_keys
         }
@@ -273,6 +287,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             indexes=indexes,
             unique_together=unique_together,
             constraints=constraints,
+            extensions=extensions,
             extra=extra_meta,
         )
 

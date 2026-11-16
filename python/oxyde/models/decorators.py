@@ -78,10 +78,10 @@ class Index:
     ``db_column``. An index with an expression field needs an explicit ``name``.
 
     ``opclasses`` gives an operator class per field (``None`` keeps the
-    default), e.g. ``text_pattern_ops`` or ``gin_trgm_ops``. Extension-provided
-    classes need the extension created first, e.g. with
-    ``ctx.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")`` in an earlier
-    migration.
+    default), e.g. ``text_pattern_ops`` or ``gin_trgm_ops``. Known extension
+    operator classes and column types (``db_type``) are detected automatically,
+    including pgvector types used by ``hnsw`` and ``ivfflat`` indexes. Declare
+    other requirements in ``Meta.extensions``. Migrations install them first.
 
     Examples:
         >>> class User(Model):

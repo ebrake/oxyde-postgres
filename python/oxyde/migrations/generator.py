@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from oxyde.core import migration_infer_name
+
+_EXTENSION_OPS = frozenset(
+    {
+        "ensure_extension",
+        "remove_extension_requirement",
+        "drop_extension",
+    }
+)
 
 
 def _python_repr(obj: Any, indent: int = 0, base_indent: int = 4) -> str:
@@ -66,7 +77,10 @@ def _operation_to_python(op: dict[str, Any], indent: str = "    ") -> str:
     """
     op_type = op.get("type")
 
-    if op_type == "create_enum_type":
+    if op_type in _EXTENSION_OPS:
+        return f"{indent}ctx.{op_type}({_python_repr(op['name'])})"
+
+    elif op_type == "create_enum_type":
         values_repr = _python_repr(op["values"])
         return (
             f"{indent}ctx.create_enum_type({_python_repr(op['name'])}, {values_repr})"
@@ -227,51 +241,6 @@ def _operation_to_python(op: dict[str, Any], indent: str = "    ") -> str:
     return f"{indent}# Unknown operation: {op_type}"
 
 
-def _infer_migration_name(operations: list[dict[str, Any]]) -> str:
-    """Infer migration name from operations.
-
-    Args:
-        operations: List of migration operations
-
-    Returns:
-        Migration name (e.g., "create_user_table")
-    """
-    if not operations:
-        return "empty"
-
-    # Take first operation as basis
-    first_op = operations[0]
-    op_type = first_op.get("type")
-
-    if op_type == "create_enum_type":
-        return f"create_{first_op['name']}_enum"
-    elif op_type == "drop_enum_type":
-        return f"drop_{first_op['name']}_enum"
-    elif op_type == "add_enum_value":
-        return f"add_{first_op['value']}_to_{first_op['name']}_enum"
-    elif op_type == "alter_enum_type":
-        return f"alter_{first_op['name']}_enum"
-    elif op_type == "create_table":
-        table_name = first_op["table"]["name"]
-        return f"create_{table_name}_table"
-    elif op_type == "drop_table":
-        return f"drop_{first_op['name']}_table"
-    elif op_type == "add_column":
-        return f"add_{first_op['field']['name']}_to_{first_op['table']}"
-    elif op_type == "drop_column":
-        return f"drop_{first_op['field']}_from_{first_op['table']}"
-    elif op_type == "rename_table":
-        return f"rename_{first_op['old_name']}_to_{first_op['new_name']}"
-    elif op_type == "rename_column":
-        return f"rename_column_{first_op['old_name']}_to_{first_op['new_name']}"
-
-    # Multiple operations - use generic name
-    if len(operations) > 1:
-        return "auto"
-
-    return "migration"
-
-
 def _get_next_migration_number(migrations_dir: str | Path) -> str:
     """Get next migration number.
 
@@ -338,7 +307,9 @@ def generate_migration_file(
     migrations_path.mkdir(parents=True, exist_ok=True)
 
     # Determine migration name and number
-    migration_name = name or _infer_migration_name(operations)
+    migration_name = (
+        migration_infer_name(json.dumps(operations)) if name is None else name
+    )
     migration_number = _get_next_migration_number(migrations_path)
     filename = f"{migration_number}_{migration_name}.py"
     filepath = migrations_path / filename
@@ -356,7 +327,15 @@ def generate_migration_file(
         op_type = op.get("type")
 
         # Generate reverse operation
-        if op_type == "create_enum_type":
+        if op_type in _EXTENSION_OPS:
+            # IF NOT EXISTS may have found an extension installed by someone else.
+            reverse = (
+                "remove_extension_requirement"
+                if op_type == "ensure_extension"
+                else "ensure_extension"
+            )
+            downgrade_lines.append(f"    ctx.{reverse}({_python_repr(op['name'])})")
+        elif op_type == "create_enum_type":
             downgrade_lines.append(
                 f"    ctx.drop_enum_type({_python_repr(op['name'])})"
             )

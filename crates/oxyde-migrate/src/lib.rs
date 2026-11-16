@@ -6,15 +6,17 @@
 //! database dependencies.
 
 mod diff;
+mod naming;
 pub mod replay;
 
 pub use diff::compute_diff;
+pub use naming::infer_migration_name;
 pub use replay::{apply_operation, resolve_operation};
 
 // Contract types re-exported for convenience (canonical home: oxyde-codec).
 pub use oxyde_codec::{
-    CheckDef, EnumFieldRef, FieldDef, ForeignKeyDef, IndexDef, IndexKey, MigrateError, MigrationOp,
-    Snapshot, TableDef,
+    CheckDef, EnumFieldRef, ExtensionName, FieldDef, ForeignKeyDef, IndexDef, IndexKey,
+    MigrateError, MigrationOp, Snapshot, TableDef,
 };
 
 pub type Result<T> = std::result::Result<T, MigrateError>;

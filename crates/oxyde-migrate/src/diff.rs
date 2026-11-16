@@ -563,6 +563,12 @@ pub fn compute_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> 
     let old_enums = collect_enum_defs(old)?;
     let new_enums = collect_enum_defs(new)?;
 
+    // Stable Kahn ordering takes the lowest ready index: extension operations
+    // have no graph prerequisites and this position keeps them before even enums.
+    for name in new.extensions.difference(&old.extensions) {
+        ops.push(MigrationOp::EnsureExtension { name: name.clone() });
+    }
+
     // Generated migrations must create enum types before tables or columns can
     // reference them. `order_generated_operations` has no enum graph edges, so
     // this insertion position is an explicit ordering invariant.
@@ -828,6 +834,12 @@ pub fn compute_diff(old: &Snapshot, new: &Snapshot) -> Result<Vec<MigrationOp>> 
                 values: Some(old_enums[&name].clone()),
             });
         }
+    }
+
+    // As with enum drops, the final insertion position keeps requirement removals
+    // after all schema changes without extension-specific graph edges.
+    for name in old.extensions.difference(&new.extensions) {
+        ops.push(MigrationOp::RemoveExtensionRequirement { name: name.clone() });
     }
 
     order_generated_operations(ops)

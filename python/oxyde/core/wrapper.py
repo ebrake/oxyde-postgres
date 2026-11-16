@@ -36,7 +36,7 @@ Functions Exported:
 
     Migrations:
         SchemaReplay, migration_compute_diff, migration_to_sql,
-        migration_validate_schema
+        migration_validate_schema, migration_validate_extension_name, migration_infer_name
 
     Validation:
         register_validator (no-op, not implemented in Rust)
@@ -83,6 +83,13 @@ _FUNCTION_REGISTRY: list[tuple[str, str, bool, bool]] = [
     ("migration_compute_diff", "migration_compute_diff", False, False),
     ("migration_to_sql", "migration_to_sql", False, False),
     ("migration_validate_schema", "migration_validate_schema", False, False),
+    (
+        "migration_validate_extension_name",
+        "migration_validate_extension_name",
+        False,
+        True,
+    ),
+    ("migration_infer_name", "migration_infer_name", False, False),
     # Validation (no-op - not implemented in Rust, kept for compatibility)
     ("register_validator", "register_validator", False, True),
 ]
@@ -182,6 +189,8 @@ explain_query = _exports["explain_query"]
 migration_compute_diff = _exports["migration_compute_diff"]
 migration_to_sql = _exports["migration_to_sql"]
 migration_validate_schema = _exports["migration_validate_schema"]
+migration_validate_extension_name = _exports["migration_validate_extension_name"]
+migration_infer_name = _exports["migration_infer_name"]
 SchemaReplay = _exports["SchemaReplay"]
 
 # ── Core exception classes ────────────────────────────────────────────────
@@ -239,6 +248,8 @@ __all__ = [
     "migration_compute_diff",
     "migration_to_sql",
     "migration_validate_schema",
+    "migration_validate_extension_name",
+    "migration_infer_name",
     "SchemaReplay",
     "DatabaseError",
     "IntegrityError",

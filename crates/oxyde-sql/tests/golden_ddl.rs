@@ -1009,3 +1009,18 @@ fn alter_column_enum() {
     ];
     snap("alter_column_enum", &ops, ALL_DIALECTS);
 }
+
+#[test]
+fn extensions() {
+    let name = || "uuid-ossp".to_string().try_into().unwrap();
+    let ops = vec![
+        MigrationOp::EnsureExtension { name: name() },
+        MigrationOp::RemoveExtensionRequirement { name: name() },
+        MigrationOp::DropExtension { name: name() },
+    ];
+    assert_eq!(
+        oxyde_sql::MigrationOpExt::to_sql(&ops[1], Dialect::Postgres).unwrap(),
+        [] as [String; 0]
+    );
+    snap("extensions", &ops, ALL_DIALECTS);
+}

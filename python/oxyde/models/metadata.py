@@ -120,6 +120,7 @@ class ModelMeta:
     indexes: list[Index] = dataclass_field(default_factory=list)
     unique_together: list[tuple[str, ...]] = dataclass_field(default_factory=list)
     constraints: list[Check] = dataclass_field(default_factory=list)
+    extensions: tuple[str, ...] = ()
     field_metadata: dict[str, ColumnMeta] = dataclass_field(default_factory=dict)
     relations: dict[str, RelationInfo] = dataclass_field(default_factory=dict)
     extra: dict[str, Any] = dataclass_field(default_factory=dict)

@@ -46,7 +46,9 @@
 //! ## Migrations
 //! - `migration_compute_diff(old_json, new_json)` → str
 //! - `migration_to_sql(operations_json, dialect)` → list[str]
-//! - `migration_validate_schema(snapshot_json)` → None (raises `ValueError`)
+//! - `migration_validate_schema(snapshot_json)` → list[str] (raises `ValueError`)
+//! - `migration_validate_extension_name(name)` → None (raises `ValueError`)
+//! - `migration_infer_name(operations_json)` → str
 //!
 //! # Async Integration
 //!
@@ -112,6 +114,11 @@ fn _oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(migration::migration_compute_diff, m)?)?;
     m.add_function(wrap_pyfunction!(migration::migration_to_sql, m)?)?;
     m.add_function(wrap_pyfunction!(migration::migration_validate_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        migration::migration_validate_extension_name,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(migration::migration_infer_name, m)?)?;
 
     // Exception classes (constraint classification comes from the driver)
     m.add("DatabaseError", m.py().get_type::<errors::DatabaseError>())?;

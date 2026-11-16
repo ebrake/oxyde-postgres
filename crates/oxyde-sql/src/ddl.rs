@@ -214,6 +214,14 @@ impl MigrationOpExt for MigrationOp {
     /// Returns `Err` for operations not supported by the dialect
     fn to_sql(&self, dialect: Dialect) -> Result<Vec<String>> {
         match self {
+            // ExtensionName validation excludes double quotes, so plain quoting is safe.
+            MigrationOp::EnsureExtension { name } => {
+                Ok(vec![format!("CREATE EXTENSION IF NOT EXISTS \"{name}\"")])
+            }
+            MigrationOp::RemoveExtensionRequirement { .. } => Ok(Vec::new()),
+            MigrationOp::DropExtension { name } => {
+                Ok(vec![format!("DROP EXTENSION \"{name}\" RESTRICT")])
+            }
             MigrationOp::CreateEnumType { name, values } => {
                 let labels = values
                     .iter()
