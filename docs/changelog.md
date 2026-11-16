@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.3 — Declared PostgreSQL extensions
+
+- Declare requirements with `Meta.extensions = ("pg_trgm",)`. Requirements from
+  table models are combined into a sorted, deduplicated snapshot set.
+- Migrations and `create_tables()` install new requirements before enum types,
+  tables and indexes using `CREATE EXTENSION IF NOT EXISTS`.
+- Added `ensure_extension`, `remove_extension_requirement` (state only), and the
+  explicit manual `drop_extension` operation (`DROP EXTENSION ... RESTRICT`).
+  Removing a declaration or rolling back preserves the installed extension.
+- Known extension operator classes and column types (`db_type`) are detected
+  automatically, including pgvector types used by `hnsw` and `ivfflat` indexes.
+  Quoted type names are matched case-sensitively, as in PostgreSQL (`'"Vector"'`
+  is not pgvector).
+  Use `Meta.extensions` for other requirements. Existing 0.3.2 models keep working
+  without new declarations.
+- **Migration note:** upgrading a 0.3.2 project using trigram, hstore, citext, cube,
+  ltree, vector or PostGIS creates a pending `ensure_extension` migration.
+  `CREATE EXTENSION IF NOT EXISTS` safely skips extensions already installed.
+  Historical replay and squash remain compatible. The CLI has no `--check` mode;
+  `makemigrations --dry-run` exits 0, so CI is unaffected.
+- Generated migration names skip extension operations when naming structural
+  changes. Inferred names are lowercase with punctuation and spaces replaced by
+  underscores, including enum values and `uuid-ossp` (`extension_uuid_ossp`).
+- Requires `oxyde-postgres-core>=0.3.3,<0.4.0`. Snapshots without extension
+  requirements keep their existing serialized form.
+
 ## 0.3.2 — Expression and operator-class indexes
 
 - `Index` fields can be expressions (`Index((Lower("email"),), name=...)`), and

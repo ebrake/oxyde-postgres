@@ -104,7 +104,13 @@ def makemigrations(
         typer.echo(f"   ✅ Found {len(operations)} operation(s):")
         for op in operations:
             op_type = op.get("type", "unknown")
-            if op_type == "create_table":
+            if op_type == "ensure_extension":
+                typer.echo(f"      + extension {op['name']}")
+            elif op_type == "remove_extension_requirement":
+                typer.echo(
+                    f"      - extension {op['name']} (requirement only; not dropped)"
+                )
+            elif op_type == "create_table":
                 typer.echo(f"      - Create table: {op['table']['name']}")
             elif op_type == "drop_table":
                 typer.echo(f"      - Drop table: {op['name']}")
@@ -473,6 +479,12 @@ def sqlmigrate(
 
         # Manual ops emit no SQL — surface them so the preview is not empty.
         for op in operations:
+            if op.get("type") == "remove_extension_requirement":
+                typer.echo(
+                    f"-- remove extension requirement {op['name']} "
+                    "(no SQL; extension remains installed)"
+                )
+                typer.echo()
             if op.get("type") == "alter_enum_type":
                 typer.secho(
                     f"-- manual migration required: enum {op['name']} "

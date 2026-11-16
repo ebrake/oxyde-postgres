@@ -42,6 +42,7 @@ class User(Model):
 | `table_name` | `str` | Class name | Database table name |
 | `schema` | `str` | None | Database schema |
 | `indexes` | `list[Index]` | `[]` | Composite indexes |
+| `extensions` | `tuple[str, ...]` or `list[str]` | `()` | Additional PostgreSQL extension requirements; known operator classes and types are inferred |
 | `constraints` | `list[Check]` | `[]` | CHECK constraints |
 | `unique_together` | `list[tuple]` | `[]` | Composite unique constraints |
 
@@ -239,23 +240,34 @@ Things to know:
 `opclasses` gives one operator class per field (`None` keeps the default):
 
 ```python
-Index(("name",), opclasses=("text_pattern_ops",), name="ix_user_name_pattern")
-Index(
-    (Lower("name"),),
-    method="gin",
-    opclasses=("gin_trgm_ops",),
-    name="ix_user_name_trgm",
-)
+class User(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    name: str
+
+    class Meta:
+        is_table = True
+        extensions = ("pg_trgm",)
+        indexes = [
+            Index(("name",), opclasses=("text_pattern_ops",), name="ix_user_name_pattern"),
+            Index(
+                (Lower("name"),),
+                method="gin",
+                opclasses=("gin_trgm_ops",),
+                name="ix_user_name_trgm",
+            ),
+        ]
 ```
 
 The class name is written unquoted, so it must be an identifier, optionally
-schema-qualified (`public.gin_trgm_ops`). Classes that come from an extension need
-the extension first. Create it in an earlier migration:
-
-```python
-def upgrade(ctx):
-    ctx.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-```
+schema-qualified (`public.gin_trgm_ops`). Known extension operator classes and
+column types (`db_type`) are detected automatically, including pgvector types
+used by `hnsw` and `ivfflat` indexes. Use `Meta.extensions` on a table model for
+other requirements. Requirements are combined across table models, sorted and deduplicated;
+migrations and `create_tables()` install them before creating tables and indexes.
+Declarations belong on table models (`is_table = True`), including when an abstract
+base defines a `Meta` class. Names must match `[a-z_][a-z0-9_-]*` and be at most
+63 bytes; `uuid-ossp` is valid. See [Extensions](migrations.md#extensions) for
+privileges and removal behavior.
 
 An index with an operator class is a different index from a plain one on the same
 column, so `Field(db_index=True)` and an `Index(...)` with `opclasses` can coexist.

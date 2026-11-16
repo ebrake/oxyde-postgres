@@ -246,7 +246,7 @@ def _auto_index_name(table_name: str, index: Any) -> str:
 
 
 def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
-    """Extract current schema from registered models.
+    """Extract current schema and the union of extension requirements from table models.
 
     Args:
         dialect: Target database dialect (postgres)
@@ -269,9 +269,11 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
 
     validate_dialect(dialect)
     tables = {}
+    extensions: set[str] = set()
 
     for model_cls in iter_tables():
         meta = model_cls._db_meta
+        extensions.update(meta.extensions)
         table_name = meta.table_name
         assert table_name is not None, "Registered tables must have a table name"
 
@@ -446,13 +448,17 @@ def extract_current_schema(dialect: str = "postgres") -> dict[str, Any]:
             "comment": meta.comment,
         }
 
-    snapshot = {
+    snapshot: dict[str, Any] = {
         "version": 1,
         "tables": tables,
     }
-    # Rust owns the cross-checks (index columns exist, index names are unique
-    # schema-wide and after PostgreSQL's 63-byte truncation).
-    migration_validate_schema(json.dumps(snapshot))
+    if extensions:
+        snapshot["extensions"] = sorted(extensions)
+    # Rust validates the schema and combines declared requirements with known
+    # extension types and index operator classes. Keep extension-free snapshots compact.
+    required = migration_validate_schema(json.dumps(snapshot))
+    if required:
+        snapshot["extensions"] = required
     return snapshot
 
 

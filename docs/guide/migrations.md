@@ -224,6 +224,53 @@ Index dicts use `name`, `fields` (column names) and `unique`; `method` and
     `column_type`. They still replay, with a `FutureWarning` — see
     [Squashing Migration History](#squashing-migration-history).
 
+## Extensions
+
+Declare PostgreSQL extensions on a table model:
+
+```python
+class Document(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    title: str
+
+    class Meta:
+        is_table = True
+        extensions = ("pg_trgm",)
+        indexes = [Index(("title",), method="gin", opclasses=("gin_trgm_ops",))]
+```
+
+`makemigrations` combines requirements from every table model and emits
+`ctx.ensure_extension("pg_trgm")` before enum types, tables and indexes.
+`create_tables()` uses the same ordering. Known extension operator classes and
+column types (`db_type`) are detected automatically, including schema-qualified
+names and pgvector types used by `hnsw` and `ivfflat` indexes. Quoted type names
+are matched case-sensitively, as in PostgreSQL (`'"Vector"'` is not pgvector).
+Use `Meta.extensions` for requirements that cannot be inferred. Existing migration
+history can still be replayed and squashed.
+
+Upgrading from 0.3.2 with trigram, hstore, citext, cube, ltree, vector or PostGIS
+usage adds a pending `ensure_extension` migration, even if an older migration
+installed the extension with `ctx.execute(...)`. `CREATE EXTENSION IF NOT EXISTS`
+safely skips an extension already installed. The CLI has no `--check` mode;
+`makemigrations --dry-run` exits 0, so CI is unaffected.
+
+Installing an absent trusted extension such as
+[pg_trgm](https://www.postgresql.org/docs/current/pgtrgm.html) requires `CREATE`
+on the database. An already installed extension is skipped with a notice even
+when the migration role lacks that privilege. Other extensions
+may require superuser privileges. Managed PostgreSQL services allow only selected
+extensions; check your provider's allow-list and setup requirements. Extensions
+such as TimescaleDB also require server configuration (`shared_preload_libraries`)
+before installation; a declaration does not configure the server.
+
+Removing a declaration emits `remove_extension_requirement` when no inferred
+usage still requires it. This operation runs no SQL.
+Extensions are shared by the database, so neither this operation, a generated
+rollback, nor `drop_tables()` uninstalls them. Requirements inferred from known
+operator classes or types remain while those objects are used, even after an
+explicit declaration is removed. To uninstall deliberately, first remove
+dependent objects and then write `ctx.drop_extension("pg_trgm")` in a migration.
+
 ## Supported Operations
 
 All operations are called on the `ctx` (MigrationContext) object passed to `upgrade()` and `downgrade()`.
@@ -313,6 +360,39 @@ Accepted keyword arguments mirror the optional field keys: `column_type`,
 `db_type`, `nullable`, `default`, `unique`, `max_length`, `max_digits`,
 `decimal_places`.
 
+### Ensure Extension
+
+```python
+ctx.ensure_extension("pg_trgm")
+```
+
+Records an extension requirement and runs `CREATE EXTENSION IF NOT EXISTS
+"pg_trgm"`. Generated downgrades use `ctx.remove_extension_requirement(...)`,
+preserving an extension that may have been installed before the migration.
+
+### Remove Extension Requirement
+
+```python
+ctx.remove_extension_requirement("pg_trgm")
+```
+
+Changes replay state only and runs no SQL. The extension stays installed.
+The generated downgrade calls `ctx.ensure_extension(...)`.
+
+### Drop Extension
+
+```python
+ctx.drop_extension("pg_trgm")
+```
+
+An explicit manual operation: runs `DROP EXTENSION "pg_trgm" RESTRICT` and removes
+its requirement from replay state. PostgreSQL refuses to drop an extension with
+dependent objects. Diffs never generate this operation. The generated downgrade
+calls `ctx.ensure_extension(...)`; it restores the requirement and installs the
+extension with its default configuration, without restoring extension-owned data.
+If models still use a known operator class or type from that extension, the next
+`makemigrations` emits `ensure_extension` again.
+
 ### Create Index
 
 ```python
@@ -327,6 +407,7 @@ Each entry of `fields` is a column name, or an object for an expression or an
 operator class:
 
 ```python
+ctx.ensure_extension("pg_trgm")
 ctx.create_index("users", {
     "name": "ix_users_email_lower",
     "fields": [

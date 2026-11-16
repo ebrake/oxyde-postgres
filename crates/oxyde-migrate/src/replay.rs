@@ -170,6 +170,12 @@ fn drop_column_dependents(state: &mut Snapshot, table: &str, column: &str) {
 /// Enum declarations and drops are schema-neutral; enum value edits visit nested arrays.
 pub fn apply_operation(state: &mut Snapshot, op: &MigrationOp) -> Result<()> {
     match op {
+        MigrationOp::EnsureExtension { name } => {
+            state.extensions.insert(name.clone());
+        }
+        MigrationOp::RemoveExtensionRequirement { name } | MigrationOp::DropExtension { name } => {
+            state.extensions.remove(name);
+        }
         MigrationOp::CreateEnumType { .. } | MigrationOp::DropEnumType { .. } => {}
         MigrationOp::AddEnumValue { name, value, .. } => {
             rewrite_enum_fields(state, name, std::slice::from_ref(value), true);
@@ -626,5 +632,29 @@ mod tests {
         );
         assert_eq!(state.tables["posts"].foreign_keys[0].ref_table, "people");
         assert_eq!(state.tables["people"].foreign_keys[0].ref_table, "people");
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_remove_and_drop_extension_requirements() {
+        let mut state = Snapshot::new();
+        let name = || "pg_trgm".to_string().try_into().unwrap();
+        let ensure = MigrationOp::EnsureExtension { name: name() };
+        apply_operation(&mut state, &ensure).unwrap();
+        apply_operation(&mut state, &ensure).unwrap();
+        assert_eq!(state.extensions.len(), 1);
+        let remove = MigrationOp::RemoveExtensionRequirement { name: name() };
+        apply_operation(&mut state, &remove).unwrap();
+        apply_operation(&mut state, &remove).unwrap();
+        assert!(state.extensions.is_empty());
+        apply_operation(&mut state, &ensure).unwrap();
+        let drop = MigrationOp::DropExtension { name: name() };
+        apply_operation(&mut state, &drop).unwrap();
+        apply_operation(&mut state, &drop).unwrap();
+        assert!(state.extensions.is_empty());
     }
 }

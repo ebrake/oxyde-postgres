@@ -1,0 +1,8 @@
+---
+source: crates/oxyde-sql/tests/golden_ddl.rs
+assertion_line: 189
+expression: sql
+---
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+DROP EXTENSION "uuid-ossp" RESTRICT

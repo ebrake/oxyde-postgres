@@ -56,6 +56,7 @@ class SchemaState:
 
     def __init__(self) -> None:
         self.tables: dict[str, dict[str, Any]] = {}
+        self.extensions: set[str] = set()
 
     def apply_operation(self, op: dict[str, Any]) -> None:
         """Apply a migration operation to the virtual schema.
@@ -65,7 +66,13 @@ class SchemaState:
         """
         op_type = op.get("type")
 
-        if op_type == "create_enum_type":
+        if op_type == "ensure_extension":
+            self.extensions.add(op["name"])
+
+        elif op_type in ("remove_extension_requirement", "drop_extension"):
+            self.extensions.discard(op["name"])
+
+        elif op_type == "create_enum_type":
             pass
 
         elif op_type == "drop_enum_type":
@@ -249,10 +256,13 @@ class SchemaState:
             for key in ("indexes", "foreign_keys", "checks"):
                 table[key] = [dict(item) for item in table.get(key, [])]
             tables[name] = table
-        return {
+        snapshot: dict[str, Any] = {
             "version": 1,
             "tables": tables,
         }
+        if self.extensions:
+            snapshot["extensions"] = sorted(self.extensions)
+        return snapshot
 
 
 def _get_migration_dependency(module: Any) -> str | None:

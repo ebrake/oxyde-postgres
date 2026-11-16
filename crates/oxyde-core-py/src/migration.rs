@@ -28,15 +28,35 @@ pub(crate) fn migration_compute_diff(old_json: &str, new_json: &str) -> PyResult
         .map_err(|e| PyErr::new::<PyValueError, _>(format!("Failed to serialize operations: {e}")))
 }
 
-/// Validate a snapshot extracted from models (see
-/// `Snapshot::validate_model_schema`). Raises `ValueError` on the first problem.
+/// Validate a model snapshot and return its sorted extension requirements.
 #[pyfunction]
-pub(crate) fn migration_validate_schema(snapshot_json: &str) -> PyResult<()> {
-    use oxyde_migrate::Snapshot;
+pub(crate) fn migration_validate_schema(snapshot_json: &str) -> PyResult<Vec<String>> {
+    let snapshot = oxyde_migrate::Snapshot::from_json(snapshot_json)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    snapshot
+        .validate_model_schema()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(snapshot
+        .required_extensions()
+        .into_iter()
+        .map(String::from)
+        .collect())
+}
 
-    Snapshot::from_json(snapshot_json)
-        .and_then(|snapshot| snapshot.validate_model_schema())
-        .map_err(|e| PyErr::new::<PyValueError, _>(format!("{e}")))
+/// Validate a PostgreSQL extension name using the shared contract.
+#[pyfunction]
+pub(crate) fn migration_validate_extension_name(name: &str) -> PyResult<()> {
+    oxyde_codec::ExtensionName::try_from(name.to_string())
+        .map(|_| ())
+        .map_err(PyValueError::new_err)
+}
+
+/// Infer a filesystem-safe migration name from serialized operations.
+#[pyfunction]
+pub(crate) fn migration_infer_name(operations_json: &str) -> PyResult<String> {
+    let ops: Vec<oxyde_codec::MigrationOp> = serde_json::from_str(operations_json)
+        .map_err(|e| PyValueError::new_err(format!("Failed to parse operations: {e}")))?;
+    Ok(oxyde_migrate::infer_migration_name(&ops))
 }
 
 /// Convert migration operations to SQL statements

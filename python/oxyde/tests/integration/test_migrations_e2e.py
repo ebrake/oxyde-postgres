@@ -1038,3 +1038,59 @@ class TestIndexNamesAndRenamesE2E:
         # Replay follows the rename into the expression, so the next
         # makemigrations sees no change (no spurious DROP/CREATE INDEX).
         TestExpressionIndexE2E._assert_no_pending_diff(tmp_path, After, dialect)
+
+
+class TestDeclaredExtensions:
+    @pytest.mark.asyncio
+    async def test_extension_migrates_survives_rollback_and_can_be_explicitly_dropped(
+        self, empty_db, tmp_path
+    ):
+        database, dialect = empty_db
+        tbl = f"extension_docs_{uuid.uuid4().hex[:8]}"
+        idx = f"{tbl}_title_trgm"
+
+        class Document(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            title: str
+
+            class Meta:
+                is_table = True
+                table_name = tbl
+                extensions = ("pg_trgm",)
+                indexes = [
+                    Index(
+                        ("title",),
+                        method="gin",
+                        opclasses=("gin_trgm_ops",),
+                        name=idx,
+                    )
+                ]
+
+        _write_migration(tmp_path, [], [Document], dialect, "extensions")
+        await apply_migrations(str(tmp_path), database.name)
+        assert await execute_raw(
+            "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'", using=database.name
+        )
+        assert await _index_exists(database.name, idx, dialect)
+        await Document.objects.create(title="PostgreSQL extensions", using=database.name)
+        assert await Document.objects.count(using=database.name) == 1
+
+        await rollback_migrations(
+            steps=1, migrations_dir=str(tmp_path), db_alias=database.name
+        )
+        assert not await _table_exists(database.name, tbl, dialect)
+        assert await execute_raw(
+            "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'", using=database.name
+        )
+
+        # Uninstalling requires an explicit handwritten migration.
+        manual = tmp_path / "manual"
+        manual.mkdir()
+        (manual / "0001_drop_extension.py").write_text(
+            "depends_on = None\n\ndef upgrade(ctx):\n    ctx.drop_extension('pg_trgm')\n"
+            "\ndef downgrade(ctx):\n    ctx.ensure_extension('pg_trgm')\n"
+        )
+        await apply_migrations(str(manual), database.name)
+        assert not await execute_raw(
+            "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'", using=database.name
+        )

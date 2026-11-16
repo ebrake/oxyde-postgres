@@ -980,3 +980,61 @@ class TestCyclicForeignKeys:
             f"expected exactly one CreateTable(orders), got {ops}"
         )
         assert any("CREATE TABLE" in s.upper() and "orders" in s for s in up_sql)
+
+
+class TestExtensionPipeline:
+    def test_add_extension_index_generate_replay_and_diff(self, tmp_path):
+        from oxyde import Index
+
+        class Document(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            title: str
+
+            class Meta:
+                is_table = True
+                table_name = "extension_pipeline_docs"
+                extensions = ("pg_trgm",)
+                indexes = [
+                    Index(
+                        ("title",),
+                        method="gin",
+                        opclasses=("gin_trgm_ops",),
+                        name="ix_extension_pipeline_title",
+                    )
+                ]
+
+        ops, up_sql, down_sql = _run_pipeline(
+            [], [Document], "postgres", tmp_path, "extensions"
+        )
+        assert ops[0] == {"type": "ensure_extension", "name": "pg_trgm"}
+        assert up_sql[0] == 'CREATE EXTENSION IF NOT EXISTS "pg_trgm"'
+        assert all("EXTENSION" not in sql for sql in down_sql)
+        target = _snapshot_from_models([Document], "postgres")
+        replayed = replay_migrations(str(tmp_path))
+        assert replayed["extensions"] == ["pg_trgm"]
+        assert json.loads(
+            migration_compute_diff(json.dumps(replayed), json.dumps(target))
+        ) == []
+
+    def test_remove_declaration_is_state_only(self, tmp_path):
+        class Before(Model):
+            id: int | None = Field(default=None, db_pk=True)
+
+            class Meta:
+                is_table = True
+                table_name = "extension_requirement"
+                extensions = ("pg_trgm",)
+
+        class After(Model):
+            id: int | None = Field(default=None, db_pk=True)
+
+            class Meta:
+                is_table = True
+                table_name = "extension_requirement"
+
+        ops, up_sql, down_sql = _run_pipeline(
+            [Before], [After], "postgres", tmp_path, "remove_requirement"
+        )
+        assert ops == [{"type": "remove_extension_requirement", "name": "pg_trgm"}]
+        assert up_sql == []
+        assert down_sql == ['CREATE EXTENSION IF NOT EXISTS "pg_trgm"']

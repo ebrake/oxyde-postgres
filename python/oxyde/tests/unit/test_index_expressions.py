@@ -202,6 +202,7 @@ class TestExtractShape:
             class Meta:
                 is_table = True
                 table_name = "docs"
+                extensions = ("pg_trgm",)
                 indexes = [
                     Index(
                         ("title", "slug"),
@@ -507,6 +508,7 @@ class TestColumnMappingAndNaming:
             class Meta:
                 is_table = True
                 table_name = "qualified"
+                extensions = ("pg_trgm",)
                 indexes = [
                     Index(("name",), method="gin", opclasses=("public.gin_trgm_ops",))
                 ]

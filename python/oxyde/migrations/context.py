@@ -11,6 +11,7 @@ from oxyde.core import (
     commit_transaction,
     execute_in_transaction,
     migration_to_sql,
+    migration_validate_extension_name,
     rollback_transaction,
 )
 from oxyde.core.ir import build_raw_sql_ir
@@ -73,6 +74,26 @@ class MigrationContext:
             Database dialect: "postgres"
         """
         return self._dialect
+
+    def _extension_op(self, kind: str, name: str) -> None:
+        migration_validate_extension_name(name)
+        op = {"type": kind, "name": name}
+        if self._mode == "collect":
+            self._operations.append(op)
+        else:
+            self._execute_operation(op)
+
+    def ensure_extension(self, name: str) -> None:
+        """Declare a requirement and install the extension if it is absent."""
+        self._extension_op("ensure_extension", name)
+
+    def remove_extension_requirement(self, name: str) -> None:
+        """Forget a requirement without uninstalling the extension (no SQL)."""
+        self._extension_op("remove_extension_requirement", name)
+
+    def drop_extension(self, name: str) -> None:
+        """Explicitly uninstall an extension, refusing to drop dependent objects."""
+        self._extension_op("drop_extension", name)
 
     def create_enum_type(self, name: str, values: list[str]) -> None:
         op = {
