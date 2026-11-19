@@ -41,7 +41,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from pydantic.fields import PydanticUndefined
+
 from oxyde.exceptions import ManagerError
+from oxyde.models.db_schema import _dump_db_fields
 from oxyde.models.metadata import is_column_field
 
 if TYPE_CHECKING:
@@ -79,9 +82,21 @@ def _dump_insert_data(instance: Model) -> dict[str, Any]:
     ``field=None`` reaches the database as NULL (e.g. to override a
     server-side default).
     """
-    virtual_fields = _get_virtual_fields(instance.__class__)
-    computed_fields = set(instance.__class__.model_computed_fields.keys())
-    data = instance.model_dump(mode="python", exclude=virtual_fields | computed_fields)
+    excluded = (
+        _get_virtual_fields(type(instance))
+        | type(instance).model_computed_fields.keys()
+    )
+    pk_field = type(instance)._db_meta.pk_field
+    pk_value = (
+        getattr(instance, pk_field, PydanticUndefined)
+        if pk_field
+        else PydanticUndefined
+    )
+    if pk_field and pk_value is PydanticUndefined:
+        excluded.add(pk_field)
+    data = _dump_db_fields(instance, exclude=excluded)
+    if pk_field and pk_value is not PydanticUndefined and pk_value is not None:
+        data[pk_field] = pk_value
     explicitly_set = instance.model_fields_set
     return {
         name: value
@@ -99,7 +114,7 @@ def _dump_update_data(instance: Model, fields: Iterable[str]) -> dict[str, Any]:
     virtual_fields = _get_virtual_fields(instance.__class__)
     computed_fields = set(instance.__class__.model_computed_fields.keys())
     excluded = virtual_fields | computed_fields
-    snapshot = instance.model_dump(mode="python", exclude_none=False)
+    snapshot = _dump_db_fields(instance)
     return {
         field: snapshot[field]
         for field in fields

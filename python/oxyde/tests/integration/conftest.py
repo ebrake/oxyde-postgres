@@ -9,7 +9,8 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
-from pydantic import computed_field
+from pydantic import BaseModel, computed_field
+from pydantic import Field as PydanticField
 
 from oxyde import AsyncDatabase, Field, Model, disconnect_all
 from oxyde.db.schema import create_tables
@@ -34,10 +35,14 @@ class Event(Model):
 
 
 class AliasedEvent(Model):
-    """Model with db_column != field_name (for P3 bug regression test)."""
+    """Model with db_column != field_name (for P3 bug regression test).
+
+    ``title`` also has a JSON alias, so loading rows (keyed by field name)
+    exercises validation by name alongside the alias.
+    """
 
     id: int | None = Field(default=None, db_pk=True)
-    title: str = Field(max_length=200, db_column="event_title")
+    title: str = Field(max_length=200, db_column="event_title", alias="eventTitle")
     created: datetime = Field(db_column="created_at")
 
     class Meta:
@@ -200,9 +205,33 @@ class FactoryKeyed(Model):
     name: str = Field(max_length=100)
     status: str = Field(default="active", max_length=20)
 
+    def model_post_init(self, context: object, /) -> None:
+        self.status = self.status.lower()
+
     class Meta:
         is_table = True
         table_name = "factory_keyed"
+
+
+class Singleton(Model):
+    id: int = Field(default=1, db_pk=True, db_type="BIGINT")
+    theme: str = Field(max_length=20)
+    note: str | None = Field(default=None, db_default="'server'")
+
+    class Meta:
+        is_table = True
+        table_name = "singletons"
+
+
+class ExcludedNamed(Model):
+    """Table named like PostgreSQL's ON CONFLICT pseudo-table."""
+
+    id: int = Field(default=1, db_pk=True, db_type="BIGINT")
+    name: str = Field(max_length=20)
+
+    class Meta:
+        is_table = True
+        table_name = "excluded"
 
 
 class RenamedParent(Model):
@@ -227,6 +256,34 @@ class RenamedChild(Model):
     class Meta:
         is_table = True
         table_name = "renamed_children"
+
+
+class AliasDocument(BaseModel, serialize_by_alias=True):
+    code: str = PydanticField(alias="externalCode")
+
+
+class AliasCollision(Model):
+    id: int | None = Field(
+        default=None, db_pk=True, db_column="row_pk", alias="external_id"
+    )
+    external_id: str = Field(default="ref", db_column="external_ref")
+    name: str
+    document: AliasDocument | None = Field(
+        default=None, db_type="JSONB", db_nullable=True
+    )
+
+    class Meta:
+        is_table = True
+        table_name = "alias_collisions"
+
+
+class AliasCollisionChild(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    parent: AliasCollision | None = Field(default=None, db_nullable=True)
+
+    class Meta:
+        is_table = True
+        table_name = "alias_collision_children"
 
 
 class ConvertedValues(Model):
@@ -334,8 +391,9 @@ class ArrayShadowJson(Model):
 
 ALL_MODELS = [
     Event, AliasedEvent, Author, Category, Post, Comment, Tag, PostTag,
-    AllTypes, NullableTypes, BytesModel, TdModel, Product, FactoryKeyed,
-    RenamedParent, RenamedChild, ConvertedValues,
+    AllTypes, NullableTypes, BytesModel, TdModel, Product, FactoryKeyed, Singleton,
+    ExcludedNamed, RenamedParent, RenamedChild, ConvertedValues,
+    AliasCollision, AliasCollisionChild,
     ArrayDoc, ArrayNote, ArrayShadow, ArrayShadowJson,
 ]
 

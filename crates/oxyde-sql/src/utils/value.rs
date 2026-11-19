@@ -143,6 +143,16 @@ pub fn assignment_expr<'a>(
     types: impl Into<ExprTypes<'a>>,
     dialect: Dialect,
 ) -> Result<SimpleExpr> {
+    assignment_expr_for_table(value, column, types, dialect, None)
+}
+
+pub fn assignment_expr_for_table<'a>(
+    value: &rmpv::Value,
+    column: &str,
+    types: impl Into<ExprTypes<'a>>,
+    dialect: Dialect,
+    table: Option<&TableIdent>,
+) -> Result<SimpleExpr> {
     let types = types.into();
     let spec = types.binding(column);
     let Some(node) = decode_expr_wrapper(value)? else {
@@ -166,7 +176,7 @@ pub fn assignment_expr<'a>(
             ensure_array_elements(&bound)?;
             Ok(typed_value_expr(bound, spec, dialect))
         }
-        other => compile(&other, None, types, types.known(column)),
+        other => compile(&other, table, types, types.known(column)),
     }
 }
 

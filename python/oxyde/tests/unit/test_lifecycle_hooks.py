@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
+from uuid import UUID, uuid4
 
 import pytest
+from pydantic import PrivateAttr, model_validator
 
 from oxyde import Field, Model
 from oxyde.tests.helpers import StubExecuteClient
@@ -142,6 +144,250 @@ class TestPreSaveHook:
 
 class TestPostSaveHook:
     """Test post_save lifecycle hook."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fields", [[], ["id"]])
+    async def test_default_pk_conflict_without_updates(self, fields):
+        outcomes: list[bool] = []
+
+        class HookedModel(Model):
+            id: int = Field(default=1, db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+            async def post_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                outcomes.append(is_create)
+
+        obj = HookedModel(name="Alice")
+        stub = StubExecuteClient(
+            [{"rows": []}, {"columns": ["id", "name"], "rows": [[1, "Alice"]]}]
+        )
+
+        await obj.save(client=stub, update_fields=fields)
+
+        assert stub.calls[0]["on_conflict"] == {"columns": ["id"], "action": "nothing"}
+        assert outcomes == [False]
+        # No row came back (conflict, or a trigger suppressed the insert), so
+        # the default key stays retryable instead of being marked persisted.
+        assert "id" not in obj.model_fields_set
+
+        await obj.save(client=stub)
+        assert [call["op"] for call in stub.calls] == ["insert", "insert"]
+        assert stub.calls[1]["on_conflict"]["action"] == "update"
+        assert "id" in obj.model_fields_set
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("inserted", [False, True])
+    async def test_default_pk_post_save_uses_returned_outcome(self, inserted):
+        outcomes: list[bool] = []
+
+        class HookedModel(Model, extra="forbid"):
+            id: int = Field(default=1, db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+            async def post_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                outcomes.append(is_create)
+
+        stub = StubExecuteClient(
+            [
+                {
+                    "columns": ["id", "name", "__oxyde_inserted"],
+                    "rows": [[1, "Alice", inserted]],
+                }
+            ]
+        )
+        obj = HookedModel(name="Alice")
+
+        await obj.save(client=stub)
+
+        assert outcomes == [inserted]
+        assert not hasattr(obj, "__oxyde_inserted")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("update_fields", [None, []])
+    async def test_default_pk_upsert_without_returned_row_retries(self, update_fields):
+        outcomes: list[bool] = []
+
+        class HookedModel(Model):
+            id: int = Field(default=1, db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+            async def pre_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                self.id = 2
+
+            async def post_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                outcomes.append(is_create)
+
+        obj = HookedModel(name="Alice")
+        columns, row = ["id", "name"], [2, "Alice"]
+        action = "nothing" if update_fields == [] else "update"
+        if action == "update":
+            columns.append("__oxyde_inserted")
+            row.append(True)
+        stub = StubExecuteClient([{"rows": []}, {"columns": columns, "rows": [row]}])
+
+        await obj.save(client=stub, update_fields=update_fields)
+        assert "id" not in obj.model_fields_set
+        await obj.save(client=stub, update_fields=update_fields)
+
+        assert [call["on_conflict"]["action"] for call in stub.calls] == [
+            action,
+            action,
+        ]
+        assert obj.id == 2
+        assert "id" in obj.model_fields_set
+        assert outcomes == [False, True]
+
+    @pytest.mark.asyncio
+    async def test_default_pk_upsert_outcome_alias_avoids_model_columns(self):
+        outcomes: list[bool] = []
+
+        class HookedModel(Model, extra="forbid"):
+            id: int = Field(default=1, db_pk=True)
+            name: str = Field(db_column="__oxyde_inserted")
+            note: str = Field(default="", db_column="__oxyde_inserted_1")
+
+            class Meta:
+                is_table = True
+
+            async def post_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                outcomes.append(is_create)
+
+        obj = HookedModel(name="Alice")
+        stub = StubExecuteClient(
+            [
+                {
+                    "columns": [
+                        "id",
+                        "__oxyde_inserted",
+                        "__oxyde_inserted_1",
+                        "__oxyde_inserted_2",
+                    ],
+                    "rows": [[1, "Alice", "persisted", True]],
+                }
+            ]
+        )
+
+        await obj.save(client=stub)
+
+        assert stub.calls[0]["on_conflict"]["inserted_alias"] == "__oxyde_inserted_2"
+        assert (obj.name, obj.note) == ("Alice", "persisted")
+        assert outcomes == [True]
+
+    @pytest.mark.asyncio
+    async def test_default_pk_outcome_reads_appended_flag_column(self):
+        outcomes: list[bool] = []
+
+        class HookedModel(Model, extra="ignore"):
+            id: int = Field(default=1, db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+            async def post_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                outcomes.append(is_create)
+
+        # An unmapped table column shares the flag's name; the builder appends
+        # the real flag after RETURNING *, so it is the last column.
+        stub = StubExecuteClient(
+            [
+                {
+                    "columns": ["id", "__oxyde_inserted", "name", "__oxyde_inserted"],
+                    "rows": [[1, True, "Alice", False]],
+                }
+            ]
+        )
+        obj = HookedModel(name="Alice")
+
+        await obj.save(client=stub)
+
+        assert outcomes == [False]
+        assert obj.name == "Alice"
+
+    @pytest.mark.asyncio
+    async def test_in_place_refresh_keeps_factory_private_state(self):
+        class HookedModel(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            name: str
+            _token: UUID = PrivateAttr(default_factory=uuid4)
+
+            class Meta:
+                is_table = True
+
+        obj = HookedModel(name="Alice")
+        token = obj._token
+        stub = StubExecuteClient(
+            [
+                {"columns": ["id", "name"], "rows": [[42, "Alice"]]},
+                {"affected": 1, "inserted_ids": [43]},
+            ]
+        )
+
+        await HookedModel.objects.create(instance=obj, client=stub)
+        assert (obj.id, obj._token) == (42, token)
+
+        other = HookedModel(name="Bob")
+        other_token = other._token
+        await other.save(client=stub)
+        assert (other.id, other._token) == (43, other_token)
+
+    @pytest.mark.asyncio
+    async def test_in_place_create_updates_validator_derived_private_state(self):
+        states: list[tuple[str, str | None]] = []
+
+        class HookedModel(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            name: str
+            _key: str = PrivateAttr()
+            _local: str = PrivateAttr()
+            _context: str | None = PrivateAttr(default=None)
+
+            class Meta:
+                is_table = True
+
+            @model_validator(mode="after")
+            def derive_key(self) -> Self:
+                self._key = f"user:{self.id}"
+                return self
+
+            async def pre_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                self._context = "set by pre_save"
+
+            async def post_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                states.append((self._key, self._context))
+
+        obj = HookedModel(name="Alice")
+        obj._local = "preserved"
+        stub = StubExecuteClient([{"columns": ["id", "name"], "rows": [[42, "Alice"]]}])
+
+        assert await HookedModel.objects.create(instance=obj, client=stub) is obj
+        assert states == [("user:42", "set by pre_save")]
+        assert obj._local == "preserved"
 
     @pytest.mark.asyncio
     async def test_post_save_called_after_create(self):

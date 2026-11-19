@@ -357,6 +357,16 @@ class TestDbColumnAliasing:
         assert event.created == datetime(2026, 4, 1, 12, 0, 0)
 
     @pytest.mark.asyncio
+    async def test_save_with_json_alias(self, aliased_db):
+        """A pydantic alias is accepted on input and kept out of SQL."""
+        event = AliasedEvent(eventTitle="Aliased", created=datetime(2026, 4, 2))
+        await event.save(using=aliased_db.name)
+
+        fetched = await AliasedEvent.objects.get(id=event.id, using=aliased_db.name)
+        assert fetched.title == "Aliased"
+        assert fetched.model_dump(by_alias=True)["eventTitle"] == "Aliased"
+
+    @pytest.mark.asyncio
     async def test_bulk_update_with_aliased_columns(self, aliased_db):
         """bulk_update must map field names to db_column."""
         events = await AliasedEvent.objects.all(using=aliased_db.name)

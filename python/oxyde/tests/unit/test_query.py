@@ -22,7 +22,8 @@ from oxyde.exceptions import (
     NotFoundError,
 )
 from oxyde.models.registry import clear_registry, registered_tables
-from oxyde.queries import F
+from oxyde.queries import Count, F
+from oxyde.queries.insert import InsertQuery
 from oxyde.tests.helpers import StubExecuteClient
 
 
@@ -102,6 +103,110 @@ def test_instance_attribute_access_still_returns_value() -> None:
     user = User(id=1, email="foo@example.com", is_active=False)
     assert user.email == "foo@example.com"
     assert user.is_active is False
+
+
+class RenamedKeyUser(Model):
+    id: int = Field(db_pk=True, db_column="user_id")
+    email: str
+    legacy_id: int = 0
+
+    class Meta:
+        is_table = True
+
+
+def test_partial_model_projection_includes_primary_key() -> None:
+    query = RenamedKeyUser.objects.filter().select("email")
+
+    assert query.to_ir()["cols"] == ["email", "user_id"]
+    assert query.values().to_ir()["cols"] == ["email"]
+    assert query.values_list().to_ir()["cols"] == ["email"]
+    assert query.select("user_id").to_ir()["cols"] == ["user_id"]
+    assert query.group_by("email").to_ir()["cols"] == ["email"]
+
+
+def test_union_branches_use_the_same_projection_mode() -> None:
+    query = RenamedKeyUser.objects.filter().select("email")
+    union = query.union(query).values_list("email", flat=True).to_ir()
+    assert union["cols"] == union["union_query"]["cols"] == ["email"]
+
+    union = query.union(query).to_ir()
+    assert union["cols"] == union["union_query"]["cols"] == ["email", "user_id"]
+
+
+def test_union_with_explicit_primary_key_retains_each_projection() -> None:
+    query = RenamedKeyUser.objects.filter()
+    keyed = query.select("id")
+    legacy = query.select("legacy_id")
+
+    union = keyed.union_all(legacy).to_ir()
+    assert union["cols"] == ["user_id"]
+    assert union["union_query"]["cols"] == ["legacy_id"]
+
+    nested = legacy.union_all(legacy.union_all(keyed)).to_ir()
+    assert nested["cols"] == nested["union_query"]["cols"] == ["legacy_id"]
+    assert nested["union_query"]["union_query"]["cols"] == ["user_id"]
+
+
+def test_union_with_aggregate_branch_does_not_append_primary_keys() -> None:
+    query = RenamedKeyUser.objects.filter()
+    plain = query.select("legacy_id")
+    counted = query.select("legacy_id").annotate(total=Count("id"))
+
+    for union in (
+        plain.union_all(counted).to_ir(),
+        counted.union_all(plain).to_ir(),
+    ):
+        assert "user_id" not in union["cols"]
+        assert "user_id" not in union["union_query"]["cols"]
+
+
+def test_bulk_insert_keeps_conflict_clause() -> None:
+    rows = [{"id": 1, "email": "a@example.com"}, {"id": 2, "email": "b@example.com"}]
+    bulk = InsertQuery(RenamedKeyUser).bulk_values(rows)
+
+    skipped = bulk.on_conflict_do_nothing().to_ir()
+    assert skipped["on_conflict"] == {"columns": ["user_id"], "action": "nothing"}
+
+    updated = bulk.on_conflict_update(["email"], values={"legacy_id": 7}).to_ir()
+    assert updated["on_conflict"] == {
+        "columns": ["user_id"],
+        "action": "update",
+        "update_columns": ["email"],
+        "update_values": {"legacy_id": 7},
+    }
+    assert len(updated["bulk_values"]) == 2
+
+
+def test_union_across_models_does_not_append_primary_keys() -> None:
+    renamed = RenamedKeyUser.objects.filter().select("email")
+    user = User.objects.filter().select("email")
+
+    union = renamed.union_all(user).to_ir()
+
+    assert union["cols"] == union["union_query"]["cols"] == ["email"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("distinct", [False, True])
+async def test_raw_fetch_uses_only_selected_columns(distinct: bool) -> None:
+    query = RenamedKeyUser.objects.filter().select("email")
+    if distinct:
+        query = query.distinct()
+    stub = StubExecuteClient([[["email"], [["ada@example.com"]]]])
+
+    assert await query.fetch_all(stub) == [{"email": "ada@example.com"}]
+    assert stub.calls[0]["cols"] == ["email"]
+
+
+@pytest.mark.asyncio
+async def test_model_fetch_adds_primary_key_to_partial_projection() -> None:
+    query = RenamedKeyUser.objects.filter().select("email")
+    stub = StubExecuteClient([[["email", "user_id"], [["ada@example.com", 42]]]])
+
+    users = await query.all(client=stub)
+
+    assert users[0].id == 42
+    assert stub.calls[0]["cols"] == ["email", "user_id"]
 
 
 def test_meta_is_table_registers_only_tables() -> None:

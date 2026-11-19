@@ -36,13 +36,11 @@ Helper Functions:
         Get pool name for schema/explain operations.
 
 Caching:
-    _TYPE_ADAPTER_CACHE: Thread-safe cache for Pydantic TypeAdapter instances.
     Used for efficient list[Model] validation in fetch_models().
 """
 
 from __future__ import annotations
 
-import threading
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -50,8 +48,6 @@ from typing import (
     TypeVar,
     runtime_checkable,
 )
-
-from pydantic import TypeAdapter
 
 from oxyde.core import wrapper as _core
 from oxyde.db.pool import AsyncDatabase
@@ -74,9 +70,6 @@ if TYPE_CHECKING:
     from oxyde.models.base import Model
     from oxyde.queries.select import Query
 
-# Global cache for TypeAdapter instances (thread-safe)
-_TYPE_ADAPTER_CACHE: dict[type, TypeAdapter] = {}
-_TYPE_ADAPTER_LOCK = threading.Lock()
 
 # Core exception → oxyde exception, most specific first (core classes form
 # the same hierarchy, so IntegrityError must be checked last).
@@ -244,6 +237,4 @@ __all__ = [
     "_map_values_to_columns",
     "_resolve_execution_client",
     "_resolve_pool_name",
-    "_TYPE_ADAPTER_CACHE",
-    "_TYPE_ADAPTER_LOCK",
 ]

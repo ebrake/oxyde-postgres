@@ -4,35 +4,42 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use sea_query::Value;
-use sqlx::Row;
+use sqlx::postgres::PgRow;
 use tracing::debug;
 
 use crate::bind::bind_postgres;
+use crate::convert::{encoder::CellEncoder, postgres::PgEncoder};
 use crate::error::{DriverError, Result};
 use crate::pool::DbPool;
 use crate::transaction::DbTx;
 use crate::{registry, transaction_registry};
 
-/// Extract PK value from a row by column name.
-/// Tries i64 first, then String (covers UUID, text PKs).
-fn extract_pk<R: Row>(row: &R, pk_col: &str) -> Option<rmpv::Value>
-where
-    for<'r> i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    for<'r> String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    for<'r> &'r str: sqlx::ColumnIndex<R>,
-{
-    if let Ok(v) = row.try_get::<i64, _>(pk_col) {
-        return Some(rmpv::Value::Integer(rmpv::Integer::from(v)));
-    }
-    if let Ok(v) = row.try_get::<String, _>(pk_col) {
-        return Some(rmpv::Value::String(v.into()));
-    }
-    None
+/// Decode primary keys with the same PostgreSQL type handling as row queries.
+/// Keep an entry for each returned row, even if its key cannot be decoded.
+fn extract_pks(rows: &[PgRow], pk_col: &str) -> Vec<rmpv::Value> {
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    let columns = PgEncoder::extract_columns(first, None);
+    let Some((index, column)) = columns
+        .iter()
+        .enumerate()
+        .find(|(_, column)| column.name == pk_col)
+    else {
+        return vec![rmpv::Value::Nil; rows.len()];
+    };
+
+    let mut buffer = Vec::new();
+    rows.iter()
+        .map(|row| {
+            buffer.clear();
+            PgEncoder::encode_cell(&mut buffer, row, index, column);
+            rmpv::decode::read_value(&mut buffer.as_slice()).unwrap_or(rmpv::Value::Nil)
+        })
+        .collect()
 }
 
-/// Execute INSERT and return generated IDs (supports any PK type: i64, UUID, String, etc.)
-///
-/// the SQL — PKs are read from the returned rows, the SQL text is never
+/// Execute INSERT RETURNING and return a key slot for every returned row.
 pub async fn execute_insert_returning(
     pool_name: &str,
     sql: &str,
@@ -57,10 +64,7 @@ pub async fn execute_insert_returning(
                 .await
                 .map_err(|e| DriverError::db("INSERT RETURNING failed", e))?;
 
-            let ids: Vec<rmpv::Value> = rows
-                .iter()
-                .filter_map(|row| extract_pk(row, pk_col))
-                .collect();
+            let ids = extract_pks(&rows, pk_col);
 
             debug!(
                 "INSERT on '{}' (Postgres) returned {} IDs",
@@ -105,10 +109,7 @@ pub async fn execute_insert_returning_in_transaction(
                 .await
                 .map_err(|e| DriverError::db("INSERT RETURNING failed", e))?;
 
-            let ids: Vec<rmpv::Value> = rows
-                .iter()
-                .filter_map(|row| extract_pk(row, pk_col))
-                .collect();
+            let ids = extract_pks(&rows, pk_col);
 
             debug!(
                 "INSERT in transaction {} (Postgres) returned {} IDs",

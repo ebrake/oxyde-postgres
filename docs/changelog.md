@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+- Database hydration uses Pydantic's compiled validator without the
+  primary-key tracking callback when the returned row supplies the key.
+  Database field names apply at the row boundary, and nested JSON models use
+  their own alias settings.
+- Default primary keys are tracked using the fields Pydantic actually
+  received, including on alias paths and attribute-based inputs. Inserts
+  send populated primary keys that are excluded from application dumps.
+- Conflict updates qualify expressions against the existing row and reject
+  overlapping assignments. Bulk inserts confirm keys from the returned
+  rows, leaving suppressed default-key rows retryable.
+- In-place inserts refresh private containers that validation mutated and
+  preserve untouched local private state.
+
+- `save()` now inserts or updates on primary-key conflict when the key comes
+  from `default` or `default_factory`. Omitted columns keep their database
+  defaults on insert, and an empty `update_fields` leaves an existing row
+  untouched. For a default key, `pre_save` receives `is_create=True` and
+  `post_save` reports whether a row was inserted. Saving a partial model updates
+  the loaded and assigned fields by default and requires a primary key. When
+  the key is included in the projection, `distinct()` and `union()` treat rows
+  with different keys as distinct. Raw fetches use the requested columns.
+  `create(instance=…)` populates the passed instance in place. Both
+  `create(instance=…)` and default-key `save()` refresh validator-derived
+  private attributes from the returned row and keep default and
+  factory-initialized ones. A key assigned by `model_post_init` or an
+  after-validator still counts as a default key. A default key assigned by
+  `pre_save` remains retryable until the insert or upsert returns a row. A
+  conflict with empty `update_fields` or a trigger can suppress that row.
+  The upsert works for a table named `excluded`, and `union()` no longer
+  adds the key to aggregate branches.
+- A partial select tracks the fields returned by the database. Assignments
+  made during model validation to unselected fields are excluded from the
+  default `save()` update.
+- `save()` sends `update_columns` and value-less DO UPDATE IR that core 0.3.3
+  rejects or ignores. The minimum supported core is now
+  `oxyde-postgres-core>=0.3.4,<0.4.0`.
+- `InsertQuery.bulk_values()` keeps `on_conflict_do_nothing()` and
+  `on_conflict_update()` clauses.
+- `Field(alias=...)` now works like `pydantic.Field(alias=...)`: the alias is
+  accepted on input and used by `model_dump(by_alias=True)`. It was previously
+  ignored. Models also accept field names on application input
+  (`validate_by_name=True`). Database rows are validated by field name, even
+  when an alias matches another field's name. Writes always use field names,
+  even with `serialize_by_alias=True`.
+- `model_validate()` honors `strict` and `context` and tracks default primary
+  keys the same way as the constructor.
+
 ## 0.3.3 — Declared PostgreSQL extensions
 
 - Declare requirements with `Meta.extensions = ("pg_trgm",)`. Requirements from

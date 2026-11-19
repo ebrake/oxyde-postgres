@@ -365,7 +365,32 @@ class User(Model):
 
 ### save()
 
-Insert or update a record:
+`save()` chooses the database operation from the primary key's state.
+
+| Primary key | Operation |
+| --- | --- |
+| Unset | Insert the row and load database-generated values. |
+| Supplied by `default` or `default_factory` | Insert the row or update the row with the same key. On conflict, `update_fields` limits the columns updated. |
+| Loaded from the database or supplied explicitly | Update the row with that key. If the row is missing, raise `NotFoundError`. |
+
+Columns omitted from the insert use their database defaults on new rows. An
+empty `update_fields` leaves an existing row untouched. When the primary key
+comes from a default, `pre_save` receives `is_create=True` and `post_save`
+receives `is_create=True` only if a row was inserted.
+
+Use `objects.create()` to insert a row with an explicit primary key.
+`objects.create(instance=obj)` populates the passed instance in place and
+returns that same object.
+
+Model queries such as `select("name")` also load the primary key. Saving a
+partially loaded instance updates the fields that were loaded or assigned,
+unless you provide `update_fields`. Saving requires a primary key.
+
+With `distinct()` or `union()`, rows with different primary keys count as
+distinct when the projection includes the key. For a union, Oxyde adds the key
+only when all branches are eligible partial projections of the same model and
+none already selects the key. Use `values()`, `values_list()`, or raw fetches
+such as `fetch_all()` to deduplicate on the requested columns alone.
 
 ```python
 # Insert new record
@@ -507,6 +532,13 @@ class User(Model):
     class Meta:
         is_table = True
 ```
+
+As with `pydantic.Field`, `alias` sets both the validation and serialization
+alias. Models accept the alias and the field name on input
+(`User(createdAt=...)` or `User(created_at=...)`). Database rows are validated
+by field name, even when an alias matches another field's name.
+`model_dump(by_alias=True)` emits the alias. SQL uses `db_column` when set and
+the field name otherwise.
 
 ## Generated Type Stubs
 

@@ -12,6 +12,7 @@ from oxyde.queries.base import SupportsExecute, _resolve_pool_name
 
 if TYPE_CHECKING:
     from oxyde.models.base import Model
+    from oxyde.queries.select import Query
 
 
 TModel = TypeVar("TModel", bound="Model")
@@ -22,7 +23,7 @@ class DebugMixin(Generic[TModel]):
 
     # These attributes are defined in the base Query class
     model_class: type[TModel]
-    _union_query: DebugMixin | None
+    _union_query: Query | None
     _union_all: bool
 
     def _clone(self) -> Self:
@@ -117,7 +118,7 @@ class DebugMixin(Generic[TModel]):
 
         return runner()
 
-    def union(self, other_query: DebugMixin) -> Self:
+    def union(self, other_query: Query) -> Self:
         """
         Combine with another query using UNION (removes duplicates).
 
@@ -134,7 +135,7 @@ class DebugMixin(Generic[TModel]):
         clone._union_all = False
         return clone
 
-    def union_all(self, other_query: DebugMixin) -> Self:
+    def union_all(self, other_query: Query) -> Self:
         """
         Combine with another query using UNION ALL (keeps duplicates).
 

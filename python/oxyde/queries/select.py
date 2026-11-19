@@ -262,6 +262,33 @@ class Query(
 
     def to_ir(self) -> dict[str, Any]:
         """Convert query to IR format for Rust execution."""
+        return self._build_ir(for_models=self._result_mode is None)
+
+    def _can_append_pk(self, pk_column: str) -> bool:
+        """Check whether every UNION branch can add the same key column.
+
+        Annotated branches are ineligible: aggregates replace the selected
+        columns in SQL, so only some branches would gain the key.
+        """
+        branch: Query[Any] | None = self
+        while branch is not None:
+            if (
+                branch.model_class is not self.model_class
+                or branch._selected_fields is None
+                or branch._group_by_fields
+                or branch._annotations
+                or any(
+                    branch._column_for_field(field) == pk_column
+                    for field in branch._selected_fields
+                )
+            ):
+                return False
+            branch = branch._union_query
+        return True
+
+    def _build_ir(
+        self, *, for_models: bool, append_pk: bool | None = None
+    ) -> dict[str, Any]:
         from oxyde.models.base import Model
 
         table_name = self.model_class.get_table_name()
@@ -312,6 +339,13 @@ class Query(
 
         # Convert field names to db_columns for Rust (Rust operates on columns only)
         db_columns = [self._column_for_field(f) for f in fields]
+        pk_column = self.model_class._db_meta.pk_column
+        if append_pk is None:
+            append_pk = (
+                for_models and pk_column is not None and self._can_append_pk(pk_column)
+            )
+        if append_pk and pk_column is not None:
+            db_columns.append(pk_column)
         order_by = [
             (
                 field
@@ -380,15 +414,12 @@ class Query(
         # (Rust adds enum result types for Coalesce/Greatest annotations.)
         column_types = self._column_types_for_query()
 
-        # Pass pk_column only for JOIN queries (needed for deduplication)
-        pk_column = None
-        if self._join_specs:
-            pk_column = self.model_class._db_meta.pk_column
-
         # Build union IR recursively
         union_ir = None
         if self._union_query is not None:
-            union_ir = self._union_query.to_ir()
+            union_ir = self._union_query._build_ir(
+                for_models=for_models, append_pk=append_pk
+            )
 
         return ir.build_select_ir(
             table=table_name,
@@ -409,7 +440,7 @@ class Query(
             aggregates=aggregates_ir,
             annotations=annotations_ir,
             lock=self._lock_type,
-            pk_column=pk_column,
+            pk_column=pk_column if self._join_specs else None,
             union_query=union_ir,
             union_all=self._union_all or None,
             count=self._count or None,

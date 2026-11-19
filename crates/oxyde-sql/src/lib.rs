@@ -673,7 +673,233 @@ mod tests {
     }
 
     #[test]
-    fn test_on_conflict_update_requires_values() {
+    fn test_on_conflict_update_columns_returns_row() {
+        let ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            values: Some(HashMap::from([
+                ("id".into(), rmpv_int(1)),
+                ("name".into(), rmpv_str("Alice")),
+            ])),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Update,
+                update_columns: Some(vec!["name".into()]),
+                update_values: None,
+                inserted_alias: None,
+            }),
+            returning: Some(true),
+            ..Default::default()
+        };
+        let (sql, values) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(
+            sql.ends_with(
+                r#"ON CONFLICT ("id") DO UPDATE SET "name" = "excluded"."name" RETURNING *"#
+            ),
+            "{sql}"
+        );
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn test_on_conflict_update_returns_insert_outcome() {
+        let mut ir = QueryIR {
+            op: Operation::Insert,
+            table: "old".into(),
+            values: Some(HashMap::from([("name".into(), rmpv_str("Alice"))])),
+            pk_column: Some("id".into()),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Update,
+                update_columns: Some(vec!["name".into()]),
+                update_values: None,
+                inserted_alias: Some("__oxyde_inserted".into()),
+            }),
+            returning: Some(true),
+            ..Default::default()
+        };
+
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            concat!(
+                r#"INSERT INTO "old" AS "__oxyde_target" ("name") VALUES ($1) "#,
+                r#"ON CONFLICT ("id") DO UPDATE SET "name" = "excluded"."name" "#,
+                r#"RETURNING WITH (OLD AS "__oxyde_old") *, ("__oxyde_old"."id" IS NULL) "#,
+                r#"AS "__oxyde_inserted""#,
+            )
+        );
+
+        ir.pk_column = Some("user\"id".into());
+        ir.on_conflict.as_mut().unwrap().inserted_alias = Some("was\"inserted".into());
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.ends_with(r#"("__oxyde_old"."user""id" IS NULL) AS "was""inserted""#));
+
+        ir.table = "__oxyde_old".into();
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.starts_with(r#"INSERT INTO "__oxyde_old" AS "__oxyde_target" "#));
+        assert!(sql.ends_with(
+            r#"RETURNING WITH (OLD AS "__oxyde_old") *, ("__oxyde_old"."user""id" IS NULL) AS "was""inserted""#
+        ));
+    }
+
+    #[test]
+    fn test_on_conflict_update_aliases_table_named_excluded() {
+        let ir = QueryIR {
+            op: Operation::Insert,
+            table: "excluded".into(),
+            values: Some(HashMap::from([("name".into(), rmpv_str("Alice"))])),
+            pk_column: Some("id".into()),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Update,
+                update_columns: Some(vec!["name".into()]),
+                update_values: None,
+                inserted_alias: Some("__oxyde_inserted".into()),
+            }),
+            returning: Some(true),
+            ..Default::default()
+        };
+
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            concat!(
+                r#"INSERT INTO "excluded" AS "__oxyde_target" ("name") VALUES ($1) "#,
+                r#"ON CONFLICT ("id") DO UPDATE SET "name" = "excluded"."name" "#,
+                r#"RETURNING WITH (OLD AS "__oxyde_old") *, ("__oxyde_old"."id" IS NULL) "#,
+                r#"AS "__oxyde_inserted""#,
+            )
+        );
+    }
+
+    #[test]
+    fn test_bulk_insert_keeps_on_conflict_clause() {
+        let mut ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            bulk_values: Some(vec![
+                HashMap::from([("id".into(), rmpv_int(1)), ("name".into(), rmpv_str("A"))]),
+                HashMap::from([("id".into(), rmpv_int(2)), ("name".into(), rmpv_str("B"))]),
+            ]),
+            pk_column: Some("id".into()),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Nothing,
+                update_columns: None,
+                update_values: None,
+                inserted_alias: None,
+            }),
+            ..Default::default()
+        };
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            concat!(
+                r#"INSERT INTO "users" ("id", "name") VALUES ($1, $2), ($3, $4) "#,
+                r#"ON CONFLICT ("id") DO NOTHING RETURNING "id""#,
+            )
+        );
+
+        ir.on_conflict = Some(OnConflict {
+            columns: vec!["id".into()],
+            action: ConflictAction::Update,
+            update_columns: Some(vec!["name".into()]),
+            update_values: None,
+            inserted_alias: None,
+        });
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            concat!(
+                r#"INSERT INTO "users" AS "__oxyde_target" ("id", "name") "#,
+                r#"VALUES ($1, $2), ($3, $4) "#,
+                r#"ON CONFLICT ("id") DO UPDATE SET "name" = "excluded"."name" RETURNING "id""#,
+            )
+        );
+    }
+
+    #[test]
+    fn test_on_conflict_insert_outcome_requires_pk_column() {
+        let ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            values: Some(HashMap::from([("name".into(), rmpv_str("Alice"))])),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Update,
+                update_columns: Some(vec!["name".into()]),
+                update_values: None,
+                inserted_alias: Some("__oxyde_inserted".into()),
+            }),
+            returning: Some(true),
+            ..Default::default()
+        };
+        assert!(matches!(
+            build_sql(&ir, Dialect::Postgres),
+            Err(QueryError::InvalidQuery(message)) if message.contains("pk_column")
+        ));
+    }
+
+    #[test]
+    fn test_on_conflict_do_nothing_returns_inserted_row() {
+        let ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            values: Some(HashMap::from([("id".into(), rmpv_int(1))])),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Nothing,
+                update_columns: None,
+                update_values: None,
+                inserted_alias: None,
+            }),
+            returning: Some(true),
+            ..Default::default()
+        };
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "users" ("id") VALUES ($1) ON CONFLICT ("id") DO NOTHING RETURNING *"#
+        );
+    }
+
+    #[test]
+    fn test_on_conflict_update_columns_and_values() {
+        let mut ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            values: Some(HashMap::from([
+                ("id".into(), rmpv_int(1)),
+                ("name".into(), rmpv_str("Alice")),
+            ])),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Update,
+                update_columns: Some(vec!["name".into()]),
+                update_values: Some(HashMap::from([("visits".into(), rmpv_int(0))])),
+                inserted_alias: None,
+            }),
+            ..Default::default()
+        };
+        let (sql, values) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(
+            sql.contains(
+                r#"ON CONFLICT ("id") DO UPDATE SET "name" = "excluded"."name", "visits" = $3"#
+            ),
+            "{sql}"
+        );
+        assert_eq!(values.len(), 3);
+
+        ir.on_conflict.as_mut().unwrap().update_columns = Some(vec!["visits".into()]);
+        assert!(matches!(
+            build_sql(&ir, Dialect::Postgres),
+            Err(QueryError::InvalidQuery(message)) if message.contains("multiple assignments")
+        ));
+    }
+
+    #[test]
+    fn test_on_conflict_update_requires_columns_or_values() {
         let ir = QueryIR {
             op: Operation::Insert,
             table: "users".into(),
@@ -684,20 +910,17 @@ mod tests {
             on_conflict: Some(OnConflict {
                 columns: vec!["email".into()],
                 action: ConflictAction::Update,
-                update_values: None, // No values - should fail
+                update_columns: None,
+                update_values: None,
+                inserted_alias: None,
             }),
             ..Default::default()
         };
-        let result = build_sql(&ir, Dialect::Postgres);
-        assert!(
-            result.is_err(),
-            "on_conflict Update without values should fail"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("update_values"),
-            "error should mention update_values: {err}"
-        );
+        assert!(matches!(
+            build_sql(&ir, Dialect::Postgres),
+            Err(QueryError::InvalidQuery(message))
+                if message.contains("update_columns or update_values")
+        ));
     }
 
     #[test]
