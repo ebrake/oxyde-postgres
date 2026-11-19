@@ -877,10 +877,13 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                 f"A partially loaded {model_class.__name__} without its primary key "
                 "cannot be saved"
             )
-        pk_defaulted = (
-            pk_field is not None and pk_is_set and pk_field not in self.model_fields_set
-        )
+        pk_was_explicit = pk_field is not None and pk_field in self.model_fields_set
+        pk_defaulted = pk_field is not None and pk_is_set and not pk_was_explicit
         is_create = not pk_is_set or pk_defaulted
+
+        def discard_generated_pk_tracking() -> None:
+            if is_create and pk_field is not None and not pk_was_explicit:
+                self.__pydantic_fields_set__.discard(pk_field)
 
         # Convert update_fields to set for hooks
         update_fields_set: set[str] | None = None
@@ -888,7 +891,11 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             update_fields_set = set(update_fields)
 
         # Call pre_save hook
-        await self.pre_save(is_create=is_create, update_fields=update_fields_set)
+        try:
+            await self.pre_save(is_create=is_create, update_fields=update_fields_set)
+        except BaseException:
+            discard_generated_pk_tracking()
+            raise
 
         fields: set[str] | None = None
         if update_fields_set is not None and (not is_create or pk_defaulted):
@@ -930,14 +937,18 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                     self, "__pydantic_fields_set__", set(self.model_fields_set)
                 )
         else:
-            _, inserted = await manager._query()._insert_instance(
-                self,
-                client=client,
-                using=using,
-                in_place=True,
-                upsert=pk_defaulted,
-                update_fields=fields,
-            )
+            try:
+                _, inserted = await manager._query()._insert_instance(
+                    self,
+                    client=client,
+                    using=using,
+                    in_place=True,
+                    upsert=pk_defaulted,
+                    update_fields=fields,
+                )
+            except BaseException:
+                discard_generated_pk_tracking()
+                raise
 
         # Call post_save hook
         await self.post_save(is_create=inserted, update_fields=update_fields_set)

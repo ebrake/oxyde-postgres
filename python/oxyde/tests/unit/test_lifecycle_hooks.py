@@ -9,6 +9,7 @@ import pytest
 from pydantic import PrivateAttr, model_validator
 
 from oxyde import Field, Model
+from oxyde.exceptions import ManagerError
 from oxyde.tests.helpers import StubExecuteClient
 
 
@@ -253,6 +254,86 @@ class TestPostSaveHook:
         assert obj.id == 2
         assert "id" in obj.model_fields_set
         assert outcomes == [False, True]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("default_key", [None, 1])
+    async def test_failed_pre_save_leaves_key_retryable(self, default_key):
+        fail = True
+
+        class HookedModel(Model):
+            id: int | None = Field(default=default_key, db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+            async def pre_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                assert is_create
+                self.id = 2
+                if fail:
+                    raise RuntimeError("pre_save failed")
+
+        obj = HookedModel(name="Alice")
+        stub = StubExecuteClient(
+            [
+                {
+                    "columns": ["id", "name", "__oxyde_inserted"],
+                    "rows": [[2, "Alice", True]],
+                }
+            ]
+        )
+        with pytest.raises(RuntimeError, match="pre_save failed"):
+            await obj.save(client=stub)
+
+        assert not stub.calls
+        assert obj.id == 2
+        assert "id" not in obj.model_fields_set
+
+        fail = False
+        await obj.save(client=stub)
+
+        assert stub.calls[0]["op"] == "insert"
+        assert stub.calls[0]["on_conflict"]["action"] == "update"
+        assert "id" in obj.model_fields_set
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("default_key", [None, 1])
+    async def test_failed_insert_leaves_pre_save_key_retryable(self, default_key):
+        class HookedModel(Model):
+            id: int | None = Field(default=default_key, db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+            async def pre_save(
+                self, *, is_create: bool, update_fields: set[str] | None = None
+            ) -> None:
+                assert is_create
+                self.id = 2
+
+        obj = HookedModel(name="Alice")
+        failing = StubExecuteClient([])
+        with pytest.raises(ManagerError, match="stub payloads exhausted"):
+            await obj.save(client=failing)
+
+        assert obj.id == 2
+        assert "id" not in obj.model_fields_set
+        stub = StubExecuteClient(
+            [
+                {
+                    "columns": ["id", "name", "__oxyde_inserted"],
+                    "rows": [[2, "Alice", True]],
+                }
+            ]
+        )
+        await obj.save(client=stub)
+
+        assert stub.calls[0]["op"] == "insert"
+        assert stub.calls[0]["on_conflict"]["action"] == "update"
+        assert "id" in obj.model_fields_set
 
     @pytest.mark.asyncio
     async def test_default_pk_upsert_outcome_alias_avoids_model_columns(self):

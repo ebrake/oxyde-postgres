@@ -96,7 +96,7 @@ def _dump_insert_data(instance: Model) -> dict[str, Any]:
         excluded.add(pk_field)
     data = _dump_db_fields(instance, exclude=excluded)
     if pk_field and pk_value is not PydanticUndefined and pk_value is not None:
-        data[pk_field] = pk_value
+        data.setdefault(pk_field, pk_value)
     explicitly_set = instance.model_fields_set
     return {
         name: value

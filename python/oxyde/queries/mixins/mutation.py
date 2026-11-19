@@ -8,7 +8,6 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from enum import Enum
 from functools import cache
-from itertools import groupby
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -551,66 +550,58 @@ class MutationMixin(Generic[TModel]):
             ]
 
         pk_field = self._primary_key_field()
+        pk_adapter = (
+            TypeAdapter(self.model_class.model_fields[pk_field].annotation or Any)
+            if pk_field is not None
+            else None
+        )
         for batch in batches:
-            entries = []
+            payloads = []
             for instance in batch:
                 payload = _dump_insert_data(instance)
                 if not payload:
                     raise ManagerError("bulk_create() encountered an empty payload")
-                entries.append((instance, payload))
+                payloads.append(payload)
 
-            # Each SQL statement has one column list. Keep generated keys in
-            # separate runs so they cannot match another input's submitted key.
-            for (_, has_keys), group in groupby(
-                entries,
-                key=lambda entry: (
-                    frozenset(entry[1]),
-                    pk_field is not None and entry[1].get(pk_field) is not None,
-                ),
-            ):
-                instances_in_run, payloads = zip(*group)
-                query = InsertQuery(self.model_class).bulk_values(list(payloads))
-                result = await self._run_mutation(query, exec_client)
-                if pk_field is None:
-                    continue
+            query = InsertQuery(self.model_class).bulk_values(payloads)
+            result = await self._run_mutation(query, exec_client)
+            if pk_field is None or pk_adapter is None:
+                continue
 
-                ids = result.get("inserted_ids", [])
-                count = len(payloads)
-                affected = result.get("affected", len(ids))
-                if has_keys:
-                    if len(ids) == 0 and affected == count:
-                        # Some clients only report a row count.
-                        for instance in instances_in_run:
-                            instance._mark_pk_persisted()
-                    else:
-                        submitted = [
-                            msgpack.packb(serialize_value(payload[pk_field]))
-                            for payload in payloads
-                        ]
-                        sent = Counter(submitted)
-                        returned = Counter(
-                            msgpack.packb(serialize_value(key))
-                            for key in ids
-                            if key is not None
-                        )
-                        for instance, key in zip(instances_in_run, submitted):
-                            if sent[key] == returned[key] == 1:
-                                instance._mark_pk_persisted()
-                elif affected == len(ids) == count and all(
-                    key is not None for key in ids
-                ):
-                    pk_adapter = TypeAdapter(
-                        self.model_class.model_fields[pk_field].annotation or Any
-                    )
-                    keys = [pk_adapter.validate_python(key) for key in ids]
-                    for instance, key in zip(instances_in_run, keys):
-                        setattr(instance, pk_field, key)
-                elif affected or ids:
-                    warnings.warn(
-                        f"bulk_create could not match generated keys to {count} inputs",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+            ids = result.get("inserted_ids", [])
+            count = len(batch)
+            if len(ids) == count and all(key is not None for key in ids):
+                keys = [pk_adapter.validate_python(key) for key in ids]
+                for instance, key in zip(batch, keys):
+                    setattr(instance, pk_field, key)
+                continue
+
+            submitted = [
+                (instance, msgpack.packb(serialize_value(payload[pk_field])))
+                for instance, payload in zip(batch, payloads)
+                if payload.get(pk_field) is not None
+            ]
+            if not ids and result.get("affected") == count:
+                # Some clients only report a row count.
+                for instance, _ in submitted:
+                    instance._mark_pk_persisted()
+            else:
+                sent = Counter(key for _, key in submitted)
+                returned = Counter(
+                    msgpack.packb(serialize_value(key))
+                    for key in ids
+                    if key is not None
+                )
+                for instance, key in submitted:
+                    if sent[key] == returned[key] == 1:
+                        instance._mark_pk_persisted()
+
+            if len(submitted) != count:
+                warnings.warn(
+                    f"bulk_create could not match generated keys to {count} inputs",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         return instances
 

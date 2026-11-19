@@ -10,7 +10,6 @@ from pydantic import AliasChoices, AliasPath, PrivateAttr, model_validator
 from pydantic_core import core_schema
 
 from oxyde import Field, Model
-from oxyde.exceptions import ManagerError
 from oxyde.models.db_schema import _dump_db_fields, _validate_db_row
 from oxyde.queries.insert import InsertQuery
 from oxyde.tests.helpers import StubExecuteClient
@@ -193,24 +192,31 @@ def test_on_conflict_rejects_overlap_after_column_mapping():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reverse", [False, True])
-async def test_bulk_create_splits_column_shapes_and_confirms_each_run(reverse):
+async def test_bulk_create_submits_mixed_column_shapes_in_one_call(reverse):
     first = HiddenKey.model_construct(_fields_set={"name"}, id=20, name="first")
     second = HiddenKey.model_construct(
         _fields_set={"name", "note"}, id=21, name="second", note="included"
     )
     ordered = [second, first] if reverse else [first, second]
-    stub = StubExecuteClient([{"inserted_ids": [ordered[0].id]}])
+    stub = StubExecuteClient([{"inserted_ids": [obj.id for obj in ordered]}])
 
-    with pytest.raises(ManagerError, match="stub payloads exhausted"):
-        await HiddenKey.objects.bulk_create(ordered, client=stub)
+    await HiddenKey.objects.bulk_create(ordered, client=stub)
 
-    assert "id" in ordered[0].model_fields_set
-    assert "id" not in ordered[1].model_fields_set
-    assert [len(call["bulk_values"]) for call in stub.calls] == [1, 1]
-    assert ["note" in call["bulk_values"][0] for call in stub.calls] == [
-        reverse,
-        not reverse,
-    ]
+    assert all("id" in obj.model_fields_set for obj in ordered)
+    (call,) = stub.calls
+    assert ["note" in row for row in call["bulk_values"]] == [reverse, not reverse]
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_applies_rewritten_key():
+    instance = HiddenKey(name="test")
+    stub = StubExecuteClient([{"inserted_ids": [42]}])
+
+    await HiddenKey.objects.bulk_create([instance], client=stub)
+
+    assert instance.id == 42
+    assert "id" in instance.model_fields_set
+    assert stub.calls[0]["bulk_values"][0]["row_id"] == 1
 
 
 @pytest.mark.asyncio
