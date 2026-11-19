@@ -6,7 +6,7 @@ from typing import Any, Self
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import PrivateAttr, model_validator
+from pydantic import AliasChoices, AliasPath, PrivateAttr, model_validator
 
 from oxyde import Field, Model
 from oxyde.exceptions import ManagerError
@@ -334,6 +334,54 @@ class TestPostSaveHook:
         assert stub.calls[0]["op"] == "insert"
         assert stub.calls[0]["on_conflict"]["action"] == "update"
         assert "id" in obj.model_fields_set
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("values", "fields_set", "expected_id", "explicit"),
+        [
+            ({}, None, 2, False),
+            ({"id": 5}, None, 6, True),
+            ({"key": 5}, None, 6, True),
+            ({"alternate": 5}, None, 6, True),
+            ({"payload": {"key": 5}}, None, 6, True),
+            ({"payload": {}}, None, 2, False),
+            ({"id": 5}, {"name"}, 6, False),
+            ({}, {"id", "name"}, 2, True),
+        ],
+    )
+    async def test_constructed_key_provenance(
+        self, values, fields_set, expected_id, explicit
+    ):
+        class ConstructedKey(Model):
+            id: int = Field(
+                default=1,
+                db_pk=True,
+                alias="key",
+                validation_alias=AliasChoices("alternate", AliasPath("payload", "key")),
+            )
+            name: str
+
+            class Meta:
+                is_table = True
+
+            def model_post_init(self, _context, /):
+                self.id += 1
+
+        obj = ConstructedKey.model_construct(fields_set, name="Alice", **values)
+        assert obj.id == expected_id
+        assert ("id" in obj.model_fields_set) is explicit
+
+        stub = StubExecuteClient(
+            [{"columns": ["id", "name"], "rows": [[obj.id, obj.name]]}]
+        )
+        await obj.save(client=stub)
+
+        (call,) = stub.calls
+        if explicit:
+            assert call["op"] == "update"
+        else:
+            assert call["op"] == "insert"
+            assert call["on_conflict"]["action"] == "update"
 
     @pytest.mark.asyncio
     async def test_default_pk_upsert_outcome_alias_avoids_model_columns(self):

@@ -386,6 +386,11 @@ Model queries such as `select("name")` also load the primary key. Saving a
 partially loaded instance updates the fields that were loaded or assigned,
 unless you provide `update_fields`. Saving requires a primary key.
 
+Projection and aggregate queries mark only the instances Oxyde builds from
+their rows as partially loaded. When a validator returns a replacement, such
+as a cached instance or one created with `model_construct()`, the replacement
+keeps its own field tracking.
+
 With `distinct()` or `union()`, rows with different primary keys count as
 distinct when the projection includes the key. For a union, Oxyde adds the key
 only when all branches are eligible partial projections of the same model and
@@ -504,6 +509,16 @@ class User(Model):
 # Raises ValidationError
 user = User(age=200, email="invalid")
 ```
+
+During database hydration, a wrap validator can change the row before it
+reaches a custom `__init__`, or return an instance without calling the
+constructor. An after validator inside the innermost wrap runs during
+`super().__init__()`. An after validator outside a wrap runs after the
+constructor and that wrap return.
+
+During hydration, each row key names its own field, and aliases a custom
+constructor passes to `super().__init__()` resolve normally unless the alias
+matches a column already present in the row.
 
 ### Serialization
 
