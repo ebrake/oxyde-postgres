@@ -141,6 +141,15 @@ class OxydeFieldInfo(FieldInfo):  # type: ignore[misc]
             db_through: M2M through table name
             **kwargs: All other Pydantic FieldInfo parameters
         """
+        # pydantic.Field() derives the validation and serialization aliases
+        # from `alias`; FieldInfo.__init__ does not, so mirror it here.
+        alias = kwargs.get("alias")
+        if isinstance(alias, str):
+            if kwargs.get("validation_alias") is None:
+                kwargs["validation_alias"] = alias
+            if kwargs.get("serialization_alias") is None:
+                kwargs["serialization_alias"] = alias
+
         # Initialize Pydantic FieldInfo (validators, alias, constraints)
         super().__init__(default=default, **kwargs)
 

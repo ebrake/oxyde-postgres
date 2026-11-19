@@ -288,9 +288,15 @@ pub struct OnConflict {
     pub columns: Vec<String>,
     /// Action to take on conflict
     pub action: ConflictAction,
+    /// Columns to update from the proposed insert row (only for action=Update)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_columns: Option<Vec<String>>,
     /// Update values (only for action=Update)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_values: Option<std::collections::HashMap<String, rmpv::Value>>,
+    /// Name of a boolean RETURNING column that is true when the row was inserted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inserted_alias: Option<String>,
 }
 
 /// Join column projection

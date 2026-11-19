@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from enum import Enum
 from functools import cache
+from itertools import groupby
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -21,9 +24,18 @@ from pydantic import TypeAdapter
 
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
+from oxyde.core.types import serialize_value
 from oxyde.exceptions import ManagerError
+from oxyde.models.db_schema import (
+    _PRIVATE_DEFAULTS,
+    _changed_private_containers,
+    _dump_db_fields,
+    _validate_db_row,
+    _validate_db_rows,
+)
 from oxyde.models.serializers import (
     _dump_insert_data,
+    _dump_update_data,
     _normalize_instance,
 )
 from oxyde.models.utils import _unpack_annotated, _unwrap_optional
@@ -58,7 +70,56 @@ def _hydrate_models(
     """Convert raw columns + rows into validated model instances."""
     rmap = model_class._db_meta.reverse_column_map
     field_columns = [rmap.get(c, c) for c in columns] if rmap else columns
-    return [model_class.model_validate(dict(zip(field_columns, row))) for row in rows]
+    return _validate_db_rows(
+        model_class, [dict(zip(field_columns, row)) for row in rows]
+    )
+
+
+@contextmanager
+def _track_private_assignments() -> Iterator[
+    tuple[list[tuple[Model, str]], dict[int, dict[str, Any]]]
+]:
+    """Record (model, private name) pairs assigned while validating."""
+    from oxyde.models.base import _PRIVATE_ASSIGNMENTS
+
+    assigned: list[tuple[Model, str]] = []
+    token = _PRIVATE_ASSIGNMENTS.set(assigned)
+    snapshots: dict[int, dict[str, Any]] = {}
+    snapshot_token = _PRIVATE_DEFAULTS.set(snapshots)
+    try:
+        yield assigned, snapshots
+    finally:
+        _PRIVATE_DEFAULTS.reset(snapshot_token)
+        _PRIVATE_ASSIGNMENTS.reset(token)
+
+
+def _refresh_in_place(
+    instance: Model, hydrated: Model, assigned_private: set[str]
+) -> None:
+    """Apply a returned row while retaining the instance's local state.
+
+    Private attributes are taken from ``hydrated`` only when its validation
+    assigned them (validator-derived state) or when ``instance`` has none yet.
+    Defaults and factory values (e.g. ``PrivateAttr(default_factory=uuid4)``)
+    are never assigned through ``__setattr__``, so local state survives.
+    """
+    instance.__dict__.update(hydrated.__dict__)
+    object.__setattr__(
+        instance,
+        "__pydantic_fields_set__",
+        instance.model_fields_set | hydrated.model_fields_set,
+    )
+
+    if hydrated.__pydantic_private__ is not None:
+        private = dict(instance.__pydantic_private__ or {})
+        for name, value in hydrated.__pydantic_private__.items():
+            if name in assigned_private or name not in private:
+                private[name] = value
+        object.__setattr__(instance, "__pydantic_private__", private)
+
+    if hydrated.__pydantic_extra__ is not None:
+        extras = {**(instance.__pydantic_extra__ or {}), **hydrated.__pydantic_extra__}
+        object.__setattr__(instance, "__pydantic_extra__", extras)
 
 
 def _decode_returning_models(
@@ -318,7 +379,7 @@ class MutationMixin(Generic[TModel]):
         Create a new record in the database.
 
         Args:
-            instance: Model instance to create (alternative to **data)
+            instance: Model instance to insert and populate in place (alternative to **data)
             using: Database alias
             client: Optional database client
             _skip_hooks: Skip pre_save/post_save hooks
@@ -337,6 +398,7 @@ class MutationMixin(Generic[TModel]):
             raise ManagerError(
                 "create() accepts either 'instance' or field values, not both"
             )
+        in_place = instance is not None
         if instance is None:
             if not data:
                 raise ManagerError("create() requires an instance or field values")
@@ -346,32 +408,109 @@ class MutationMixin(Generic[TModel]):
         if not _skip_hooks:
             await instance.pre_save(is_create=True, update_fields=None)
 
-        exec_client = await _resolve_execution_client(using, client)
-        payload = _dump_insert_data(instance)
-        if not payload:
-            raise ManagerError("create() requires at least one value")
-        query = InsertQuery(self.model_class).values(**payload)
-        result = await self._run_mutation(query, exec_client)
+        instance, _ = await self._insert_instance(
+            instance, using=using, client=client, in_place=in_place
+        )
 
-        # Update instance from RETURNING * result (with Pydantic validation)
-        if "rows" in result and result["rows"]:
-            rmap = self.model_class._db_meta.reverse_column_map
-            columns = result.get("columns", [])
-            row = result["rows"][0]
-            row_dict = {rmap.get(col, col): value for col, value in zip(columns, row)}
-            instance = self.model_class.model_validate(row_dict)
-        elif "inserted_ids" in result and result["inserted_ids"]:
-            pk_field = self._primary_key_field()
-            if pk_field:
-                row_dict = instance.model_dump()
-                row_dict[pk_field] = result["inserted_ids"][0]
-                instance = self.model_class.model_validate(row_dict)
-
-        # Call post_save hook
         if not _skip_hooks:
             await instance.post_save(is_create=True, update_fields=None)
 
         return instance
+
+    async def _insert_instance(
+        self,
+        instance: TModel,
+        *,
+        using: str | None,
+        client: SupportsExecute | None,
+        in_place: bool,
+        upsert: bool = False,
+        update_fields: set[str] | None = None,
+    ) -> tuple[TModel, bool]:
+        """Insert an instance and report whether a new row was created."""
+        exec_client = await _resolve_execution_client(using, client)
+        payload = _dump_insert_data(instance)
+        pk_field = self._primary_key_field()
+        if upsert:
+            assert pk_field is not None
+            if payload.get(pk_field) is None:
+                raise ManagerError(
+                    "pre_save cleared the primary key for a default-key upsert"
+                )
+        if not payload:
+            raise ManagerError("create() requires at least one value")
+        query = InsertQuery(self.model_class).values(**payload)
+        inserted_alias: str | None = None
+        if upsert:
+            assert pk_field is not None
+            if update_fields is None:
+                excluded = [field for field in payload if field != pk_field]
+                explicit = {}
+            else:
+                requested = update_fields - {pk_field}
+                excluded = sorted(requested & payload.keys())
+                explicit = _dump_update_data(instance, requested - payload.keys())
+            if excluded or explicit:
+                query = query.on_conflict_update(excluded, values=explicit)
+                assert query._on_conflict is not None
+                inserted_alias = query._on_conflict["inserted_alias"]
+            else:
+                query = query.on_conflict_do_nothing()
+        result = await self._run_mutation(query, exec_client)
+
+        inserted = inserted_alias is None
+        hydrated = None
+        rows = result.get("rows")
+        inserted_ids = result.get("inserted_ids", [])
+        with _track_private_assignments() as (assigned, snapshots):
+            if rows:
+                columns = list(result.get("columns", []))
+                row = list(rows[0])
+                if columns and columns[-1] == inserted_alias:
+                    # The SQL builder appends the outcome flag after RETURNING *,
+                    # so read the last column even if the table has an unmapped
+                    # column of the same name earlier in the row.
+                    inserted = bool(row.pop())
+                    columns.pop()
+                rmap = self.model_class._db_meta.reverse_column_map
+                row_dict = {
+                    rmap.get(col, col): value for col, value in zip(columns, row)
+                }
+                hydrated = _validate_db_row(
+                    self.model_class, row_dict, track_private=in_place
+                )
+            elif (
+                inserted_alias is None
+                and pk_field
+                and inserted_ids
+                and inserted_ids[0] is not None
+            ):
+                row_dict = _dump_db_fields(instance)
+                row_dict[pk_field] = inserted_ids[0]
+                hydrated = _validate_db_row(
+                    self.model_class, row_dict, track_private=in_place
+                )
+        assigned_private = {name for obj, name in assigned if obj is hydrated}
+        if upsert and hydrated is None:
+            # No row came back: either the key already exists or a trigger
+            # suppressed the insert. Persistence is unconfirmed, so the default
+            # key stays retryable; the next full save() upserts either way.
+            inserted = False
+            if in_place:
+                assert pk_field is not None
+                instance.__pydantic_fields_set__.discard(pk_field)
+
+        if hydrated is not None:
+            if in_place:
+                baseline = snapshots.get(id(hydrated), {})
+                changed_private = _changed_private_containers(hydrated, baseline)
+                _refresh_in_place(
+                    instance, hydrated, assigned_private | changed_private
+                )
+            else:
+                instance = hydrated
+
+        return instance, inserted
 
     async def bulk_create(
         self,
@@ -411,34 +550,67 @@ class MutationMixin(Generic[TModel]):
                 for i in range(0, len(instances), batch_size)
             ]
 
+        pk_field = self._primary_key_field()
         for batch in batches:
-            payloads = []
+            entries = []
             for instance in batch:
                 payload = _dump_insert_data(instance)
                 if not payload:
                     raise ManagerError("bulk_create() encountered an empty payload")
-                payloads.append(payload)
+                entries.append((instance, payload))
 
-            query = InsertQuery(self.model_class).bulk_values(payloads)
-            result = await self._run_mutation(query, exec_client)
+            # Each SQL statement has one column list. Keep generated keys in
+            # separate runs so they cannot match another input's submitted key.
+            for (_, has_keys), group in groupby(
+                entries,
+                key=lambda entry: (
+                    frozenset(entry[1]),
+                    pk_field is not None and entry[1].get(pk_field) is not None,
+                ),
+            ):
+                instances_in_run, payloads = zip(*group)
+                query = InsertQuery(self.model_class).bulk_values(list(payloads))
+                result = await self._run_mutation(query, exec_client)
+                if pk_field is None:
+                    continue
 
-            # Assign auto-generated PKs to instances
-            inserted_ids = result.get("inserted_ids", [])
-            pk_field = self._primary_key_field()
-
-            if inserted_ids and len(inserted_ids) != len(batch):
-                warnings.warn(
-                    f"bulk_create: received {len(inserted_ids)} IDs for {len(batch)} rows. "
-                    "Check conflict handling and the returned primary keys. "
-                    "non-sequential auto_increment, or non-integer primary keys. "
-                    "Assigned IDs may be incorrect.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-
-            if pk_field and inserted_ids:
-                for instance, pk_value in zip(batch, inserted_ids):
-                    setattr(instance, pk_field, pk_value)
+                ids = result.get("inserted_ids", [])
+                count = len(payloads)
+                affected = result.get("affected", len(ids))
+                if has_keys:
+                    if len(ids) == 0 and affected == count:
+                        # Some clients only report a row count.
+                        for instance in instances_in_run:
+                            instance._mark_pk_persisted()
+                    else:
+                        submitted = [
+                            msgpack.packb(serialize_value(payload[pk_field]))
+                            for payload in payloads
+                        ]
+                        sent = Counter(submitted)
+                        returned = Counter(
+                            msgpack.packb(serialize_value(key))
+                            for key in ids
+                            if key is not None
+                        )
+                        for instance, key in zip(instances_in_run, submitted):
+                            if sent[key] == returned[key] == 1:
+                                instance._mark_pk_persisted()
+                elif affected == len(ids) == count and all(
+                    key is not None for key in ids
+                ):
+                    pk_adapter = TypeAdapter(
+                        self.model_class.model_fields[pk_field].annotation or Any
+                    )
+                    keys = [pk_adapter.validate_python(key) for key in ids]
+                    for instance, key in zip(instances_in_run, keys):
+                        setattr(instance, pk_field, key)
+                elif affected or ids:
+                    warnings.warn(
+                        f"bulk_create could not match generated keys to {count} inputs",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
         return instances
 
@@ -491,7 +663,7 @@ class MutationMixin(Generic[TModel]):
             if pk_value is None:
                 continue
 
-            all_values = obj.model_dump(mode="python", exclude_none=False)
+            all_values = _dump_db_fields(obj)
 
             # Extract requested fields and map to db_column names
             values = {

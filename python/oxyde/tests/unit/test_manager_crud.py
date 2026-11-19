@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from uuid import UUID, uuid4
+
 import pytest
-from pydantic import computed_field
+from pydantic import AliasChoices, computed_field, model_validator
+from pydantic.fields import PydanticUndefined
 
 from oxyde import Field, Model
 from oxyde.exceptions import (
@@ -13,6 +16,7 @@ from oxyde.exceptions import (
     MultipleObjectsReturned,
     NotFoundError,
 )
+from oxyde.queries.mixins.mutation import _hydrate_models
 from oxyde.tests.helpers import StubExecuteClient
 
 
@@ -27,6 +31,56 @@ class OxydeTestModel(Model):
 
     class Meta:
         is_table = True
+
+
+class UuidModel(Model):
+    id: UUID = Field(default_factory=uuid4, db_pk=True)
+    name: str
+
+    class Meta:
+        is_table = True
+
+
+class SingletonModel(Model):
+    id: int = Field(default=1, db_pk=True, db_column="singleton_id")
+    theme: str = Field(db_column="theme_name")
+    description: str | None = None
+
+    class Meta:
+        is_table = True
+
+
+class AliasCollision(Model):
+    id: int | None = Field(default=None, db_pk=True, alias="external_id")
+    external_id: str = "external"
+
+    class Meta:
+        is_table = True
+
+
+def test_returning_rows_validate_by_field_name():
+    (instance,) = _hydrate_models(AliasCollision, ["id", "external_id"], [[5, "abc"]])
+    assert (instance.id, instance.external_id) == (5, "abc")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [[{"id": 5, "external_id": "abc"}], [["id", "external_id"], [[5, "abc"]]]],
+)
+async def test_selected_rows_validate_by_field_name(payload):
+    instance = await AliasCollision.objects.first(client=StubExecuteClient([payload]))
+    assert instance is not None
+    assert (instance.id, instance.external_id) == (5, "abc")
+
+
+@pytest.mark.asyncio
+async def test_inserted_id_validates_by_field_name():
+    stub = StubExecuteClient([{"affected": 1, "inserted_ids": [5]}])
+    instance = await AliasCollision.objects.create(
+        instance=AliasCollision(), client=stub
+    )
+    assert (instance.id, instance.external_id) == (5, "external")
 
 
 class TestModelSave:
@@ -50,6 +104,326 @@ class TestModelSave:
         assert stub.calls[0]["op"] == "insert"
         assert result is instance
         assert instance.id == 42
+
+    @pytest.mark.asyncio
+    async def test_save_new_instance_with_pk_default_creates(self):
+        instance = UuidModel(name="Alice")
+        row = {"columns": ["id", "name"], "rows": [[str(instance.id), instance.name]]}
+        stub = StubExecuteClient([row, row])
+
+        await instance.save(client=stub)
+        await instance.save(client=stub)
+
+        assert [call["op"] for call in stub.calls] == ["insert", "update"]
+        assert stub.calls[0]["on_conflict"] == {
+            "columns": ["id"],
+            "action": "update",
+            "update_columns": ["name"],
+            "inserted_alias": "__oxyde_inserted",
+        }
+
+    @pytest.mark.asyncio
+    async def test_save_scalar_default_pk_upserts(self):
+        instance = SingletonModel(theme="dark")
+        stub = StubExecuteClient(
+            [{"columns": ["singleton_id", "theme_name"], "rows": [[1, "dark"]]}]
+        )
+
+        await instance.save(client=stub)
+
+        call = stub.calls[0]
+        assert call["op"] == "insert"
+        assert call["on_conflict"] == {
+            "columns": ["singleton_id"],
+            "action": "update",
+            "update_columns": ["theme_name"],
+            "inserted_alias": "__oxyde_inserted",
+        }
+        assert instance.model_fields_set == {"id", "theme"}
+
+    @pytest.mark.asyncio
+    async def test_save_default_pk_upsert_limits_conflict_update_fields(self):
+        instance = SingletonModel(theme="dark")
+        stub = StubExecuteClient(
+            [
+                {
+                    "columns": ["singleton_id", "theme_name", "description"],
+                    "rows": [[1, "retained", None]],
+                }
+            ]
+        )
+
+        await instance.save(client=stub, update_fields=["description"])
+
+        call = stub.calls[0]
+        assert call["on_conflict"]["update_values"] == {"description": None}
+        assert "update_columns" not in call["on_conflict"]
+        assert call["values"] == {
+            "singleton_id": 1,
+            "theme_name": "dark",
+        }
+        assert instance.theme == "retained"
+
+    @pytest.mark.asyncio
+    async def test_save_twice_serial_pk_updates(self):
+        instance = OxydeTestModel(name="Alice")
+        row = {"columns": ["id", "name"], "rows": [[42, instance.name]]}
+        stub = StubExecuteClient([row, row])
+
+        await instance.save(client=stub)
+        await instance.save(client=stub)
+
+        assert [call["op"] for call in stub.calls] == ["insert", "update"]
+
+    @pytest.mark.asyncio
+    async def test_save_explicit_pk_default_model_updates(self):
+        instance = UuidModel(id=uuid4(), name="Alice")
+        row = {"columns": ["id", "name"], "rows": [[str(instance.id), instance.name]]}
+        stub = StubExecuteClient([row])
+
+        await instance.save(client=stub)
+
+        assert [call["op"] for call in stub.calls] == ["update"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hook", ["post_init", "after_validator", "subclass"])
+    @pytest.mark.parametrize("from_mapping", [False, True])
+    async def test_save_default_pk_assigned_during_validation_inserts(
+        self, hook, from_mapping
+    ):
+        class NormalizedKeyModel(Model):
+            code: str = Field(default_factory=lambda: "ABC", db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+            if hook == "post_init":
+
+                def model_post_init(self, context: object, /) -> None:
+                    self.code = self.code.lower()
+
+            elif hook == "after_validator":
+
+                @model_validator(mode="after")
+                def normalize(self) -> NormalizedKeyModel:
+                    self.code = self.code.lower()
+                    return self
+
+        model = NormalizedKeyModel
+        if hook == "subclass":
+
+            class Subclass(NormalizedKeyModel):
+                class Meta(NormalizedKeyModel.Meta):
+                    pass
+
+                @model_validator(mode="after")
+                def normalize(self) -> Subclass:
+                    self.code = self.code.lower()
+                    return self
+
+            model = Subclass
+
+        instance = (
+            model.model_validate({"name": "Alice"})
+            if from_mapping
+            else model(name="Alice")
+        )
+        assert instance.code == "abc"
+        assert "code" not in instance.model_fields_set
+        assert "code" not in model.model_validate_json('{"name":"Bob"}').model_fields_set
+        explicit = model.model_validate({"code": "XYZ", "name": "Bob"})
+        assert "code" in explicit.model_fields_set
+        assert "code" in model(code="XYZ", name="Bob").model_fields_set
+
+        row = {
+            "columns": ["code", "name", "__oxyde_inserted"],
+            "rows": [["abc", "Alice", True]],
+        }
+        stub = StubExecuteClient([row])
+        await instance.save(client=stub)
+
+        assert stub.calls[0]["op"] == "insert"
+        assert stub.calls[0]["on_conflict"]["action"] == "update"
+        assert "code" in instance.model_fields_set
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "alias",
+        [{"alias": "key"}, {"validation_alias": AliasChoices("key", "pk")}],
+    )
+    async def test_save_pk_supplied_by_alias_or_assignment_updates(self, alias):
+        class AliasedKeyModel(Model):
+            id: UUID = Field(default_factory=uuid4, db_pk=True, **alias)
+            name: str
+
+            class Meta:
+                is_table = True
+
+        by_alias = AliasedKeyModel(key=uuid4(), name="Alice")
+        assigned = AliasedKeyModel(name="Bob")
+        assert "id" not in assigned.model_fields_set
+        assigned.id = uuid4()
+
+        for instance in (by_alias, assigned):
+            row = {"columns": ["id", "name"], "rows": [[str(instance.id), "x"]]}
+            stub = StubExecuteClient([row])
+            await instance.save(client=stub)
+            assert [call["op"] for call in stub.calls] == ["update"]
+
+    @pytest.mark.asyncio
+    async def test_save_serialize_by_alias_model_writes_field_columns(self):
+        class SerializedByAlias(Model, serialize_by_alias=True):
+            id: int | None = Field(default=None, db_pk=True)
+            display_name: str = Field(alias="displayName", db_column="display")
+
+            class Meta:
+                is_table = True
+
+        instance = SerializedByAlias(displayName="Alice")
+        stub = StubExecuteClient(
+            [
+                {"columns": ["id", "display"], "rows": [[1, "Alice"]]},
+                {"columns": ["id", "display"], "rows": [[1, "Bob"]]},
+            ]
+        )
+
+        await instance.save(client=stub)
+        instance.display_name = "Bob"
+        await instance.save(client=stub)
+
+        assert stub.calls[0]["values"] == {"display": "Alice"}
+        assert stub.calls[1]["values"] == {"display": "Bob"}
+        assert (instance.id, instance.display_name) == (1, "Bob")
+
+    @pytest.mark.asyncio
+    async def test_save_after_create_instance_updates(self):
+        instance = UuidModel(name="Alice")
+        row = {"columns": ["id", "name"], "rows": [[str(instance.id), instance.name]]}
+        stub = StubExecuteClient([row, row])
+
+        await UuidModel.objects.create(instance=instance, client=stub)
+        await instance.save(client=stub)
+
+        assert [call["op"] for call in stub.calls] == ["insert", "update"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("encoding", ["rows", "columnar", "dedup"])
+    async def test_partial_save_writes_only_loaded_and_assigned_fields(self, encoding):
+        class _Author(Model):
+            id: int | None = Field(default=None, db_pk=True)
+
+            class Meta:
+                is_table = True
+
+        class _Post(Model, extra="allow"):
+            id: int | None = Field(default=None, db_pk=True)
+            title: str = ""
+            published: bool = False
+            author: _Author | None = None
+
+            def model_post_init(self, context: object, /) -> None:
+                self.published = self.published and bool(self.title)
+
+            class Meta:
+                is_table = True
+
+        query = _Post.objects.filter().select("id", "title")
+        if encoding == "rows":
+            payload = [{"id": 1, "title": "Hello"}]
+        else:
+            payload = [["id", "title"], [[1, "Hello"]]]
+            if encoding == "dedup":
+                query = query.join("author")
+                payload.append(
+                    {"author": {"columns": ["id"], "data": {5: [5]}, "refs": [5]}}
+                )
+
+        returned = {
+            "columns": ["id", "title", "published", "author_id"],
+            "rows": [[1, "Hello", True, 5]],
+        }
+        stub = StubExecuteClient([payload, returned, returned])
+        post = (await query.all(client=stub))[0].model_copy(update={"note": "local"})
+        assert "published" not in post.model_fields_set
+        expected: dict[str, str | int] = {"title": "Hello"}
+        if encoding == "dedup":
+            assert post.author is not None
+            assert post.author.id == 5
+        else:
+            setattr(post, "author_id", 5)
+            expected["author_id"] = 5
+
+        await post.save(client=stub)
+
+        assert stub.calls[1]["values"] == expected
+        assert post.published is True
+        await post.save(client=stub)
+        assert stub.calls[2]["values"]["published"] is True
+
+    @pytest.mark.asyncio
+    async def test_partial_save_requires_primary_key(self):
+        query = UuidModel.objects.filter().select("name").union_all(
+            OxydeTestModel.objects.filter().select("name")
+        )
+        stub = StubExecuteClient([[["name"], [["Alice"]]]])
+        instance = (await query.all(client=stub))[0]
+
+        with pytest.raises(
+            ManagerError, match="partially loaded .* without its primary key"
+        ):
+            await instance.save(client=stub)
+
+        assert len(stub.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_in_place_create_merges_returned_extras(self):
+        class ExtraModel(Model, extra="allow"):
+            id: int | None = Field(default=None, db_pk=True)
+            name: str
+
+            class Meta:
+                is_table = True
+
+        instance = ExtraModel(name="Alice", local="keep", changed="before")
+        stub = StubExecuteClient(
+            [
+                {
+                    "columns": ["id", "name", "returned", "changed"],
+                    "rows": [[42, "Alice", "new", "after"]],
+                }
+            ]
+        )
+
+        assert (
+            await ExtraModel.objects.create(instance=instance, client=stub) is instance
+        )
+        assert instance.model_extra == {
+            "local": "keep",
+            "returned": "new",
+            "changed": "after",
+        }
+
+    @pytest.mark.asyncio
+    async def test_pre_save_is_create_for_pk_default(self, monkeypatch):
+        hook_calls: list[tuple[bool, set[str] | None]] = []
+
+        async def pre_save(
+            _instance: UuidModel,
+            *,
+            is_create: bool,
+            update_fields: set[str] | None = None,
+        ) -> None:
+            hook_calls.append((is_create, update_fields))
+
+        monkeypatch.setattr(UuidModel, "pre_save", pre_save)
+        instance = UuidModel(name="Alice")
+        row = {"columns": ["id", "name"], "rows": [[str(instance.id), instance.name]]}
+        stub = StubExecuteClient([row])
+
+        await instance.save(client=stub)
+
+        assert hook_calls == [(True, None)]
 
     @pytest.mark.asyncio
     async def test_save_existing_instance_updates(self):
@@ -259,6 +633,21 @@ class TestManagerCreate:
         assert stub.calls[0]["op"] == "insert"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("returns_row", [True, False])
+    async def test_create_populates_serial_pk_on_passed_instance(self, returns_row):
+        row = {"columns": ["id", "name"], "rows": [[42, "Alice"]]}
+        create_result = row if returns_row else {"affected": 1, "inserted_ids": [42]}
+        stub = StubExecuteClient([create_result, row])
+        instance = OxydeTestModel(name="Alice")
+
+        created = await OxydeTestModel.objects.create(instance=instance, client=stub)
+
+        assert created is instance
+        assert instance.id == 42
+        await instance.save(client=stub)
+        assert [call["op"] for call in stub.calls] == ["insert", "update"]
+
+    @pytest.mark.asyncio
     async def test_create_requires_data(self):
         """Test create() without data raises error."""
         stub = StubExecuteClient([])
@@ -308,6 +697,33 @@ class TestManagerBulkCreate:
         assert len(created) == 2
         assert created[0].id == 1
         assert created[1].id == 2
+
+    @pytest.mark.asyncio
+    async def test_save_after_bulk_create_uuid_updates(self):
+        instance = UuidModel(name="Alice")
+        stub = StubExecuteClient(
+            [
+                {"affected": 1, "inserted_ids": []},
+                {"columns": ["id", "name"], "rows": [[str(instance.id), instance.name]]},
+            ]
+        )
+
+        await UuidModel.objects.bulk_create([instance], client=stub)
+        await instance.save(client=stub)
+
+        assert [call["op"] for call in stub.calls] == ["insert", "update"]
+
+    @pytest.mark.asyncio
+    async def test_bulk_create_does_not_mark_undefined_pk_as_set(self):
+        instance = OxydeTestModel.model_construct(
+            _fields_set={"name"}, id=PydanticUndefined, name="Alice"
+        )
+        stub = StubExecuteClient([{"affected": 1, "inserted_ids": []}])
+
+        await OxydeTestModel.objects.bulk_create([instance], client=stub)
+
+        assert "id" not in instance.model_fields_set
+        assert "id" not in stub.calls[0]["bulk_values"][0]
 
     @pytest.mark.asyncio
     async def test_bulk_create_mixed(self):

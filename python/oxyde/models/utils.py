@@ -38,6 +38,10 @@ from typing import Annotated, Any, Union, get_args, get_origin
 from pydantic.fields import FieldInfo
 
 
+class _LoadedFieldsSet(set[str]):
+    """Mark the fields set on a model loaded from a partial projection."""
+
+
 def _unpack_annotated(hint: Any) -> tuple[Any, tuple[Any, ...]]:
     """Extract base type and metadata from Annotated type hint."""
     if get_origin(hint) is Annotated:

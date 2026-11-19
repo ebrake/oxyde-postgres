@@ -8,5 +8,6 @@ pub mod value;
 pub use bind::{bind_value, rmpv_to_value, typed_value_expr};
 pub use identifier::{ColumnIdent, TableIdent};
 pub use value::{
-    apply_annotation_result_types, assignment_expr, compile_scalar, ColumnTypes, ExprTypes,
+    apply_annotation_result_types, assignment_expr, assignment_expr_for_table, compile_scalar,
+    ColumnTypes, ExprTypes,
 };

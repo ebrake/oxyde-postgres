@@ -7,10 +7,52 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from pydantic import BaseModel, ValidationError, ValidationInfo, field_validator
 
 from oxyde import Field, Model
 from oxyde.models.field import OxydeFieldInfo
 from oxyde.models.registry import registered_tables
+
+
+def test_model_validate_honors_strict_and_context():
+    class WithContext(Model):
+        id: int = Field(default=1, db_pk=True)
+        value: int
+
+        class Meta:
+            is_table = True
+
+        @field_validator("value")
+        @classmethod
+        def add_offset(cls, value: int, info: ValidationInfo) -> int:
+            return value + (info.context or {}).get("offset", 0)
+
+    with pytest.raises(ValidationError, match="valid integer"):
+        WithContext.model_validate({"value": "1"}, strict=True)
+
+    payload = {"value": 1}
+    instance = WithContext.model_validate(payload, context={"offset": 2})
+    assert instance.value == 3
+    from_json = WithContext.model_validate_json('{"value": 1}', context={"offset": 2})
+    assert from_json.value == 3
+
+
+def test_model_schema_and_serialization_as_nested_field():
+    class Child(Model):
+        id: int = Field(default=1, db_pk=True)
+
+        class Meta:
+            is_table = True
+
+    class Parent(BaseModel):
+        child: Child
+
+    instance = Parent(child=Child())
+    assert instance.model_dump() == {"child": {"id": 1}}
+    assert instance.model_dump_json() == '{"child":{"id":1}}'
+    assert Child.model_json_schema()["properties"]["id"]["default"] == 1
+    assert "child" in Parent.model_json_schema()["properties"]
+    assert Parent.model_validate({"child": {"id": 2}}).child.model_copy().id == 2
 
 
 class TestOxydeFieldInfoInit:
@@ -159,6 +201,29 @@ class TestOxydeFieldInfoInit:
         assert field.default == "test"
         assert field.description == "Test field"
         assert field.alias == "test_alias"
+        # Like pydantic.Field(), alias drives validation and serialization.
+        assert field.validation_alias == "test_alias"
+        assert field.serialization_alias == "test_alias"
+
+    def test_explicit_validation_alias_overrides_alias(self):
+        field = OxydeFieldInfo(alias="a", validation_alias="v")
+        assert (field.validation_alias, field.serialization_alias) == ("v", "a")
+
+    def test_model_accepts_alias_and_field_name(self):
+        class Aliased(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            created_at: str = Field(alias="createdAt", db_column="created_ts")
+
+            class Meta:
+                is_table = True
+
+        assert Aliased(createdAt="a").created_at == "a"
+        assert Aliased(created_at="b").created_at == "b"
+        assert Aliased.model_validate({"created_at": "c"}).created_at == "c"
+        assert Aliased(createdAt="d").model_dump(by_alias=True) == {
+            "id": None,
+            "createdAt": "d",
+        }
 
 
 class TestFieldFactory:

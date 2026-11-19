@@ -10,15 +10,13 @@ from __future__ import annotations
 from collections.abc import Coroutine, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
-from pydantic import TypeAdapter
-
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.exceptions import FieldLookupError, MultipleObjectsReturned, NotFoundError
+from oxyde.models.db_schema import _validate_db_row, _validate_db_rows
 from oxyde.models.registry import registered_tables
+from oxyde.models.utils import _LoadedFieldsSet
 from oxyde.queries.base import (
-    _TYPE_ADAPTER_CACHE,
-    _TYPE_ADAPTER_LOCK,
     SupportsExecute,
     _primary_key_meta,
     _resolve_execution_client,
@@ -76,6 +74,12 @@ class ExecutionMixin(Generic[TModel]):
         raise NotImplementedError
 
     def to_ir(self) -> dict[str, Any]:
+        """Must be implemented by the main Query class."""
+        raise NotImplementedError
+
+    def _build_ir(
+        self, *, for_models: bool, append_pk: bool | None = None
+    ) -> dict[str, Any]:
         """Must be implemented by the main Query class."""
         raise NotImplementedError
 
@@ -140,7 +144,7 @@ class ExecutionMixin(Generic[TModel]):
 
     async def fetch_msgpack(self, client: SupportsExecute) -> bytes:
         """Execute query and return raw MessagePack bytes."""
-        query_ir = self.to_ir()
+        query_ir = self._build_ir(for_models=False)
         return await client.execute(query_ir)
 
     async def fetch_rows(self, client: SupportsExecute) -> list[dict[str, Any]]:
@@ -177,19 +181,14 @@ class ExecutionMixin(Generic[TModel]):
                 "Example: .group_by('field').values().all()"
             )
 
-        # Get or create cached TypeAdapter (thread-safe)
         model_class = self.model_class
-        if model_class not in _TYPE_ADAPTER_CACHE:
-            with _TYPE_ADAPTER_LOCK:
-                if model_class not in _TYPE_ADAPTER_CACHE:
-                    _TYPE_ADAPTER_CACHE[model_class] = TypeAdapter(list[model_class])  # type: ignore[valid-type]
 
-        adapter = _TYPE_ADAPTER_CACHE[model_class]
-
-        result_bytes = await self.fetch_msgpack(client)
+        result_bytes = await client.execute(self._build_ir(for_models=True))
         data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
         del result_bytes
 
+        columns: list[str] | None = None
+        relations_map: dict[str, Any] | None = None
         if (
             isinstance(data, (list, tuple))
             and len(data) == 3
@@ -201,10 +200,6 @@ class ExecutionMixin(Generic[TModel]):
             columns = _remap_columns(main_columns, model_class)
             rows = [dict(zip(columns, row)) for row in main_rows]
             del main_rows, data
-
-            models: list[TModel] = adapter.validate_python(rows)
-            del rows
-            self._hydrate_from_dedup(models, relations_map)
         elif (
             isinstance(data, (list, tuple))
             and len(data) == 2
@@ -216,15 +211,29 @@ class ExecutionMixin(Generic[TModel]):
             columns = _remap_columns(raw_columns, model_class)
             rows = [dict(zip(columns, row)) for row in row_values]
             del row_values, data
-
-            models = adapter.validate_python(rows)
-            del rows
         else:
             rows = data if isinstance(data, list) else []
 
-            models = adapter.validate_python(rows)
-            del rows
+        loaded_fields: list[_LoadedFieldsSet] | None = None
+        if self._selected_fields is not None:
+            # Capture the projection before validators can assign other fields.
+            model_fields = model_class.model_fields.keys()
+            if columns is None:
+                loaded_fields = [
+                    _LoadedFieldsSet(model_fields & row.keys()) for row in rows
+                ]
+            else:
+                loaded = model_fields & columns
+                loaded_fields = [_LoadedFieldsSet(loaded) for _ in rows]
 
+        models: list[TModel] = _validate_db_rows(model_class, rows)
+        del rows
+        if loaded_fields is not None:
+            for model, loaded_set in zip(models, loaded_fields):
+                object.__setattr__(model, "__pydantic_fields_set__", loaded_set)
+
+        if relations_map is not None:
+            self._hydrate_from_dedup(models, relations_map)
         if self._prefetch_paths:
             await self._run_prefetch(models, client)
         return models
@@ -465,6 +474,7 @@ class ExecutionMixin(Generic[TModel]):
             if spec is None:
                 continue
 
+            # The SQL builder aliases JOIN columns with the target field names.
             columns = rel_data["columns"]
             data = rel_data["data"]
             refs = rel_data["refs"]
@@ -473,7 +483,9 @@ class ExecutionMixin(Generic[TModel]):
             instance_cache: dict[Any, Model] = {}
             for pk_val, row_values in data.items():
                 related_dict = dict(zip(columns, row_values))
-                instance_cache[pk_val] = spec.target_model(**related_dict)
+                instance_cache[pk_val] = _validate_db_row(
+                    spec.target_model, related_dict
+                )
 
             # Assign to each model via refs
             for model, ref_pk in zip(models, refs):

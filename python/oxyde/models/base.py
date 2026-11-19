@@ -67,22 +67,30 @@ import sys
 import typing as typing_module
 import warnings
 from collections.abc import Iterable
+from contextvars import ContextVar
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
     ForwardRef,
     Self,
+    cast,
     dataclass_transform,
     get_args,
     get_origin,
     get_type_hints,
 )
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    GetCoreSchemaHandler,
+    ValidatorFunctionWrapHandler,
+)
 from pydantic._internal._model_construction import ModelMetaclass
 from pydantic.errors import PydanticUndefinedAnnotation
 from pydantic.fields import FieldInfo, PydanticUndefined
+from pydantic_core import core_schema
 
 from oxyde.core import migration_validate_extension_name, register_validator
 
@@ -107,9 +115,40 @@ from oxyde.models.serializers import _dump_update_data
 from oxyde.models.utils import (
     _extract_constraints,
     _extract_inner_constraints,
+    _LoadedFieldsSet,
     _unpack_annotated,
     _unwrap_optional,
 )
+
+
+def _pk_is_set(value: Any) -> bool:
+    return value is not None and value is not PydanticUndefined
+
+
+# While set, Model.__setattr__ records (instance, name) for each private
+# attribute assigned, so a refresh can tell validator-derived private state
+# from defaults and factory values (which pydantic writes without __setattr__).
+_PRIVATE_ASSIGNMENTS: ContextVar[list[tuple[Model, str]] | None] = ContextVar(
+    "_PRIVATE_ASSIGNMENTS", default=None
+)
+
+
+_PK_VALIDATION: ContextVar[list[tuple[Model, str]] | None] = ContextVar(
+    "_PK_VALIDATION", default=None
+)
+
+
+def _pk_provenance_wrap(data: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+    """Restore PK membership after validation hooks have finished assigning."""
+    default_keys: list[tuple[Model, str]] = []
+    token = _PK_VALIDATION.set(default_keys)
+    try:
+        result = handler(data)
+        for instance, pk_field in default_keys:
+            instance.__pydantic_fields_set__.discard(pk_field)
+        return result
+    finally:
+        _PK_VALIDATION.reset(token)
 
 
 def _get_pk_field_name(model_cls: type) -> str:
@@ -215,6 +254,9 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
 
     model_config = ConfigDict(
         ignored_types=(RelationDescriptorBase,),
+        # Application input accepts both aliases and field names.
+        validate_by_alias=True,
+        validate_by_name=True,
     )
     _db_meta: ClassVar[ModelMeta]
     # Parametrized by Self so `User.objects.first()` infers `User | None`
@@ -223,6 +265,59 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
     _is_table: ClassVar[bool] = False
     __pending_fk_fields__: ClassVar[list[tuple[str, Any, Any]]] = []
     __fk_fields_resolved__: ClassVar[bool] = False
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: type[BaseModel], handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        schema = handler(source)
+        # A required key has no default to track. Skip the Python callback
+        # for those models, where it also adds overhead to row hydration.
+        if cls._is_table and any(
+            isinstance(field, OxydeFieldInfo)
+            and field.db_pk
+            and not field.is_required()
+            for field in cls.model_fields.values()
+        ):
+            model_schema = handler.resolve_ref_schema(schema)
+            while (
+                model_schema["type"] == "function-before"
+                or model_schema["type"] == "function-after"
+                or model_schema["type"] == "function-wrap"
+            ):
+                model_schema = handler.resolve_ref_schema(model_schema["schema"])
+            if model_schema["type"] == "model" and model_schema["cls"] is cls:
+                # The core has populated fields_set when it enters post_init.
+                cast(core_schema.ModelSchema, model_schema)["post_init"] = (
+                    "_capture_pk_before_post_init"
+                )
+                return core_schema.no_info_wrap_validator_function(
+                    _pk_provenance_wrap, schema
+                )
+        return schema
+
+    def _capture_pk_before_post_init(self, context: Any, /) -> None:
+        tracked = _PK_VALIDATION.get()
+        if tracked is not None:
+            pk_field = type(self)._db_meta.pk_field
+            if pk_field is not None and pk_field not in self.__pydantic_fields_set__:
+                tracked.append((self, pk_field))
+        self.model_post_init(context)
+
+    def _capture_private_before_post_init(self, context: Any, /) -> None:
+        from pydantic._internal._model_construction import init_private_attributes
+
+        from oxyde.models.db_schema import _capture_private_defaults
+
+        init_private_attributes(self, context)
+        _capture_private_defaults(self)
+        self._capture_pk_before_post_init(context)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        assigned = _PRIVATE_ASSIGNMENTS.get()
+        if assigned is not None and name in type(self).__private_attributes__:
+            assigned.append((self, name))
+        super().__setattr__(name, value)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -736,6 +831,34 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
     # Instance Methods
     # =========================================================================
 
+    def _mark_pk_persisted(self) -> None:
+        """Record that this instance's primary key identifies a stored row."""
+        pk_field = type(self)._db_meta.pk_field
+        if pk_field and _pk_is_set(getattr(self, pk_field, PydanticUndefined)):
+            self.__pydantic_fields_set__.add(pk_field)
+
+    def _resolve_update_columns(self, names: set[str], *, implicit: bool) -> set[str]:
+        metadata = type(self)._db_meta.field_metadata
+        fields: set[str] = set()
+        for name in names:
+            meta = metadata.get(name)
+            if meta is None:
+                fields.add(name)
+            elif meta.extra.get("reverse_fk") or meta.extra.get("m2m"):
+                if not implicit:
+                    raise FieldError(
+                        f"'{name}' is a virtual relation field and cannot "
+                        f"be used in update_fields"
+                    )
+            elif meta.foreign_key is not None:
+                column = meta.foreign_key.column_name
+                # JOIN hydration can populate the relation without loading its FK.
+                if not implicit or column in names:
+                    fields.add(column)
+            else:
+                fields.add(name)
+        return fields
+
     async def save(
         self,
         *,
@@ -743,10 +866,21 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         using: str | None = None,
         update_fields: Iterable[str] | None = None,
     ) -> Self:
-        manager = self.__class__.objects
-        pk_field = self.__class__._db_meta.pk_field
-        pk_value = getattr(self, pk_field) if pk_field else None
-        is_create = not (pk_field and pk_value not in (None, PydanticUndefined))
+        model_class = type(self)
+        manager = model_class.objects
+        pk_field = model_class._db_meta.pk_field
+        pk_value = getattr(self, pk_field, PydanticUndefined) if pk_field else None
+        pk_is_set = _pk_is_set(pk_value)
+        partial = isinstance(self.model_fields_set, _LoadedFieldsSet)
+        if partial and (not pk_is_set or pk_field not in self.model_fields_set):
+            raise ManagerError(
+                f"A partially loaded {model_class.__name__} without its primary key "
+                "cannot be saved"
+            )
+        pk_defaulted = (
+            pk_field is not None and pk_is_set and pk_field not in self.model_fields_set
+        )
+        is_create = not pk_is_set or pk_defaulted
 
         # Convert update_fields to set for hooks
         update_fields_set: set[str] | None = None
@@ -756,39 +890,26 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         # Call pre_save hook
         await self.pre_save(is_create=is_create, update_fields=update_fields_set)
 
+        fields: set[str] | None = None
+        if update_fields_set is not None and (not is_create or pk_defaulted):
+            invalid_fields = update_fields_set - model_class.model_fields.keys()
+            if invalid_fields:
+                inv = ", ".join(sorted(invalid_fields))
+                msg = f"Invalid update_fields for {model_class.__name__}: {inv}"
+                raise FieldError(msg)
+
+            fields = self._resolve_update_columns(update_fields_set, implicit=False)
+        elif partial:
+            fields = self._resolve_update_columns(
+                self.model_fields_set & model_class.model_fields.keys(), implicit=True
+            )
+
+        inserted = False
         if not is_create:
             assert pk_field is not None
-            # Update specified fields or all fields (except PK)
-            if update_fields_set is not None:
-                # Validate that all specified fields exist
-                model_field_names = set(self.__class__.model_fields.keys())
-                invalid_fields = update_fields_set - model_field_names
-                if invalid_fields:
-                    inv = ", ".join(sorted(invalid_fields))
-                    msg = f"Invalid update_fields for {self.__class__.__name__}: {inv}"
-                    raise FieldError(msg)
-
-                # Resolve virtual FK fields to their synthetic columns
-                # e.g. "author" → "author_id" (Django-compatible)
-                metadata = self.__class__._db_meta.field_metadata
-                fields: set[str] = set()
-                for f in update_fields_set:
-                    meta = metadata.get(f)
-                    if meta is None:
-                        fields.add(f)
-                    elif meta.extra.get("reverse_fk") or meta.extra.get("m2m"):
-                        raise FieldError(
-                            f"'{f}' is a virtual relation field and cannot "
-                            f"be used in update_fields"
-                        )
-                    elif meta.foreign_key is not None:
-                        fields.add(meta.foreign_key.column_name)
-                    else:
-                        fields.add(f)
-            else:
-                fields = set(self.__class__.model_fields.keys())
-            if pk_field:
-                fields.discard(pk_field)
+            if fields is None:
+                fields = set(model_class.model_fields)
+            fields.discard(pk_field)
             values = _dump_update_data(self, fields)
             if not values:
                 # Call post_save even if no values to update (for consistency)
@@ -804,14 +925,22 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                 cls_name = self.__class__.__name__
                 raise NotFoundError(f"{cls_name} with {pk_field}={pk_value} not found")
             self.__dict__.update(rows[0].__dict__)
+            if partial:
+                object.__setattr__(
+                    self, "__pydantic_fields_set__", set(self.model_fields_set)
+                )
         else:
-            created = await manager.create(
-                instance=self, client=client, using=using, _skip_hooks=True
+            _, inserted = await manager._query()._insert_instance(
+                self,
+                client=client,
+                using=using,
+                in_place=True,
+                upsert=pk_defaulted,
+                update_fields=fields,
             )
-            self.__dict__.update(created.__dict__)
 
         # Call post_save hook
-        await self.post_save(is_create=is_create, update_fields=update_fields_set)
+        await self.post_save(is_create=inserted, update_fields=update_fields_set)
 
         return self
 
@@ -889,6 +1018,11 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             if meta and (meta.extra.get("reverse_fk") or meta.extra.get("m2m")):
                 continue
             setattr(self, field_name, getattr(refreshed, field_name))
+
+        if isinstance(self.model_fields_set, _LoadedFieldsSet):
+            object.__setattr__(
+                self, "__pydantic_fields_set__", set(self.model_fields_set)
+            )
 
         return self
 
