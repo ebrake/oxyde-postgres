@@ -15,7 +15,7 @@ from oxyde.core import ir
 from oxyde.exceptions import FieldLookupError, MultipleObjectsReturned, NotFoundError
 from oxyde.models.db_schema import _validate_db_row, _validate_db_rows
 from oxyde.models.registry import registered_tables
-from oxyde.models.utils import _LoadedFieldsSet
+from oxyde.models.utils import _AggregateFieldsSet, _LoadedFieldsSet
 from oxyde.queries.base import (
     SupportsExecute,
     _primary_key_meta,
@@ -80,6 +80,10 @@ class ExecutionMixin(Generic[TModel]):
     def _build_ir(
         self, *, for_models: bool, append_pk: bool | None = None
     ) -> dict[str, Any]:
+        """Must be implemented by the main Query class."""
+        raise NotImplementedError
+
+    def _has_aggregate_annotations(self) -> bool:
         """Must be implemented by the main Query class."""
         raise NotImplementedError
 
@@ -215,22 +219,39 @@ class ExecutionMixin(Generic[TModel]):
             rows = data if isinstance(data, list) else []
 
         loaded_fields: list[_LoadedFieldsSet] | None = None
+        has_aggregates = self._has_aggregate_annotations()
         if self._selected_fields is not None:
             # Capture the projection before validators can assign other fields.
+            fields_set_type = (
+                _AggregateFieldsSet if has_aggregates else _LoadedFieldsSet
+            )
             model_fields = model_class.model_fields.keys()
             if columns is None:
                 loaded_fields = [
-                    _LoadedFieldsSet(model_fields & row.keys()) for row in rows
+                    fields_set_type(model_fields & row.keys()) for row in rows
                 ]
             else:
                 loaded = model_fields & columns
-                loaded_fields = [_LoadedFieldsSet(loaded) for _ in rows]
+                loaded_fields = [fields_set_type(loaded) for _ in rows]
 
-        models: list[TModel] = _validate_db_rows(model_class, rows)
+        if loaded_fields is not None or has_aggregates:
+            models, built_by_id = _validate_db_rows(model_class, rows, owned=True)
+        else:
+            models = _validate_db_rows(model_class, rows)
+            built_by_id = None
         del rows
         if loaded_fields is not None:
             for model, loaded_set in zip(models, loaded_fields):
-                object.__setattr__(model, "__pydantic_fields_set__", loaded_set)
+                if built_by_id is None or id(model) in built_by_id:
+                    object.__setattr__(model, "__pydantic_fields_set__", loaded_set)
+        elif has_aggregates:
+            for model in models:
+                if built_by_id is None or id(model) in built_by_id:
+                    object.__setattr__(
+                        model,
+                        "__pydantic_fields_set__",
+                        _AggregateFieldsSet(model.model_fields_set),
+                    )
 
         if relations_map is not None:
             self._hydrate_from_dedup(models, relations_map)

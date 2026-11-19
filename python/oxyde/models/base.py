@@ -82,6 +82,8 @@ from typing import (
 )
 
 from pydantic import (
+    AliasChoices,
+    AliasPath,
     BaseModel,
     ConfigDict,
     GetCoreSchemaHandler,
@@ -113,6 +115,7 @@ from oxyde.models.metadata import (
 from oxyde.models.registry import finalize_pending, register_table
 from oxyde.models.serializers import _dump_update_data
 from oxyde.models.utils import (
+    _AggregateFieldsSet,
     _extract_constraints,
     _extract_inner_constraints,
     _LoadedFieldsSet,
@@ -265,6 +268,40 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
     _is_table: ClassVar[bool] = False
     __pending_fk_fields__: ClassVar[list[tuple[str, Any, Any]]] = []
     __fk_fields_resolved__: ClassVar[bool] = False
+
+    @classmethod
+    def model_construct(
+        cls, _fields_set: set[str] | None = None, **values: Any
+    ) -> Self:
+        pk_field = cls._db_meta.pk_field if cls._is_table else None
+        field = cls.model_fields.get(pk_field) if pk_field is not None else None
+        if (
+            not isinstance(field, OxydeFieldInfo)
+            or not field.db_pk
+            or field.is_required()
+        ):
+            return super().model_construct(_fields_set, **values)
+
+        assert pk_field is not None
+        if _fields_set is not None:
+            supplied = pk_field in _fields_set
+        elif pk_field in values or field.alias in values:
+            supplied = True
+        else:
+            alias = field.validation_alias
+            choices = alias.choices if isinstance(alias, AliasChoices) else [alias]
+            supplied = any(
+                choice in values
+                if isinstance(choice, str)
+                else isinstance(choice, AliasPath)
+                and choice.search_dict_for_path(values) is not PydanticUndefined
+                for choice in choices
+            )
+
+        instance = super().model_construct(_fields_set, **values)
+        if not supplied:
+            instance.__pydantic_fields_set__.discard(pk_field)
+        return instance
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -871,13 +908,19 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         pk_field = model_class._db_meta.pk_field
         pk_value = getattr(self, pk_field, PydanticUndefined) if pk_field else None
         pk_is_set = _pk_is_set(pk_value)
-        partial = isinstance(self.model_fields_set, _LoadedFieldsSet)
-        if partial and (not pk_is_set or pk_field not in self.model_fields_set):
+        fields_set = self.model_fields_set
+        partial = isinstance(fields_set, _LoadedFieldsSet)
+        if isinstance(fields_set, _AggregateFieldsSet):
+            raise ManagerError(
+                f"{model_class.__name__} instances built from aggregate query results "
+                "cannot be saved"
+            )
+        if partial and (not pk_is_set or pk_field not in fields_set):
             raise ManagerError(
                 f"A partially loaded {model_class.__name__} without its primary key "
                 "cannot be saved"
             )
-        pk_was_explicit = pk_field is not None and pk_field in self.model_fields_set
+        pk_was_explicit = pk_field is not None and pk_field in fields_set
         pk_defaulted = pk_field is not None and pk_is_set and not pk_was_explicit
         is_create = not pk_is_set or pk_defaulted
 

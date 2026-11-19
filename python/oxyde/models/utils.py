@@ -42,6 +42,10 @@ class _LoadedFieldsSet(set[str]):
     """Mark the fields set on a model loaded from a partial projection."""
 
 
+class _AggregateFieldsSet(_LoadedFieldsSet):
+    """Mark fields loaded from aggregate output, which cannot be saved."""
+
+
 def _unpack_annotated(hint: Any) -> tuple[Any, tuple[Any, ...]]:
     """Extract base type and metadata from Annotated type hint."""
     if get_origin(hint) is Annotated:

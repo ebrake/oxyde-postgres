@@ -286,6 +286,21 @@ class Query(
             branch = branch._union_query
         return True
 
+    def _aggregate_annotations(self) -> dict[str, Any]:
+        return {
+            alias: obj
+            for alias, obj in self._annotations.items()
+            if not _is_scalar_annotation(obj)
+        }
+
+    def _has_aggregate_annotations(self) -> bool:
+        branch: Query[Any] | None = self
+        while branch is not None:
+            if branch._aggregate_annotations():
+                return True
+            branch = branch._union_query
+        return False
+
     def _build_ir(
         self, *, for_models: bool, append_pk: bool | None = None
     ) -> dict[str, Any]:
@@ -361,11 +376,7 @@ class Query(
 
         # Convert aggregate annotations to aggregates IR format
         aggregates_ir = None
-        aggregate_annotations = {
-            alias: obj
-            for alias, obj in self._annotations.items()
-            if alias not in scalar_annotations
-        }
+        aggregate_annotations = self._aggregate_annotations()
         if aggregate_annotations:
             aggregates_ir = []
             for alias, agg_obj in aggregate_annotations.items():
