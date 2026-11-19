@@ -245,6 +245,70 @@ class TestCreate:
 
 class TestBulkCreate:
     @pytest.mark.asyncio
+    async def test_mixed_shape_batch_rolls_back_on_unique_violation(self, db):
+        class BulkNote(Model):
+            id: int | None = Field(default=None, db_pk=True)
+            name: str
+            note: str | None = Field(default=None, db_type="TEXT")
+
+            class Meta:
+                is_table = True
+                table_name = "bulk_notes"
+
+        await execute_raw(
+            "CREATE TABLE bulk_notes (id SERIAL PRIMARY KEY, name text UNIQUE, "
+            "note text DEFAULT 'server default')",
+            using=db.name,
+        )
+        first = BulkNote(name="duplicate")
+        second = BulkNote(name="duplicate", note=None)
+        with pytest.raises(UniqueViolationError):
+            await BulkNote.objects.bulk_create([first, second], client=db)
+        assert await BulkNote.objects.count(using=db.name) == 0
+
+        second.name = "explicit null"
+        await BulkNote.objects.bulk_create([first, second], client=db)
+        assert await execute_raw(
+            "SELECT name, note FROM bulk_notes ORDER BY id", using=db.name
+        ) == [
+            {"name": "duplicate", "note": "server default"},
+            {"name": "explicit null", "note": None},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_trigger_rewritten_key_is_applied(self, db):
+        class RewrittenKey(Model):
+            id: str = Field(default="original", db_pk=True, db_type="TEXT")
+
+            class Meta:
+                is_table = True
+                table_name = "rewritten_keys"
+
+        await execute_raw(
+            "CREATE TABLE rewritten_keys (id text PRIMARY KEY)", using=db.name
+        )
+        await execute_raw(
+            """CREATE FUNCTION rewrite_bulk_key() RETURNS trigger LANGUAGE plpgsql AS $$
+               BEGIN
+                 NEW.id := 'stored:' || NEW.id;
+                 RETURN NEW;
+               END $$""",
+            using=db.name,
+        )
+        await execute_raw(
+            "CREATE TRIGGER rewrite_key BEFORE INSERT ON rewritten_keys "
+            "FOR EACH ROW EXECUTE FUNCTION rewrite_bulk_key()",
+            using=db.name,
+        )
+
+        instance = RewrittenKey()
+        await RewrittenKey.objects.bulk_create([instance], using=db.name)
+
+        assert instance.id == "stored:original"
+        assert "id" in instance.model_fields_set
+        assert await RewrittenKey.objects.filter(id=instance.id).exists(using=db.name)
+
+    @pytest.mark.asyncio
     async def test_bulk_create(self, db):
         authors = [
             Author(name="X", email="x@test.com"),

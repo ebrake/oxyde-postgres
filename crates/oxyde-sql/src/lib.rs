@@ -820,6 +820,101 @@ mod tests {
     }
 
     #[test]
+    fn test_bulk_insert_uses_default_only_for_missing_columns() {
+        let ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            bulk_values: Some(vec![
+                HashMap::from([("name".into(), rmpv_str("A"))]),
+                HashMap::from([("name".into(), rmpv_str("B")), ("note".into(), rmpv_null())]),
+                HashMap::from([("note".into(), rmpv_str("C"))]),
+            ]),
+            ..Default::default()
+        };
+
+        let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "users" ("name", "note") VALUES ($1, DEFAULT), ($2, $3), (DEFAULT, $4) RETURNING "id""#
+        );
+        assert!(matches!(params[2], Value::String(None)));
+    }
+
+    #[test]
+    fn test_bulk_insert_conflict_update_requires_column_in_every_row() {
+        let mut ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            bulk_values: Some(vec![
+                HashMap::from([("id".into(), rmpv_int(1)), ("name".into(), rmpv_str("A"))]),
+                HashMap::from([("id".into(), rmpv_int(2))]),
+            ]),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Update,
+                update_columns: Some(vec!["name".into()]),
+                update_values: Some(HashMap::from([("visits".into(), rmpv_int(0))])),
+                inserted_alias: None,
+            }),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            build_sql(&ir, Dialect::Postgres),
+            Err(QueryError::InvalidQuery(message)) if message.contains("column 'name'")
+        ));
+
+        ir.bulk_values.as_mut().unwrap()[1].insert("name".into(), rmpv_str("B"));
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert!(sql.contains(r#"SET "name" = "excluded"."name", "visits" = $5"#));
+    }
+
+    #[test]
+    fn test_single_insert_conflict_update_requires_supplied_column() {
+        let ir = QueryIR {
+            op: Operation::Insert,
+            table: "users".into(),
+            values: Some(HashMap::from([("id".into(), rmpv_int(1))])),
+            on_conflict: Some(OnConflict {
+                columns: vec!["id".into()],
+                action: ConflictAction::Update,
+                update_columns: Some(vec!["name".into()]),
+                update_values: None,
+                inserted_alias: None,
+            }),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            build_sql(&ir, Dialect::Postgres),
+            Err(QueryError::InvalidQuery(message)) if message.contains("column 'name'")
+        ));
+    }
+
+    #[test]
+    fn test_bulk_insert_does_not_cast_default_for_enum_column() {
+        let ir = QueryIR {
+            op: Operation::Insert,
+            table: "posts".into(),
+            bulk_values: Some(vec![
+                HashMap::from([("id".into(), rmpv_int(1))]),
+                HashMap::from([
+                    ("id".into(), rmpv_int(2)),
+                    ("status".into(), rmpv_str("draft")),
+                ]),
+            ]),
+            bind_types: Some(HashMap::from([("status".into(), enum_spec())])),
+            ..Default::default()
+        };
+
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "posts" ("id", "status") VALUES ($1, DEFAULT), ($2, $3::"post_status_enum") RETURNING "id""#
+        );
+    }
+
+    #[test]
     fn test_on_conflict_insert_outcome_requires_pk_column() {
         let ir = QueryIR {
             op: Operation::Insert,

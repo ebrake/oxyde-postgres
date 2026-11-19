@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
+from pydantic import field_serializer
+
 from oxyde import Field, Model
 from oxyde.models.registry import registered_tables
 from oxyde.models.serializers import _dump_insert_data
@@ -50,6 +52,21 @@ class TestInsertDefaults:
 
         assert data["status"] == "active"
         assert data["qty"] == 0
+
+    def test_primary_key_uses_field_serializer(self):
+        class NormalizedKey(Model):
+            id: str = Field(default="Alice", db_pk=True)
+
+            class Meta:
+                is_table = True
+
+            @field_serializer("id")
+            def serialize_id(self, value: str) -> str:
+                return value.lower()
+
+        registered_tables()
+
+        assert _dump_insert_data(NormalizedKey()) == {"id": "alice"}
 
     def test_unset_none_pk_omitted_for_autoincrement(self):
         """Untouched Field(default=None, db_pk=True) stays out of the INSERT

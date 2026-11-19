@@ -1,6 +1,6 @@
 //! INSERT query building
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use oxyde_codec::{ConflictAction, QueryIR};
 use sea_query::{Alias, Expr, PostgresQueryBuilder, Query, SimpleExpr, TableRef, Value};
@@ -57,25 +57,17 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
             ));
         }
 
-        // Extract columns from first row
-        let first_row = &bulk_values[0];
-        let mut columns: Vec<ColumnIdent> =
-            first_row.keys().map(|k| ColumnIdent(k.clone())).collect();
-        columns.sort_by(|a, b| a.0.cmp(&b.0));
-
-        query.columns(columns.clone());
+        let columns: BTreeSet<_> = bulk_values.iter().flat_map(|row| row.keys()).collect();
+        query.columns(columns.iter().map(|&col| ColumnIdent(col.clone())));
 
         // Add each row
         for row in bulk_values {
             let mut vals: Vec<SimpleExpr> = Vec::new();
             for col in &columns {
-                let val = row.get(&col.0).ok_or_else(|| {
-                    QueryError::InvalidQuery(format!(
-                        "Missing column '{}' in bulk insert row",
-                        col.0
-                    ))
-                })?;
-                vals.push(assignment_expr(val, &col.0, types, dialect)?);
+                vals.push(match row.get(*col) {
+                    Some(val) => assignment_expr(val, col, types, dialect)?,
+                    None => Expr::keyword_default(),
+                });
             }
             query.values(vals)?;
         }
@@ -115,6 +107,18 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
                             if update_values.is_some_and(|values| values.contains_key(col)) {
                                 return Err(QueryError::InvalidQuery(format!(
                                     "ON CONFLICT UPDATE has multiple assignments for column '{col}'"
+                                )));
+                            }
+                            let supplied_in_all_rows = if let Some(values) = &ir.values {
+                                values.contains_key(col)
+                            } else {
+                                ir.bulk_values.as_ref().is_some_and(|rows| {
+                                    rows.iter().all(|row| row.contains_key(col))
+                                })
+                            };
+                            if !supplied_in_all_rows {
+                                return Err(QueryError::InvalidQuery(format!(
+                                    "ON CONFLICT UPDATE column '{col}' must be supplied in every insert row"
                                 )));
                             }
                         }
