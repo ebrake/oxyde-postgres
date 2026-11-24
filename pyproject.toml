@@ -4,12 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "oxyde-postgres-core"
-version = "0.3.4"
+version = "0.3.5"
 description = "PostgreSQL 18+ Rust core for Oxyde for PostgreSQL"
 readme = "crates/oxyde-core-py/README.md"
 license = "MIT"
 license-files = ["LICENSE", "vendor/sqlx-postgres/LICENSE-MIT", "vendor/sqlx-postgres/LICENSE-APACHE"]
-requires-python = ">=3.13"
+requires-python = ">=3.15"
 authors = [
     {name = "E Brake", email = "ebrake123@icloud.com"},
     {name = "Nikita Ryzhenkov", email = "nikita.ryzhenkoff@gmail.com"}
@@ -21,8 +21,6 @@ classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3.15",
     "Topic :: Database",
 ]

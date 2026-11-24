@@ -3,7 +3,29 @@ from __future__ import annotations
 
 import pytest
 
+from oxyde import Field, Model, execute_raw
+from oxyde.models.registry import register_table
+
 from .conftest import Author, Post, RenamedChild, RenamedParent
+
+
+class ArrayKeyParent(Model):
+    id: int | None = Field(default=None, db_pk=True, db_column="parent_pk")
+    tags: list[str] = Field(db_unique=True)
+
+    class Meta:
+        is_table = True
+        table_name = "array_key_parents"
+
+
+class ArrayKeyChild(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    parent: ArrayKeyParent | None = Field(default=None, db_fk="tags")
+    parent_tags: list[str] | None = None
+
+    class Meta:
+        is_table = True
+        table_name = "array_key_children"
 
 
 class TestJoin:
@@ -46,6 +68,39 @@ class TestJoin:
         )
         assert [c.name for c in children] == ["r1", "r2"]
         assert children[0].parent.labels == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_join_deduplicates_related_rows_referenced_by_an_array_key(self, db):
+        register_table(ArrayKeyParent)
+        register_table(ArrayKeyChild)
+        # Declare the FK inline to avoid PostgreSQL's polymorphic array
+        # comparison during ALTER TABLE's existing-row validation.
+        await execute_raw(
+            "CREATE TABLE array_key_parents "
+            "(parent_pk BIGSERIAL PRIMARY KEY, tags TEXT[] NOT NULL UNIQUE)",
+            using=db.name,
+        )
+        await execute_raw(
+            "CREATE TABLE array_key_children "
+            "(id BIGSERIAL PRIMARY KEY, parent_tags TEXT[] REFERENCES array_key_parents (tags))",
+            using=db.name,
+        )
+        parent = await ArrayKeyParent.objects.create(
+            tags=["rust", "python"], using=db.name
+        )
+        for _ in range(2):
+            await ArrayKeyChild.objects.create(parent_tags=parent.tags, using=db.name)
+        await ArrayKeyChild.objects.create(parent_tags=None, using=db.name)
+
+        children = await (
+            ArrayKeyChild.objects.join("parent").order_by("id").all(using=db.name)
+        )
+        assert len(children) == 3
+        related = children[0].parent
+        assert related is not None
+        assert (related.id, related.tags) == (parent.id, parent.tags)
+        assert children[1].parent is related
+        assert children[2].parent is None
 
 
 class TestPrefetch:

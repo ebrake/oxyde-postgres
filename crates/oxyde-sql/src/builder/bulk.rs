@@ -7,7 +7,7 @@ use sea_query::ExprTrait;
 use sea_query::{CaseStatement, Cond, Expr, PostgresQueryBuilder, Query, SimpleExpr, Value};
 
 use crate::error::{QueryError, Result};
-use crate::filter::build_filter_node;
+use crate::filter::{build_filter_node_with_scope, ColumnScope};
 use crate::utils::{bind_value, typed_value_expr, ColumnIdent, TableIdent};
 use crate::Dialect;
 
@@ -84,7 +84,14 @@ pub fn build_bulk_update(
 
     if let Some(filter_tree) = &ir.filter_tree {
         let db_types = ir.column_db_types.as_ref();
-        let expr = build_filter_node(filter_tree, None, col_types, db_types, None, dialect)?;
+        let expr = build_filter_node_with_scope(
+            filter_tree,
+            ColumnScope::unqualified(&ir.table),
+            col_types,
+            db_types,
+            None,
+            dialect,
+        )?;
         query.and_where(expr);
     }
 

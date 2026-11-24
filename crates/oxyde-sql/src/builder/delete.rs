@@ -4,7 +4,7 @@ use oxyde_codec::QueryIR;
 use sea_query::{PostgresQueryBuilder, Query, Value};
 
 use crate::error::Result;
-use crate::filter::build_filter_node;
+use crate::filter::{build_filter_node_with_scope, ColumnScope};
 use crate::utils::TableIdent;
 use crate::Dialect;
 
@@ -16,9 +16,9 @@ pub fn build_delete(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
 
     // Add filters (no JOIN in DELETE, so no table qualification needed)
     if let Some(filter_tree) = &ir.filter_tree {
-        let expr = build_filter_node(
+        let expr = build_filter_node_with_scope(
             filter_tree,
-            None,
+            ColumnScope::unqualified(&ir.table),
             ir.column_types.as_ref(),
             ir.column_db_types.as_ref(),
             None,

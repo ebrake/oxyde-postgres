@@ -34,7 +34,7 @@ Functions:
 
 Auto-Registration:
     Models with Meta.is_table = True are automatically registered in
-    Model.__init_subclass__(). This happens at class definition time.
+    OxydeModelMeta.__new__() after Pydantic has created the model's fields.
 
     class User(Model):
         class Meta:

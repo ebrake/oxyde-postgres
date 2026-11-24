@@ -1,6 +1,6 @@
 # Oxyde for PostgreSQL — Rust core
 
-`oxyde-postgres-core` is the native Rust extension for [Oxyde for PostgreSQL](https://github.com/ebrake/oxyde-postgres), requiring PostgreSQL 18+ and Python 3.13+.
+`oxyde-postgres-core` is the native Rust extension for [Oxyde for PostgreSQL](https://github.com/ebrake/oxyde-postgres), requiring PostgreSQL 18+ and Python 3.15+.
 
 It provides PostgreSQL SQL generation, typed parameter binding, row decoding, connection pools, transactions, and migration support through the `_oxyde_core` module. Install `oxyde-postgres` for the Python ORM API.
 

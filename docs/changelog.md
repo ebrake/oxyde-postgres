@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+- Require Python 3.15+ for both packages. Native wheels target standard and
+  free-threaded CPython 3.15. Tests exercise both forms of native lazy import
+  in model modules and verify that the generated stubs pass static type checks.
+- Grouped output labels and related aggregate inputs require native core 0.3.5.
+  The minimum supported core is `oxyde-postgres-core>=0.3.5,<0.4.0`.
+  Native core 0.3.5 uses ABI 2. Upgrade both packages together because
+  oxyde-postgres 0.3.4 expects ABI 1.
+
+- Aggregates on PostgreSQL work with filters through foreign keys. Group keys,
+  aggregate inputs and `order_by()` can name related fields
+  (`group_by("author__name")`, `Sum("author__score")`,
+  `order_by("author__name")`) and join the related table themselves. Grouped
+  rows keep the requested names, including labels longer than PostgreSQL's
+  63-byte identifier limit. Terminal `.min()`/`.max()` and `Min`/`Max`
+  annotations now decode like the input field. For example,
+  `.max("duration")` on a timedelta field returns a `timedelta`.
+  `COUNT`/`SUM`/`AVG` aliases decode by their own result type. A column
+  whose `db_column` contains a dot is quoted as one identifier. Low-level
+  filters accept qualified references such as `posts.id`.
+- In grouping, aggregates and ordering, a name that is both a relation path
+  and a raw `db_column` (a `supplier` foreign key next to
+  `db_column="supplier__name"`) now names the related field, as in `filter()`.
+  Use the field name for the column. Non-grouped `values()` keeps the raw
+  column meaning.
+- Joined rows assign related columns to their relation by position. A base
+  column named like a related one (`db_column="supplier__name"` next to a
+  joined `supplier`) keeps its value and type, and nested joins
+  (`join("post__author")`) load each level, including when PostgreSQL truncates
+  long join labels. Flat results reject duplicate column labels across joins.
+- `group_by()` accepts selected scalar annotations. Default projections can
+  order a same-model UNION by a related field.
+- Joins honor the target field specified by `db_fk` and deduplicate related
+  rows by their primary key, including when the foreign key references an array.
+  Nested join aliases use the full path, such as `post__author`.
+  Update any `RawSQL` that refers to
+  the former `post_author` alias. Conflicting aliases receive a suffix.
+- `for_update()` and `for_share()` with joins lock the base table's rows
+  using `FOR UPDATE OF` and `FOR SHARE OF`.
+- Raw queries with an explicit projection omit joined result columns.
+  Non-grouped `distinct()` model queries keep joined relations when their
+  projection includes the primary key. A non-grouped `distinct()` query that
+  omits joined columns raises `ValueError` if it orders by a related field.
+- `UNION` operands use the same join projection. Flat row fetches raise
+  `ValueError` if a joined result would overwrite a base model field.
+
 - Database hydration uses Pydantic's compiled validator without the
   primary-key tracking callback when the returned row supplies the key.
   Database field names apply at the row boundary, and nested JSON models use
@@ -35,9 +80,8 @@
 - A partial select tracks the fields returned by the database. Assignments
   made during model validation to unselected fields are excluded from the
   default `save()` update.
-- `save()` sends `update_columns` and value-less DO UPDATE IR that core 0.3.3
-  rejects or ignores. The minimum supported core is now
-  `oxyde-postgres-core>=0.3.4,<0.4.0`.
+- `save()` sends `update_columns` and value-less DO UPDATE IR supported by
+  core 0.3.4 and later.
 - `InsertQuery.bulk_values()` keeps `on_conflict_do_nothing()` and
   `on_conflict_update()` clauses.
 - `Field(alias=...)` now works like `pydantic.Field(alias=...)`: the alias is

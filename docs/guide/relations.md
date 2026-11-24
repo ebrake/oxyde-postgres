@@ -331,63 +331,17 @@ async def main():
 
 ## Type Annotations and Forward References
 
-Oxyde uses Python type annotations to define foreign keys. The annotation syntax
-depends on whether the target model is already defined at the point of reference.
-
-### Target model is defined above — use the type directly
+Oxyde uses type annotations to define relationships. Python defers evaluating
+annotations, so a field can reference its own model or one defined later in
+the module:
 
 ```python
-class Author(Model):
-    ...
-
 class Post(Model):
-    author: Author | None = Field(default=None, db_on_delete="CASCADE")  # ✓ Author is defined above
-```
-
-### Target model is not yet defined — forward reference
-
-If a model references another model defined **later** in the same file (or itself),
-Python will raise a `NameError` or `TypeError` because the name doesn't exist yet.
-
-**Solution:** add `from __future__ import annotations` at the top of the module.
-This makes all annotations lazy (stored as strings, evaluated later), so any name
-can be used regardless of definition order:
-
-```python
-from __future__ import annotations
-
-class Post(Model):
-    author: Author | None = Field(default=None, db_on_delete="CASCADE")  # ✓ Works even though Author is below
+    author: Author | None = Field(default=None, db_on_delete="CASCADE")
 
 class Author(Model):
-    ...
+    posts: list[Post] = Field(db_reverse_fk="author")
 ```
-
-Without `from __future__ import annotations`, you would get:
-
-- `author: Author | None` → `NameError: name 'Author' is not defined`
-- `author: "Author" | None` → `TypeError: unsupported operand type(s) for |: 'str' and 'NoneType'`
-
-### String annotations inside generics
-
-For reverse FK and M2M fields, string annotations inside `list[]` always work
-because they are resolved by Pydantic, not by Python's `|` operator:
-
-```python
-class Author(Model):
-    posts: list["Post"] = Field(db_reverse_fk="author")  # ✓ Always works
-```
-
-### Python version notes
-
-| Python | Behavior |
-|--------|----------|
-| 3.13 | Annotations are evaluated eagerly. Use `from __future__ import annotations` for forward references. |
-| 3.14+ | Annotations are lazy by default ([PEP 749](https://peps.python.org/pep-0749/)). Forward references work without any import. |
-
-**Recommendation:** define models in dependency order (referenced models first) and you won't need
-any special imports. Use `from __future__ import annotations` only when the order can't be arranged
-(e.g., self-referential FK, circular references).
 
 ## Limitations
 

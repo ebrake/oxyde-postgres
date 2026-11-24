@@ -18,6 +18,7 @@ from oxyde.models.registry import registered_tables
 from oxyde.models.utils import _AggregateFieldsSet, _LoadedFieldsSet
 from oxyde.queries.base import (
     SupportsExecute,
+    _collect_model_columns,
     _primary_key_meta,
     _resolve_execution_client,
     _resolve_registered_model,
@@ -78,7 +79,12 @@ class ExecutionMixin(Generic[TModel]):
         raise NotImplementedError
 
     def _build_ir(
-        self, *, for_models: bool, append_pk: bool | None = None
+        self,
+        *,
+        for_models: bool,
+        append_pk: bool | None = None,
+        project_joins: bool | None = None,
+        union_join_paths: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """Must be implemented by the main Query class."""
         raise NotImplementedError
@@ -86,6 +92,49 @@ class ExecutionMixin(Generic[TModel]):
     def _has_aggregate_annotations(self) -> bool:
         """Must be implemented by the main Query class."""
         raise NotImplementedError
+
+    def _is_grouped(self) -> bool:
+        """Must be implemented by the main Query class."""
+        raise NotImplementedError
+
+    def _union_projects_joins(
+        self, for_models: bool, *, append_pk: bool = False
+    ) -> bool:
+        """Must be implemented by the main Query class."""
+        raise NotImplementedError
+
+    def _planned_join_specs(
+        self, paths: tuple[str, ...] | None = None
+    ) -> dict[str, _JoinDescriptor]:
+        """Must be implemented by the main Query class."""
+        raise NotImplementedError
+
+    def _grouped_labels(
+        self, join_specs: dict[str, _JoinDescriptor]
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Must be implemented by the main Query class."""
+        raise NotImplementedError
+
+    def _result_columns(self, columns: list[str]) -> list[str]:
+        """Restore requested field names from SQL result column labels."""
+        if self._is_grouped():
+            _, restored = self._grouped_labels(self._planned_join_specs())
+            return [restored.get(column, column) for column in columns]
+        return _remap_columns(columns, self.model_class)
+
+    def _restore_aggregate_timedeltas(
+        self, columns: list[str], rows: list[list[Any]]
+    ) -> None:
+        """Must be implemented by AggregationMixin."""
+        raise NotImplementedError
+
+    def _columnar_rows(
+        self, columns: list[str], values: list[list[Any]]
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        if self._annotations:
+            self._restore_aggregate_timedeltas(columns, values)
+        columns = self._result_columns(columns)
+        return columns, [dict(zip(columns, row)) for row in values]
 
     def limit(self, value: int) -> Self:
         """Must be implemented by PaginationMixin."""
@@ -95,19 +144,46 @@ class ExecutionMixin(Generic[TModel]):
         """Must be implemented by FilteringMixin."""
         raise NotImplementedError
 
-    def _join_specs_to_ir(self) -> list[dict[str, Any]]:
-        """Must be implemented by JoiningMixin."""
-        raise NotImplementedError
+    def _check_flat_relation_columns(self) -> None:
+        if self._is_grouped() or not self._union_projects_joins(for_models=False):
+            return
+        join_specs = self._planned_join_specs()
+        if not join_specs:
+            return
+
+        seen: dict[str, str | None] = {
+            field: None for field, _ in _collect_model_columns(self.model_class)
+        }
+        # The default flat projection emits every scalar annotation.
+        seen.update({alias: f"annotation {alias!r}" for alias in self._annotations})
+        for join in join_specs.values():
+            for field, _ in join.columns:
+                label = f"{join.result_prefix}__{field}"
+                source = f"join {join.path!r} field {field!r}"
+                if label not in seen:
+                    seen[label] = source
+                    continue
+                previous = seen[label]
+                if previous is None:
+                    raise ValueError(
+                        f"Base field {label!r} collides with a column from join "
+                        f"{join.path!r}. Use .all() or fetch_models() to keep "
+                        "them separate, or use values() with explicit fields."
+                    )
+                raise ValueError(
+                    f"Flat result column {label!r} collides between {previous} "
+                    f"and {source}. Use values() with explicit fields."
+                )
 
     async def fetch_all(self, client: SupportsExecute) -> list[Any]:
         """Execute query and return all results as dicts."""
+        self._check_flat_relation_columns()
         result_bytes = await self.fetch_msgpack(client)
         # strict_map_key=False: join results carry a relations map keyed by int
         data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
 
         # Columnar format from Rust: [columns, rows]
-        columns = _remap_columns(data[0], self.model_class)
-        rows = [dict(zip(columns, row)) for row in data[1]]
+        _, rows = self._columnar_rows(data[0], data[1])
         if len(data) == 3 and self._selected_fields is None:
             # JOIN without an explicit field list: Rust moved the joined
             # columns into a deduplicated relations map; put them back as
@@ -156,14 +232,24 @@ class ExecutionMixin(Generic[TModel]):
 
         Uses direct msgpack path (no batching) for maximum speed on simple queries.
         """
+        self._check_flat_relation_columns()
         result_bytes = await self.fetch_msgpack(client)
-        data = msgpack.unpackb(result_bytes, raw=False)
+        # strict_map_key=False: join results carry a relations map keyed by int
+        data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
         del result_bytes
-        if isinstance(data, (list, tuple)) and len(data) == 2:
-            first, second = data
+        if isinstance(data, (list, tuple)) and len(data) in (2, 3):
+            first, second = data[0], data[1]
             if isinstance(first, list) and all(isinstance(c, str) for c in first):
-                columns = _remap_columns(first, self.model_class)
-                return [dict(zip(columns, row)) for row in second]
+                _, rows = self._columnar_rows(first, second)
+                if (
+                    self._selected_fields is None
+                    and len(data) == 3
+                    and isinstance(data[2], dict)
+                ):
+                    # Joined rows: put the related columns back as flat
+                    # "<prefix>__<column>" keys, as fetch_all does.
+                    _merge_relation_columns(rows, data[2])
+                return rows
         return data if isinstance(data, list) else []
 
     async def fetch_models(self, client: SupportsExecute) -> list[TModel]:
@@ -186,6 +272,7 @@ class ExecutionMixin(Generic[TModel]):
             )
 
         model_class = self.model_class
+        join_specs = self._planned_join_specs()
 
         result_bytes = await client.execute(self._build_ir(for_models=True))
         data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
@@ -196,13 +283,12 @@ class ExecutionMixin(Generic[TModel]):
         if (
             isinstance(data, (list, tuple))
             and len(data) == 3
-            and self._join_specs
+            and join_specs
             and isinstance(data[2], dict)
         ):
             # Dedup format: [main_columns, main_rows, relations_map]
             main_columns, main_rows, relations_map = data
-            columns = _remap_columns(main_columns, model_class)
-            rows = [dict(zip(columns, row)) for row in main_rows]
+            columns, rows = self._columnar_rows(main_columns, main_rows)
             del main_rows, data
         elif (
             isinstance(data, (list, tuple))
@@ -212,8 +298,7 @@ class ExecutionMixin(Generic[TModel]):
         ):
             # Columnar format: [columns, rows] (columns may be empty for 0 rows)
             raw_columns, row_values = data
-            columns = _remap_columns(raw_columns, model_class)
-            rows = [dict(zip(columns, row)) for row in row_values]
+            columns, rows = self._columnar_rows(raw_columns, row_values)
             del row_values, data
         else:
             rows = data if isinstance(data, list) else []
@@ -254,7 +339,7 @@ class ExecutionMixin(Generic[TModel]):
                     )
 
         if relations_map is not None:
-            self._hydrate_from_dedup(models, relations_map)
+            self._hydrate_from_dedup(models, relations_map, list(join_specs.values()))
         if self._prefetch_paths:
             await self._run_prefetch(models, client)
         return models
@@ -469,19 +554,21 @@ class ExecutionMixin(Generic[TModel]):
         self,
         models: Sequence[Model],
         relations_map: dict[str, Any],
+        join_specs: Sequence[_JoinDescriptor],
     ) -> None:
         """Hydrate joined relations from Rust dedup format.
 
         Args:
             models: Main model instances (already validated)
             relations_map: {prefix: {columns, data, refs}} from Rust encoder
+            join_specs: The joins the query ran, including implicit ones
         """
-        if not models or not self._join_specs:
+        if not models or not join_specs:
             return
 
         # Sort specs by depth (shallow first) for nested joins
         ordered_specs = sorted(
-            self._join_specs,
+            join_specs,
             key=lambda spec: spec.path.count("__"),
         )
 

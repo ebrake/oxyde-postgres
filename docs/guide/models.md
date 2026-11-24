@@ -577,8 +577,9 @@ errors.
 A generated stub shadows the whole Python module, so it also preserves public
 constants, aliases, supporting classes, intentional reexports, decorators,
 PEP 695 type parameters, and imports guarded by `TYPE_CHECKING`. Async generator
-signatures retain async iteration and `asynccontextmanager` compatibility;
-Python 3.15 lazy imports become ordinary imports in portable stubs.
+signatures retain async iteration and `asynccontextmanager` typing. Model modules
+can use `lazy import` and `lazy from … import`. Both forms become ordinary imports
+in generated stubs. [PEP 810](https://peps.python.org/pep-0810/)
 
 Regenerate stubs when model fields or module interfaces change. The repository
 checks the generated interfaces and expected type errors with mypy, pyright,

@@ -24,11 +24,11 @@ jobs:
           version: "latest"
 
       - name: Set up Python
-        run: uv python install 3.13
+        run: uv python install 3.15
 
       - name: Build package
         working-directory: python
-        run: uv build --no-sources
+        run: uv build --no-sources --python 3.15
 
       - name: Verify licenses and metadata
         run: python scripts/check_release_artifacts.py python/dist --package oxyde-postgres
@@ -43,18 +43,14 @@ jobs:
     name: Test installation
     needs: build
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.13', '3.14', '3.15']
 
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v6.2.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.15'
 
       - name: Download artifacts
         uses: actions/download-artifact@v8.0.1

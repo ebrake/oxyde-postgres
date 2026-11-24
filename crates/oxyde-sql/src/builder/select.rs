@@ -3,13 +3,14 @@
 use oxyde_codec::{JoinSpec, LockType as OxydeLockType, QueryIR};
 use sea_query::ExprTrait;
 use sea_query::{
-    Alias, Asterisk, Expr, Func, IntoColumnRef, IntoTableRef, LockType as SeaLockType, Order,
-    PostgresQueryBuilder, Query, SelectStatement, UnionType, Value,
+    Alias, Asterisk, ColumnRef, Expr, Func, IntoColumnRef, IntoTableRef, LockType as SeaLockType,
+    Order, PostgresQueryBuilder, Query, SelectStatement, UnionType, Value,
 };
 
-use crate::aggregate::build_aggregate;
+use crate::aggregate::build_aggregate_for_table;
 use crate::error::{QueryError, Result};
-use crate::filter::build_filter_node;
+use crate::filter::{build_filter_node_with_scope, ColumnScope};
+use crate::utils::identifier::{grouped_projection, output_label, resolve_column};
 use crate::utils::{compile_scalar, ColumnIdent, ExprTypes, TableIdent};
 use crate::Dialect;
 
@@ -20,7 +21,8 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
     let mut query = Query::select();
     query.from(table.clone());
 
-    if ir.distinct.unwrap_or(false) {
+    let distinct = ir.distinct.unwrap_or(false);
+    if distinct {
         query.distinct();
     }
 
@@ -31,11 +33,18 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
         ));
     }
 
-    // `{result_prefix}__*` result columns are routed into the joined relation
-    // by the encoder, so an annotation alias in that namespace would vanish
-    // from the main rows.
-    for annotation in annotations {
-        if let Some(join) = ir.joins.iter().flatten().find(|j| {
+    let group_by = ir.group_by.as_deref().unwrap_or_default();
+    let grouped = ir.aggregates.is_some() || !group_by.is_empty();
+    let joins = ir.joins.as_deref().unwrap_or_default();
+    let exists = ir.exists.unwrap_or(false);
+    // EXISTS can omit related columns unless they are part of the UNION
+    // projection. Both UNION operands need to keep their normal row shape.
+    let project_joins = ir.projects_join_columns()
+        || (exists && ir.union_query.is_some() && !grouped && ir.project_joins != Some(false));
+    // Reserve `{result_prefix}__*` for columns owned by the joined relation
+    // across both raw projections and model hydration.
+    for annotation in annotations.iter().filter(|_| !grouped) {
+        if let Some(join) = joins.iter().find(|j| {
             annotation
                 .alias
                 .strip_prefix(j.result_prefix.as_str())
@@ -48,27 +57,72 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
         }
     }
 
+    let default_table = ir.joins.as_ref().map(|_| ir.table.as_str());
+    let column_scope = ColumnScope {
+        base_table: Some(&ir.table),
+        table: default_table,
+        joins,
+    };
+    // Column and output label of a grouped projection. The label is the name
+    // the caller asked for, so a related key never shares a label with a base
+    // column whose name looks like the relation path.
+    let projected_column = |field: &str| -> (ColumnRef, String) {
+        let column =
+            resolve_column(Some(&ir.table), joins, field, false).column_ref(Some(&ir.table));
+        (column, output_label(ir, field))
+    };
+    let annotation_index = |field: &str| annotations.iter().position(|a| a.alias == field);
+    let is_aggregate_alias = |field: &str| {
+        ir.aggregates
+            .iter()
+            .flatten()
+            .any(|agg| agg.alias.as_deref() == Some(field))
+    };
+
+    if grouped {
+        for field in ir.cols.iter().flatten() {
+            if resolve_column(Some(&ir.table), joins, field, false)
+                .join
+                .is_some()
+                && !group_by.contains(field)
+                && !is_aggregate_alias(field)
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "Related field '{field}' must be in group_by() to be returned by an aggregate query"
+                )));
+            }
+        }
+    }
+
     // Add aggregates or columns
     if let Some(aggregates) = &ir.aggregates {
+        let group_projection = grouped_projection(ir)
+            .iter()
+            .map(|field| projected_column(field))
+            .collect::<Vec<_>>();
         for agg in aggregates {
-            let agg_expr = build_aggregate(agg)?;
+            let agg_expr = build_aggregate_for_table(agg, Some(&ir.table), default_table, joins)?;
             if let Some(alias) = &agg.alias {
+                if group_projection.iter().any(|(_, name)| name == alias) {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "Aggregate alias '{alias}' duplicates a group_by() column; choose another name"
+                    )));
+                }
                 query.expr_as(agg_expr, Alias::new(alias.clone()));
             } else {
                 query.expr(agg_expr);
             }
         }
-        if let Some(group_by) = &ir.group_by {
-            for field in group_by {
-                let column_ref = (table.clone(), ColumnIdent(field.clone())).into_column_ref();
-                query.expr_as(Expr::col(column_ref), Alias::new(field.clone()));
-            }
+        for (column, name) in &group_projection {
+            query.expr_as(Expr::col(column.clone()), Alias::new(name.clone()));
         }
     } else if let Some(cols) = &ir.cols {
         for col in cols {
-            let column_ref = (table.clone(), ColumnIdent(col.clone())).into_column_ref();
-            query.expr_as(Expr::col(column_ref), Alias::new(col.clone()));
+            let (column, name) = projected_column(col);
+            query.expr_as(Expr::col(column), Alias::new(name));
         }
+    } else if !joins.is_empty() && !project_joins {
+        query.column((table.clone(), Asterisk));
     } else {
         query.column(Asterisk);
     }
@@ -82,16 +136,10 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
         query.expr_as(expr, Alias::new(annotation.alias.clone()));
     }
 
-    let default_table = if ir.joins.is_some() {
-        Some(ir.table.as_str())
-    } else {
-        None
-    };
-
     if let Some(filter_tree) = &ir.filter_tree {
-        let expr = build_filter_node(
+        let expr = build_filter_node_with_scope(
             filter_tree,
-            default_table,
+            column_scope,
             ir.column_types.as_ref(),
             ir.column_db_types.as_ref(),
             None,
@@ -100,21 +148,26 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
         query.and_where(expr);
     }
 
-    if let Some(group_by) = &ir.group_by {
-        for field in group_by {
-            let col_expr = if ir.joins.is_some() {
-                Expr::col((table.clone(), ColumnIdent(field.clone())).into_column_ref())
-            } else {
-                Expr::col(ColumnIdent(field.clone()))
-            };
-            query.add_group_by([col_expr]);
-        }
+    for field in group_by {
+        let expr = if let Some(idx) = annotation_index(field) {
+            // An ordinal avoids input-column shadowing and reuses any binds
+            // in the selected expression. Raw IR with * has unknown width.
+            match &ir.cols {
+                Some(cols) => Expr::cust((cols.len() + idx + 1).to_string()),
+                None => Expr::col(ColumnIdent(field.clone())),
+            }
+        } else {
+            Expr::col(
+                resolve_column(Some(&ir.table), joins, field, false).column_ref(default_table),
+            )
+        };
+        query.add_group_by([expr]);
     }
 
     if let Some(having) = &ir.having {
-        let expr = build_filter_node(
+        let expr = build_filter_node_with_scope(
             having,
-            default_table,
+            column_scope,
             ir.column_types.as_ref(),
             ir.column_db_types.as_ref(),
             ir.aggregates.as_deref(),
@@ -124,7 +177,11 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
     }
 
     if let Some(joins) = &ir.joins {
-        apply_select_joins(&mut query, joins, &table);
+        if project_joins {
+            apply_select_joins(&mut query, joins, &table);
+        } else {
+            apply_joins_only(&mut query, joins, &table);
+        }
     }
 
     // UNION via sea-query (recursive)
@@ -139,7 +196,9 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
     }
 
     // ORDER BY, LIMIT, OFFSET — placed after UNION by sea-query
-    if let Some(order_by) = &ir.order_by {
+    // A DISTINCT subquery can omit its ordering for EXISTS, where an
+    // ordering expression might no longer be projected.
+    if let Some(order_by) = ir.order_by.as_ref().filter(|_| !exists || !distinct) {
         for (field, direction) in order_by {
             if field == "?" {
                 query.order_by_expr(Func::random().into(), Order::Asc);
@@ -150,14 +209,32 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
                 "DESC" => Order::Desc,
                 _ => Order::Asc,
             };
-            // An annotation alias is an output column, not a table column:
-            // never qualify it.
-            let is_alias = annotations.iter().any(|a| &a.alias == field);
-            if ir.joins.is_some() && !is_alias {
-                let col_ref = (table.clone(), ColumnIdent(field.clone())).into_column_ref();
-                query.order_by(col_ref, order);
-            } else {
+            let is_alias = annotation_index(field).is_some() || is_aggregate_alias(field);
+            if ir.union_query.is_some() {
+                if let Some(ordinal) = union_order_ordinal(ir, joins, field, project_joins) {
+                    query.order_by_expr(Expr::cust(ordinal.to_string()), order);
+                } else if ir.cols.is_some() || ir.aggregates.is_some() {
+                    return Err(QueryError::InvalidQuery(
+                        "UNION can only be ordered by a projected column".into(),
+                    ));
+                } else {
+                    let label = if is_alias {
+                        field.clone()
+                    } else {
+                        output_label(ir, field)
+                    };
+                    query.order_by(ColumnIdent(label), order);
+                }
+            } else if is_alias {
+                // Output aliases are unqualified in ORDER BY.
                 query.order_by(ColumnIdent(field.clone()), order);
+            } else {
+                // A bare ORDER BY name resolves to an output column first, and
+                // output labels can name another column than this one.
+                let table = (default_table.is_some() || ir.output_labels.is_some())
+                    .then_some(ir.table.as_str());
+                let column = resolve_column(Some(&ir.table), joins, field, false);
+                query.order_by(column.column_ref(table), order);
             }
         }
     }
@@ -171,10 +248,15 @@ fn build_select_statement(ir: &QueryIR, dialect: Dialect) -> Result<SelectStatem
     }
 
     if let Some(lock_type) = &ir.lock {
-        match lock_type {
-            OxydeLockType::Update => query.lock(SeaLockType::Update),
-            OxydeLockType::Share => query.lock(SeaLockType::Share),
+        let lock = match lock_type {
+            OxydeLockType::Update => SeaLockType::Update,
+            OxydeLockType::Share => SeaLockType::Share,
         };
+        if joins.is_empty() {
+            query.lock(lock);
+        } else {
+            query.lock_with_tables(lock, [table]);
+        }
     }
 
     Ok(query)
@@ -197,16 +279,15 @@ pub fn build_select(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
         count_query.from(table.clone());
         count_query.expr_as(Func::count(Expr::col(Asterisk)), Alias::new("_count"));
 
-        let default_table = if ir.joins.is_some() {
-            Some(ir.table.as_str())
-        } else {
-            None
-        };
-
+        let joins = ir.joins.as_deref().unwrap_or_default();
         if let Some(filter_tree) = &ir.filter_tree {
-            let expr = build_filter_node(
+            let expr = build_filter_node_with_scope(
                 filter_tree,
-                default_table,
+                ColumnScope {
+                    base_table: Some(&ir.table),
+                    table: ir.joins.as_ref().map(|_| ir.table.as_str()),
+                    joins,
+                },
                 ir.column_types.as_ref(),
                 ir.column_db_types.as_ref(),
                 None,
@@ -215,21 +296,68 @@ pub fn build_select(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
             count_query.and_where(expr);
         }
 
-        if let Some(joins) = &ir.joins {
-            apply_joins_only(&mut count_query, joins, &table);
-        }
+        apply_joins_only(&mut count_query, joins, &table);
 
         return Ok(build_query_string(&count_query, dialect));
     }
 
+    let exists = ir.exists.unwrap_or(false);
     let query = build_select_statement(ir, dialect)?;
     let (sql, values) = build_query_string(&query, dialect);
 
-    if ir.exists.unwrap_or(false) {
+    if exists {
         return Ok((format!("SELECT EXISTS({sql})"), values));
     }
 
     Ok((sql, values))
+}
+
+/// Find the UNION output position so sorting survives duplicate or truncated labels.
+fn union_order_ordinal(
+    ir: &QueryIR,
+    joins: &[JoinSpec],
+    field: &str,
+    project_joins: bool,
+) -> Option<usize> {
+    let (cols, offset) = if let Some(aggregates) = &ir.aggregates {
+        if let Some(index) = aggregates
+            .iter()
+            .position(|agg| agg.alias.as_deref() == Some(field))
+        {
+            return Some(index + 1);
+        }
+        (grouped_projection(ir), aggregates.len())
+    } else {
+        (ir.cols.as_deref()?, 0)
+    };
+    let annotations = ir.annotations.as_deref().unwrap_or_default();
+    if let Some(index) = annotations.iter().position(|a| a.alias == field) {
+        return Some(cols.len() + index + 1);
+    }
+    let table = Some(ir.table.as_str());
+    let column = resolve_column(table, joins, field, false);
+    let reference = column.column_ref(table);
+    if let Some(index) = cols
+        .iter()
+        .position(|col| resolve_column(table, joins, col, false).column_ref(table) == reference)
+    {
+        return Some(offset + index + 1);
+    }
+
+    let target = column.join.filter(|_| project_joins)?;
+    // Join projections follow the base columns and scalar annotations.
+    let mut offset = offset + cols.len() + annotations.len();
+    for join in joins {
+        if std::ptr::eq(join, target) {
+            return join
+                .columns
+                .iter()
+                .position(|candidate| candidate.column == column.column)
+                .map(|index| offset + index + 1);
+        }
+        offset += join.columns.len();
+    }
+    None
 }
 
 /// Apply LEFT JOINs and add joined columns to SELECT (with `prefix__field` aliases).
@@ -261,7 +389,7 @@ fn apply_select_joins(
     }
 }
 
-/// Apply JOINs without adding columns to SELECT (for COUNT queries)
+/// Apply JOINs for filtering without projecting related columns.
 fn apply_joins_only(
     query: &mut sea_query::SelectStatement,
     joins: &[JoinSpec],

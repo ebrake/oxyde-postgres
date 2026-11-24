@@ -315,25 +315,6 @@ class TestAssembleImports:
         assert not any(line.startswith("from uuid import") for line in lines)
         ast.parse("\n".join(lines))
 
-    @pytest.mark.parametrize(
-        "source", ["import sibling", "from sibling import Related"]
-    )
-    def test_lazy_flag_cleared_on_copy(self, source, monkeypatch):
-        imports = self._imports(source)
-        setattr(imports[0], "is_lazy", True)
-        unparse = ast.unparse
-
-        def check_eager(node):
-            assert getattr(node, "is_lazy") is False
-            return unparse(node)
-
-        monkeypatch.setattr(ast, "unparse", check_eager)
-        _assemble_imports(imports, "value: sibling.Related | Related")
-        assert getattr(imports[0], "is_lazy") is True
-
-    @pytest.mark.skipif(
-        sys.version_info < (3, 15), reason="requires native lazy imports"
-    )
     def test_native_lazy_imports_render_as_ordinary_imports(self):
         imports = self._imports(
             "lazy import sibling\nlazy from sibling import Related\n"
@@ -342,6 +323,7 @@ class TestAssembleImports:
         assert "import sibling" in lines
         assert "from sibling import Related" in lines
         assert all(not line.startswith("lazy ") for line in lines)
+        assert all(node.is_lazy for node in imports)
 
 
 class TestModuleExports:

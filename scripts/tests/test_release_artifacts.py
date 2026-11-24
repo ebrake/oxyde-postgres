@@ -28,7 +28,7 @@ class ReleaseArtifactTests(unittest.TestCase):
         author=True,
         windows_newlines=False,
         description="",
-        requires_python=">=3.13",
+        requires_python=">=3.15",
     ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

@@ -82,16 +82,10 @@ Key concepts:
 
 !!! note "Type annotations and model definition order"
 
-    Oxyde uses Python type annotations to define foreign keys. The FK target class
-    must be **already defined** above the model that references it. In the example above,
-    `Author` is defined before `Post`, so `author: Author | None` works directly.
-
-    If you need to reference a model that is defined **later** in the file (a forward reference),
-    add `from __future__ import annotations` at the top of your module:
+    Oxyde uses type annotations to define foreign keys. Python defers evaluating
+    annotations, so a field can reference a model defined later in the module:
 
     ```python
-    from __future__ import annotations  # all annotations become lazy strings
-
     class Post(Model):
         author: Author | None = Field(default=None, db_on_delete="CASCADE")
         # Works even though Author is defined below
@@ -99,13 +93,6 @@ Key concepts:
     class Author(Model):
         ...
     ```
-
-    Without this import, a forward reference like `author: Author | None` will raise
-    a `NameError` (Python 3.13). Starting with Python 3.14, annotations are lazy
-    by default and this import is no longer needed.
-
-    Alternatively, you can use a string literal inside generic types for reverse relations:
-    `comments: list["Comment"]` — this is handled by Pydantic and works on all Python versions.
 
 ## Step 3: Create and Apply Migrations
 

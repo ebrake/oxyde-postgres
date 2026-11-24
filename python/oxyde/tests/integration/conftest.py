@@ -389,12 +389,90 @@ class ArrayShadowJson(Model):
         table_name = "array_shadow_jsons"
 
 
+class Supplier(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    name: str = Field(default="", max_length=50)
+    rating: int = 0
+
+    class Meta:
+        is_table = True
+        table_name = "suppliers"
+
+
+class SuppliedItem(Model):
+    """A base column named like the ``supplier__name`` relation path."""
+
+    id: int | None = Field(default=None, db_pk=True)
+    supplier: Supplier | None = None
+    cached_supplier: str = Field(default="", max_length=50, db_column="supplier__name")
+    amount: int = Field(default=0, db_column="supplier.rating")
+
+    class Meta:
+        is_table = True
+        table_name = "supplied_items"
+
+
+class Tenant(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    uuid: UUID = Field(
+        default_factory=uuid.uuid4, db_unique=True, db_column="tenant_uuid"
+    )
+    name: str
+    duration: timedelta
+
+    class Meta:
+        is_table = True
+        table_name = "tenants"
+
+
+class TenantItem(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    tenant: Tenant | None = Field(default=None, db_fk="uuid", db_nullable=False)
+    exists: timedelta = Field(db_column="elapsed_us")
+    customer_facing_reporting_label_that_exceeds_the_postgresql_identifier_limit: str = Field(
+        db_column="reporting_label"
+    )
+
+    class Meta:
+        is_table = True
+        table_name = "tenant_items"
+
+
+class ReviewLink(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    post: Post | None = None
+    post_author: Author | None = None
+
+    class Meta:
+        is_table = True
+        table_name = "review_links"
+
+
+class ReviewGroup(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    contributor_link_for_review_reports: ReviewLink | None = None
+
+    class Meta:
+        is_table = True
+        table_name = "review_groups"
+
+
+class ReviewReport(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    regional_reporting_group_for_review: ReviewGroup | None = None
+
+    class Meta:
+        is_table = True
+        table_name = "review_reports"
+
+
 ALL_MODELS = [
     Event, AliasedEvent, Author, Category, Post, Comment, Tag, PostTag,
     AllTypes, NullableTypes, BytesModel, TdModel, Product, FactoryKeyed, Singleton,
     ExcludedNamed, RenamedParent, RenamedChild, ConvertedValues,
     AliasCollision, AliasCollisionChild,
-    ArrayDoc, ArrayNote, ArrayShadow, ArrayShadowJson,
+    ArrayDoc, ArrayNote, ArrayShadow, ArrayShadowJson, Supplier, SuppliedItem,
+    Tenant, TenantItem, ReviewLink, ReviewGroup, ReviewReport,
 ]
 
 

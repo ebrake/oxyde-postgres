@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 
-from oxyde import Field, Model
+from oxyde import F, Field, Model
+from oxyde.models.registry import register_table
 from oxyde.queries.aggregates import (
     Aggregate,
     Avg,
@@ -16,6 +19,7 @@ from oxyde.queries.aggregates import (
     RawSQL,
     Sum,
 )
+from oxyde.queries.expressions import Lower
 from oxyde.tests.helpers import StubExecuteClient
 
 
@@ -31,6 +35,423 @@ class Product(Model):
 
     class Meta:
         is_table = True
+
+
+class AggregateSupplier(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    name: str
+    rating: int = Field(default=0, db_column="supplier_rating")
+
+    class Meta:
+        is_table = True
+
+
+class BucketPost(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    title: str = Field(db_column="bucket")
+
+    class Meta:
+        is_table = True
+
+
+class SuppliedProduct(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    supplier: AggregateSupplier | None = None
+    cached_supplier: str = Field(default="", db_column="supplier__name")
+
+    class Meta:
+        is_table = True
+
+
+class Tenant(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    uuid: UUID = Field(db_unique=True, db_column="tenant_uuid")
+    name: str
+
+    class Meta:
+        is_table = True
+
+
+class TenantItem(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    tenant: Tenant = Field(db_fk="uuid")
+
+    class Meta:
+        is_table = True
+
+
+class ReviewPost(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    title: str
+    author: AggregateSupplier
+    regional_affiliate_with_a_long_name_east: AggregateSupplier
+    regional_affiliate_with_a_long_name_west: AggregateSupplier
+
+    class Meta:
+        is_table = True
+
+
+class ReviewComment(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    post: ReviewPost
+    post_author: AggregateSupplier
+    department_with_a_long_name_for_reporting: ReviewPost
+
+    class Meta:
+        is_table = True
+        table_name = "post"
+
+
+class QuotedProduct(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    supplier: AggregateSupplier
+    amount: int = Field(db_column="supplier.rating")
+
+    class Meta:
+        is_table = True
+
+
+def test_explicit_filter_and_group_joins_use_the_fk_target_column():
+    register_table(Tenant)
+    queries = (
+        TenantItem.objects.join("tenant"),
+        TenantItem.objects.filter(tenant__name="Acme"),
+        TenantItem.objects.annotate(n=Count("*")).group_by("tenant__name"),
+    )
+    for query in queries:
+        assert query.to_ir()["joins"][0]["target_column"] == "tenant_uuid"
+        sql, _ = query.sql()
+        assert '"tenant"."tenant_uuid"' in sql
+
+
+def test_nested_join_keeps_distinct_path_and_reuses_parent_alias():
+    register_table(AggregateSupplier)
+    register_table(ReviewPost)
+    query = (
+        ReviewComment.objects.filter(post__author__name="Alice")
+        .group_by("post_author__name", "post__author__name")
+        .values("post_author__name", "post__author__name")
+    )
+    ir = query.to_ir()
+    joins = {join["path"]: join for join in ir["joins"]}
+
+    assert joins["post"]["alias"] == "post_2"
+    assert joins["post__author"]["parent"] == "post_2"
+    assert joins["post__author"]["alias"] == "post__author"
+    assert joins["post_author"]["alias"] == "post_author"
+    assert ir["group_by"] == ["post_author.name", "post__author.name"]
+    sql, _ = query.sql()
+    assert '"post_2"."author_id" = "post__author"."id"' in sql
+    assert 'WHERE "post__author"."name" = $1' in sql
+
+
+def test_dotted_base_column_reserves_the_join_alias():
+    register_table(AggregateSupplier)
+    query = (
+        QuotedProduct.objects.join("supplier")
+        .filter(amount=7, supplier__rating=11)
+        .order_by("amount", "supplier__rating")
+    )
+    ir = query.to_ir()
+    assert ir["joins"][0]["alias"] == "supplier_2"
+    assert ir["order_by"] == [
+        ("supplier.rating", "ASC"),
+        ("supplier_2.supplier_rating", "ASC"),
+    ]
+    sql, _ = query.sql()
+    assert f'"{QuotedProduct.get_table_name()}"."supplier.rating" = $1' in sql
+    assert '"supplier_2"."supplier_rating" = $2' in sql
+
+
+@pytest.mark.parametrize("related_filter", [False, True])
+def test_group_by_selected_scalar_annotation(related_filter):
+    register_table(AggregateSupplier)
+    query = ReviewPost.objects.annotate(bucket=Lower("title")).group_by("bucket")
+    if related_filter:
+        query = query.filter(author__name="Alice")
+
+    sql, _ = query.values("bucket").sql()
+    assert 'AS "bucket"' in sql
+    assert "GROUP BY 1" in sql
+    with pytest.raises(ValueError, match=r"group_by\('bucket'\).*not selected"):
+        query.values("title").to_ir()
+
+
+def test_order_by_base_column_or_aggregate_alias_with_same_name():
+    query = SuppliedProduct.objects.filter().group_by("cached_supplier").annotate(
+        supplier__name=Count("*")
+    )
+    sql, _ = query.order_by("cached_supplier").sql()
+    table = SuppliedProduct.get_table_name()
+    assert sql.endswith(f'ORDER BY "{table}"."supplier__name" ASC')
+
+    sql, _ = query.order_by("supplier__name").sql()
+    assert sql.endswith('ORDER BY "supplier__name" ASC')
+
+    sql, _ = query.union_all(query).order_by("cached_supplier").sql()
+    assert sql.endswith("ORDER BY 2 ASC")
+
+
+def test_group_by_base_column_and_scalar_annotation_with_same_database_name():
+    query = (
+        BucketPost.objects.annotate(bucket=Lower("title"))
+        .group_by("title", "bucket")
+        .values("title", "bucket")
+    )
+    column = f"{BucketPost.get_table_name()}.bucket"
+    ir = query.to_ir()
+    assert ir["cols"] == [column]
+    assert ir["group_by"] == [column, "bucket"]
+    assert ir["output_labels"] == {column: "title"}
+
+
+def test_union_related_order_projects_the_same_joins_in_every_operand():
+    register_table(AggregateSupplier)
+    first = ReviewPost.objects.filter(id=1)
+    second = ReviewPost.objects.filter(
+        regional_affiliate_with_a_long_name_east__name="Alice"
+    )
+    query = first.union_all(second).order_by("author__name")
+    ir = query.to_ir()
+    other = ir["union_query"]
+    paths = ["author", "regional_affiliate_with_a_long_name_east"]
+    assert [join["path"] for join in ir["joins"]] == paths
+    assert [join["path"] for join in other["joins"]] == paths
+    assert ir["cols"] == other["cols"]
+    sql, _ = query.sql()
+    assert sql.count('AS "author__name"') == 2
+    assert sql.endswith(f'ORDER BY {len(ir["cols"]) + 2} ASC')
+
+    with pytest.raises(ValueError, match="ordering a union by a related field"):
+        query.values("title").to_ir()
+
+
+def test_long_join_aliases_fit_and_long_group_labels_are_restored():
+    register_table(AggregateSupplier)
+    register_table(ReviewPost)
+    east = "department_with_a_long_name_for_reporting__regional_affiliate_with_a_long_name_east__name"
+    west = "department_with_a_long_name_for_reporting__regional_affiliate_with_a_long_name_west__name"
+    query = (
+        ReviewComment.objects.annotate(_oxyde_k0=Count("*"))
+        .group_by(east, west)
+        .values(east, west, "_oxyde_k0")
+    )
+    ir = query.to_ir()
+
+    east_join, west_join = ir["joins"][1:]
+    assert len(east_join["alias"].encode()) == 63
+    assert len(west_join["alias"].encode()) == 63
+    assert west_join["alias"].endswith("_2")
+    assert east_join["alias"] != west_join["alias"]
+    aliases = [ir["output_labels"][ref] for ref in ir["group_by"]]
+    assert aliases == ["_oxyde_k1", "_oxyde_k2"]
+    assert query._result_columns(["_oxyde_k0", *aliases]) == ["_oxyde_k0", east, west]
+
+
+def test_ordering_by_a_related_field_locks_only_the_base_table():
+    register_table(AggregateSupplier)
+    sql, _ = ReviewPost.objects.order_by("author__name").for_update().sql()
+    assert sql.endswith(f'FOR UPDATE OF "{ReviewPost.get_table_name()}"')
+
+
+def test_distinct_with_explicit_columns_requires_ordering_by_selected_columns():
+    register_table(AggregateSupplier)
+    query = ReviewPost.objects.order_by("author__name").values("title").distinct()
+    with pytest.raises(ValueError, match="author__name"):
+        query.to_ir()
+
+    sql, _ = ReviewPost.objects.order_by("author__name").distinct().sql()
+    assert '"author"."name" AS "author__name"' in sql
+
+
+def test_distinct_values_omit_joined_columns():
+    register_table(AggregateSupplier)
+    query = ReviewPost.objects.join("author").values("title").distinct()
+    sql, _ = query.sql()
+    assert query.to_ir()["project_joins"] is False
+    assert "LEFT JOIN" in sql
+    assert 'AS "author__name"' not in sql
+
+
+def test_docs_group_posts_by_author():
+    register_table(AggregateSupplier)
+    query = (
+        ReviewPost.objects.annotate(count=Count("*"))
+        .group_by("author__name")
+        .order_by("author__name")
+        .values("author__name", "count")
+    )
+    sql, _ = query.sql()
+    assert '"author"."name" AS "author__name"' in sql
+    assert 'GROUP BY "author"."name" ORDER BY "author"."name" ASC' in sql
+
+
+def test_related_grouping_adds_join():
+    register_table(AggregateSupplier)
+    query = SuppliedProduct.objects.filter()
+    ir = (
+        query.group_by("supplier__name")
+        .annotate(n=Count("id"))
+        .values("supplier__name", "n")
+        .to_ir()
+    )
+
+    assert ir["group_by"] == ["supplier.name"]
+    assert ir["cols"] == ["supplier.name", "n"]
+    assert ir["output_labels"] == {"supplier.name": "supplier__name"}
+    assert [join["path"] for join in ir["joins"]] == ["supplier"]
+    assert not query.to_ir().get("joins")
+
+
+def test_related_aggregate_input_adds_join():
+    register_table(AggregateSupplier)
+    ir = SuppliedProduct.objects.annotate(total=Sum("supplier__rating")).to_ir()
+
+    assert ir["aggregates"][0]["field"] == "supplier.supplier_rating"
+    assert [join["path"] for join in ir["joins"]] == ["supplier"]
+    assert "supplier.supplier_rating" in ir["column_types"]
+    assert {"field": "rating", "column": "supplier_rating"} in ir["joins"][0]["columns"]
+
+
+def test_order_by_preserves_aggregate_alias_matching_mapped_field():
+    ir = (
+        AggregateSupplier.objects.annotate(rating=Max("rating"))
+        .order_by("-rating")
+        .to_ir()
+    )
+
+    assert ir["aggregates"][0]["field"] == "supplier_rating"
+    assert ir["order_by"] == [("rating", "DESC")]
+
+
+@pytest.mark.parametrize("replacement", [Sum("id"), F("id")])
+def test_replacing_related_aggregate_drops_its_implicit_join(replacement):
+    register_table(AggregateSupplier)
+    original = SuppliedProduct.objects.annotate(total=Sum("supplier__rating"))
+    replaced = original.annotate(total=replacement)
+
+    assert not replaced.to_ir().get("joins")
+    assert [join["path"] for join in original.to_ir()["joins"]] == ["supplier"]
+    assert [
+        join["path"]
+        for join in replaced.filter(supplier__name="Alice").to_ir()["joins"]
+    ] == ["supplier"]
+
+
+def test_mapped_base_column_with_double_underscore_stays_on_base_table():
+    register_table(AggregateSupplier)
+    query = (
+        SuppliedProduct.objects.join("supplier")
+        .group_by("cached_supplier")
+        .annotate(n=Count("id"))
+        .order_by("cached_supplier")
+        .values("cached_supplier", "n")
+    )
+
+    ir = query.to_ir()
+    assert ir["group_by"] == ["supplier__name"]
+    assert ir["order_by"] == [("supplier__name", "ASC")]
+    table = SuppliedProduct.get_table_name()
+    sql, _ = query.sql()
+    assert sql.endswith(
+        f'GROUP BY "{table}"."supplier__name" ORDER BY "{table}"."supplier__name" ASC'
+    )
+
+
+def test_ungrouped_related_selection_requires_grouping_without_an_explicit_join():
+    register_table(AggregateSupplier)
+    query = SuppliedProduct.objects.annotate(n=Count("id")).values("supplier__name", "n")
+
+    with pytest.raises(ValueError, match=r"supplier__name.*group_by\(\)"):
+        query.to_ir()
+
+
+def test_related_and_same_named_base_group_keys_get_distinct_labels():
+    register_table(AggregateSupplier)
+    query = (
+        SuppliedProduct.objects.filter()
+        .group_by("cached_supplier", "supplier__name")
+        .annotate(n=Count("id"))
+        .values("cached_supplier", "supplier__name", "n")
+    )
+
+    ir = query.to_ir()
+    assert ir["group_by"] == ["supplier__name", "supplier.name"]
+    assert ir["output_labels"] == {
+        "supplier__name": "cached_supplier",
+        "supplier.name": "supplier__name",
+    }
+    table = SuppliedProduct.get_table_name()
+    sql, _ = query.sql()
+    assert f'"{table}"."supplier__name" AS "cached_supplier"' in sql
+    assert '"supplier"."name" AS "supplier__name"' in sql
+
+
+@pytest.mark.parametrize("explicit_join", [False, True])
+def test_order_by_related_field_plans_its_join(explicit_join):
+    register_table(AggregateSupplier)
+    query = SuppliedProduct.objects.filter()
+    if explicit_join:
+        query = query.join("supplier")
+    query = query.order_by("-supplier__name")
+
+    ir = query.to_ir()
+    assert ir["order_by"] == [("supplier.name", "DESC")]
+    assert [join["path"] for join in ir["joins"]] == ["supplier"]
+    sql, _ = query.sql()
+    assert sql.endswith('ORDER BY "supplier"."name" DESC')
+    # The base column keeps its field name as its spelling.
+    by_column = SuppliedProduct.objects.order_by("cached_supplier").to_ir()
+    assert by_column["order_by"] == [("supplier__name", "ASC")]
+    assert not by_column.get("joins")
+
+
+def test_order_by_annotation_alias_is_not_a_relation_path():
+    register_table(AggregateSupplier)
+    ir = (
+        SuppliedProduct.objects.annotate(supplier__name=Count("id"))
+        .order_by("-supplier__name")
+        .to_ir()
+    )
+
+    assert ir["order_by"] == [("supplier__name", "DESC")]
+    assert not ir.get("joins")
+
+
+def test_order_by_random_plans_no_join():
+    assert not SuppliedProduct.objects.order_by("?").to_ir().get("joins")
+
+
+class Ledger(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    amount: int = Field(default=0, db_column="legacy.amount")
+
+    class Meta:
+        is_table = True
+
+
+def test_dotted_db_column_stays_one_identifier():
+    total = Ledger.objects.annotate(total=Sum("amount"))
+    assert total.to_ir()["aggregates"][0]["field"] == "legacy.amount"
+    sql, _ = total.sql()
+    assert 'SUM("legacy.amount") AS "total"' in sql
+
+    ordered = Ledger.objects.order_by("amount")
+    assert ordered.to_ir()["order_by"] == [("legacy.amount", "ASC")]
+    sql, _ = ordered.sql()
+    assert sql.endswith('ORDER BY "legacy.amount" ASC')
+
+    grouped = (
+        Ledger.objects.filter()
+        .group_by("amount")
+        .annotate(n=Count("id"))
+        .values("amount", "n")
+    )
+    assert grouped.to_ir()["output_labels"] == {"legacy.amount": "amount"}
+    table = Ledger.get_table_name()
+    sql, _ = grouped.sql()
+    assert f'"{table}"."legacy.amount" AS "amount"' in sql
+    assert sql.endswith('GROUP BY "legacy.amount"')
 
 
 class TestAggregateBase:

@@ -3,10 +3,8 @@
 Verifies that Oxyde correctly detects FK fields regardless of how
 the type annotation is written (direct type, Optional, forward ref, etc.).
 
-NOTE: This file intentionally does NOT use `from __future__ import annotations`
-at module level — some tests need eager annotation evaluation to verify
-real-world behavior. Tests that require lazy annotations define models
-inside exec() with the future import.
+The module uses native deferred annotations. Separate exec() fixtures verify
+the string annotations produced by `from __future__ import annotations`.
 """
 
 from typing import Optional
@@ -195,31 +193,31 @@ class TestReverseFKDirectType:
         assert "posts" in _RevAuthor.model_fields
 
 
-# ─── Reverse FK: list["Post"] (string forward ref) ───────────────────
+# ─── Reverse FK: list[Post] (deferred forward ref) ─────────────────────
 
 
-class _RevStrAuthor(Model):
+class _RevDeferredAuthor(Model):
     id: int | None = Field(default=None, db_pk=True)
     name: str
-    posts: list["_RevStrPost"] = Field(db_reverse_fk="author")
+    posts: list[_RevDeferredPost] = Field(db_reverse_fk="author")
 
     class Meta:
         is_table = True
 
 
-class _RevStrPost(Model):
+class _RevDeferredPost(Model):
     id: int | None = Field(default=None, db_pk=True)
     title: str
-    author: _RevStrAuthor | None = Field(default=None, db_on_delete="CASCADE")
+    author: _RevDeferredAuthor | None = Field(default=None, db_on_delete="CASCADE")
 
     class Meta:
         is_table = True
 
 
-class TestReverseFKStringRef:
+class TestReverseFKDeferredRef:
     def test_reverse_fk_field_exists(self):
         registered_tables()
-        assert "posts" in _RevStrAuthor.model_fields
+        assert "posts" in _RevDeferredAuthor.model_fields
 
 
 # ─── Reverse FK: from __future__ + list[Post] ────────────────────────

@@ -133,6 +133,45 @@ def test_union_branches_use_the_same_projection_mode() -> None:
     assert union["cols"] == union["union_query"]["cols"] == ["email", "user_id"]
 
 
+def test_union_branches_share_join_projection_with_distinct() -> None:
+    clear_registry()
+
+    class Author(Model):
+        id: int | None = Field(default=None, db_pk=True)
+
+        class Meta:
+            is_table = True
+
+    class Post(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        title: str
+        author: Author | None = None
+
+        class Meta:
+            is_table = True
+
+    query = Post.objects.join("author").select("id", "title")
+    assert "project_joins" not in query.distinct().to_ir()
+    assert "project_joins" not in query.select("title").distinct().to_ir()
+
+    union = query.distinct().union_all(query)
+    values_ir = union.values().to_ir()
+    assert values_ir["project_joins"] is values_ir["union_query"]["project_joins"] is False
+    models_ir = union._build_ir(for_models=True)
+    assert "project_joins" not in models_ir
+    assert "project_joins" not in models_ir["union_query"]
+    for result in (values_ir, models_ir):
+        other = result["union_query"]
+        assert result["cols"] == other["cols"] == ["id", "title"]
+
+    nested = query.union_all(query.union_all(query.distinct())).to_ir()
+    assert "project_joins" not in nested
+    assert "project_joins" not in nested["union_query"]
+    assert "project_joins" not in nested["union_query"]["union_query"]
+
+    clear_registry()
+
+
 def test_union_with_explicit_primary_key_retains_each_projection() -> None:
     query = RenamedKeyUser.objects.filter()
     keyed = query.select("id")
@@ -779,6 +818,120 @@ async def test_join_hydrates_related_models() -> None:
     posts = await Post.objects.join("author").fetch_models(stub)
     assert posts[0].author is not None
     assert posts[0].author.email == "ada@example.com"
+
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_flat_join_fetch_rejects_base_field_collision() -> None:
+    clear_registry()
+
+    class Supplier(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        name: str
+
+        class Meta:
+            is_table = True
+
+    class Item(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        supplier__name: str
+        supplier: Supplier | None = None
+
+        class Meta:
+            is_table = True
+
+    query = Item.objects.join("supplier")
+    assert query.to_ir()["joins"][0]["path"] == "supplier"
+
+    stub = StubExecuteClient([])
+    for fetch in (query.fetch_all, query.fetch_rows):
+        with pytest.raises(ValueError, match=r"'supplier__name'.*join 'supplier'"):
+            await fetch(stub)
+    assert stub.calls == []
+
+    stub = StubExecuteClient(
+        [
+            [["supplier__name"], [["Cached"]]],
+            [
+                ["id", "supplier__name"],
+                [[1, "Cached"]],
+                {
+                    "supplier": {
+                        "columns": ["id", "name"],
+                        "data": {2: [2, "Live"]},
+                        "refs": [2],
+                    }
+                },
+            ],
+        ]
+    )
+    assert await query.values("supplier__name").fetch_all(stub) == [
+        {"supplier__name": "Cached"}
+    ]
+    (item,) = await query.fetch_models(stub)
+    assert item.supplier__name == "Cached"
+    assert item.supplier is not None
+    assert item.supplier.name == "Live"
+
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_flat_join_fetch_rejects_nested_field_collision() -> None:
+    clear_registry()
+
+    class Company(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        name: str
+
+        class Meta:
+            is_table = True
+
+    class Author(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        company__name: str
+        company: Company | None = None
+
+        class Meta:
+            is_table = True
+
+    class Post(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        author: Author | None = None
+
+        class Meta:
+            is_table = True
+
+    query = Post.objects.join("author__company")
+    stub = StubExecuteClient([])
+    with pytest.raises(
+        ValueError, match=r"'author__company__name'.*'author'.*'author__company'"
+    ):
+        await query.values().all(client=stub)
+    assert stub.calls == []
+
+    joined = (
+        ["id", "author_id"],
+        [[1, 2]],
+        {
+            "author": {
+                "columns": ["id", "company__name", "company_id"],
+                "data": {2: [2, "Cached", 3]},
+                "refs": [2],
+            },
+            "author__company": {
+                "columns": ["id", "name"],
+                "data": {3: [3, "Live"]},
+                "refs": [3],
+            },
+        },
+    )
+    (post,) = await query.fetch_models(StubExecuteClient([joined]))
+    assert post.author is not None
+    assert post.author.company__name == "Cached"
+    assert post.author.company is not None
+    assert post.author.company.name == "Live"
 
     clear_registry()
 

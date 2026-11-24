@@ -194,11 +194,21 @@ pub fn write_rmpv_value(buf: &mut Vec<u8>, val: &rmpv::Value) {
 use futures::StreamExt;
 
 /// Info about a JOIN relation for dedup encoding.
+///
+/// A joined SELECT projects each relation's columns after the main columns,
+/// in relation order. The encoder assigns them by position, so a main column
+/// whose name starts with `{prefix}__` stays in the main rows, and a nested
+/// relation's columns are never taken by its parent.
 pub struct RelationInfo {
     /// Column prefix in result set, e.g. "author"
     pub prefix: String,
-    /// PK column name in result set, e.g. "author__id"
-    pub pk_col: String,
+    /// Position of the relation's primary key among its columns.
+    pub pk_index: usize,
+    /// Model field names in projection order.
+    pub field_names: Vec<String>,
+    /// Type of each of the relation's columns, in projection order. The
+    /// length is the relation's column count; `None` decodes by runtime type.
+    pub column_types: Vec<Option<ColumnTypeSpec>>,
 }
 
 /// Msgpack nil byte (0xc0) — used to detect NULL PKs from LEFT JOINs.
@@ -209,8 +219,8 @@ struct RelGroup<'a> {
     prefix: &'a str,
     pk_col_idx: usize,
     col_indices: Vec<usize>,
-    col_metas: Vec<&'a ColumnMeta>,
-    stripped_names: Vec<String>,
+    col_metas: Vec<ColumnMeta>,
+    field_names: &'a [String],
     seen: std::collections::HashSet<Vec<u8>>,
     data_buf: Vec<u8>,
     refs_buf: Vec<u8>,
@@ -265,49 +275,61 @@ where
     let mut rel_groups: Vec<RelGroup<'_>> = Vec::new();
 
     if has_rels {
-        let prefixes_sep: Vec<String> = rels.iter().map(|r| format!("{}__", r.prefix)).collect();
+        let relation_width: usize = rels.iter().map(|r| r.column_types.len()).sum();
+        let Some(main_width) = all_columns.len().checked_sub(relation_width) else {
+            return Err(sqlx::Error::Decode(
+                format!(
+                    "joined result has {} columns, fewer than the {relation_width} its relations project",
+                    all_columns.len()
+                )
+                .into(),
+            ));
+        };
+        for (idx, col) in all_columns.iter().enumerate().take(main_width) {
+            main_indices.push(idx);
+            main_columns.push(col);
+        }
 
+        let mut start = main_width;
         for ri in rels {
+            let width = ri.column_types.len();
+            if ri.pk_index >= width {
+                return Err(sqlx::Error::ColumnNotFound(format!(
+                    "{}__<primary key>",
+                    ri.prefix
+                )));
+            }
+            if ri.field_names.len() != width {
+                return Err(sqlx::Error::Decode(
+                    format!(
+                        "relation '{}' has {} field names for its {width} columns",
+                        ri.prefix,
+                        ri.field_names.len()
+                    )
+                    .into(),
+                ));
+            }
+            let col_indices: Vec<usize> = (start..start + width).collect();
+            let col_metas = col_indices
+                .iter()
+                .zip(&ri.column_types)
+                .map(|(&idx, spec)| ColumnMeta {
+                    name: all_columns[idx].name.clone(),
+                    db_type: all_columns[idx].db_type.clone(),
+                    spec: spec.clone(),
+                })
+                .collect();
             rel_groups.push(RelGroup {
                 prefix: &ri.prefix,
-                pk_col_idx: usize::MAX,
-                col_indices: Vec::new(),
-                col_metas: Vec::new(),
-                stripped_names: Vec::new(),
+                pk_col_idx: start + ri.pk_index,
+                col_indices,
+                col_metas,
+                field_names: &ri.field_names,
                 seen: std::collections::HashSet::new(),
                 data_buf: Vec::new(),
                 refs_buf: Vec::new(),
             });
-        }
-
-        for (idx, col) in all_columns.iter().enumerate() {
-            let mut matched = false;
-            for (gi, psep) in prefixes_sep.iter().enumerate() {
-                if col.name.starts_with(psep) {
-                    if col.name == rels[gi].pk_col {
-                        rel_groups[gi].pk_col_idx = idx;
-                    }
-                    rel_groups[gi].col_indices.push(idx);
-                    rel_groups[gi].col_metas.push(col);
-                    rel_groups[gi]
-                        .stripped_names
-                        .push(col.name[psep.len()..].to_string());
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                main_indices.push(idx);
-                main_columns.push(col);
-            }
-        }
-
-        // A relation whose pk column is missing from the result set would
-        // panic on indexing below — fail with a proper error instead.
-        for (group, rel) in rel_groups.iter().zip(rels) {
-            if group.pk_col_idx == usize::MAX {
-                return Err(sqlx::Error::ColumnNotFound(rel.pk_col.clone()));
-            }
+            start += width;
         }
     } else {
         for (idx, col) in all_columns.iter().enumerate() {
@@ -329,8 +351,8 @@ where
 
         if has_rels {
             for group in &mut rel_groups {
-                let pk_bytes =
-                    encode_pk_cell::<E>(row, group.pk_col_idx, &all_columns[group.pk_col_idx]);
+                let pk_pos = group.pk_col_idx - group.col_indices[0];
+                let pk_bytes = encode_pk_cell::<E>(row, group.pk_col_idx, &group.col_metas[pk_pos]);
 
                 if pk_bytes.len() == 1 && pk_bytes[0] == MSGPACK_NIL {
                     write_nil(&mut group.refs_buf);
@@ -339,7 +361,7 @@ where
                         group.data_buf.extend_from_slice(&pk_bytes);
                         write_array_len(&mut group.data_buf, group.col_indices.len() as u32);
                         for (pos, &idx) in group.col_indices.iter().enumerate() {
-                            E::encode_cell(&mut group.data_buf, row, idx, group.col_metas[pos]);
+                            E::encode_cell(&mut group.data_buf, row, idx, &group.col_metas[pos]);
                         }
                     }
                     group.refs_buf.extend_from_slice(&pk_bytes);
@@ -377,8 +399,8 @@ where
             write_map_len(&mut buf, 3);
 
             write_str(&mut buf, "columns");
-            write_array_len(&mut buf, group.stripped_names.len() as u32);
-            for name in &group.stripped_names {
+            write_array_len(&mut buf, group.field_names.len() as u32);
+            for name in group.field_names {
                 write_str(&mut buf, name);
             }
 

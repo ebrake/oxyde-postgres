@@ -290,7 +290,22 @@ fn qualified_column_type_wins_over_same_named_base_column() {
     );
     lookup.column = Some("author.tags");
     lookup.table_types = HashMap::from([("tags".into(), ColumnTypeSpec::Text)]);
-    let (sql, _) = lookup.build(Dialect::Postgres);
+    let mut ir = lookup.ir();
+    ir.joins = Some(vec![JoinSpec {
+        path: "author".into(),
+        alias: "author".into(),
+        parent: None,
+        table: "authors".into(),
+        source_column: "author_id".into(),
+        target_column: "id".into(),
+        pk_column: None,
+        result_prefix: "author".into(),
+        columns: vec![JoinColumn {
+            field: "tags".into(),
+            column: "tags".into(),
+        }],
+    }]);
+    let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
     assert!(sql.contains(r#"("author"."tags" @> $1::TEXT[])"#), "{sql}");
 }
 
@@ -333,6 +348,7 @@ fn joined_select_qualifies_the_array_column() {
         table: "authors".into(),
         source_column: "author_id".into(),
         target_column: "id".into(),
+        pk_column: None,
         result_prefix: "author".into(),
         columns: vec![JoinColumn {
             field: "name".into(),

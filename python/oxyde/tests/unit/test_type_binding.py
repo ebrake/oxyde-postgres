@@ -351,11 +351,37 @@ def test_joined_enum_filter_and_result_columns_are_typed():
     }
 
     assert query_ir["column_types"]["author.status"] == enum_spec
-    assert query_ir["column_types"]["author__status"] == enum_spec
+    assert "author__status" not in query_ir["column_types"]
 
     sql, params = query.sql(dialect="postgres")
     assert '$1::"status_enum"' in sql
     assert params == ["draft"]
+
+    clear_registry()
+
+
+def test_joined_type_hint_does_not_replace_untyped_base_column():
+    clear_registry()
+
+    class Supplier(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        duration: timedelta
+
+        class Meta:
+            is_table = True
+
+    class Item(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        cached_duration: str = Field(db_column="supplier__duration", db_type="CITEXT")
+        supplier: Supplier | None = None
+
+        class Meta:
+            is_table = True
+
+    query = Item.objects.join("supplier")
+    for result in (query.to_ir(), query.values("cached_duration").to_ir()):
+        assert "supplier.duration" in result["column_types"]
+        assert "supplier__duration" not in result["column_types"]
 
     clear_registry()
 

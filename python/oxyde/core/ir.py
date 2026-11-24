@@ -132,12 +132,14 @@ def build_select_ir(
     column_db_types: dict[str, str] | None = None,
     model: str | None = None,
     column_mappings: dict[str, str] | None = None,
+    output_labels: dict[str, str] | None = None,
     filter_tree: FilterNode | None = None,
     distinct: bool | None = None,
     limit: int | None = None,
     offset: int | None = None,
     order_by: Sequence[tuple[str, str]] | None = None,
     joins: Sequence[dict[str, Any]] | None = None,
+    project_joins: bool | None = None,
     group_by: Sequence[str] | None = None,
     having: FilterNode | None = None,
     aggregates: Sequence[dict[str, Any]] | None = None,
@@ -161,6 +163,9 @@ def build_select_ir(
             column_types) to its db_type override. PostgreSQL filters cast
             array values and array-lookup operands to an array override.
         pk_column: Primary key column name, used for deduplication in JOIN queries.
+        output_labels: Output label of each column a grouped query projects,
+            keyed by the column reference in ``columns``/``group_by``.
+        project_joins: False to join tables without selecting their columns.
         annotations: Scalar expression annotations
             ({"alias": ..., "expr": <ScalarExpr dict>}), emitted after the
             plain columns. Mutually exclusive with ``aggregates``. An empty
@@ -189,6 +194,8 @@ def build_select_ir(
         payload["model"] = model
     if column_mappings:
         payload["column_mappings"] = dict(column_mappings)
+    if output_labels:
+        payload["output_labels"] = dict(output_labels)
     if distinct is not None:
         payload["distinct"] = bool(distinct)
     if limit is not None:
@@ -199,6 +206,8 @@ def build_select_ir(
         payload["order_by"] = [(str(col), direction) for col, direction in order_by]
     if joins:
         payload["joins"] = list(joins)
+    if project_joins is not None:
+        payload["project_joins"] = project_joins
     if group_by:
         payload["group_by"] = list(group_by)
     if having:

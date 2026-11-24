@@ -47,7 +47,7 @@ pip install oxyde-postgres
 
 ### What are the system requirements?
 
-- Python 3.13+
+- Python 3.15+
 - PostgreSQL 18+
 - No Rust compiler needed (wheels are pre-built)
 

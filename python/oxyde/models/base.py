@@ -33,8 +33,8 @@ Key Components:
 
 Internal Flow:
     1. Class definition triggers OxydeModelMeta.__new__()
-    2. __init_subclass__() extracts Meta, creates _db_meta, registers table
-    3. OxydeModelMeta.__new__() calls finalize_pending() after Pydantic completes
+    2. __init_subclass__() extracts Meta and creates _db_meta
+    3. OxydeModelMeta.__new__() registers the table after Pydantic completes
     4. finalize_pending() resolves FKs, parses field tags, caches PK and column_types
 
 Example:
@@ -192,9 +192,7 @@ class OxydeModelMeta(ModelMetaclass):
 
         cls: type[Model] = super().__new__(mcs, name, bases, namespace, **kwargs)
 
-        # Detect FK fields from Pydantic's processed model_fields
-        # This works on all supported Python versions because Pydantic
-        # has already resolved annotations regardless of lazy/eager evaluation
+        # Detect FK fields from Pydantic's processed model_fields.
         pending_fk_fields: list[tuple[str, Any, FieldInfo | None]] = []
         for field_name, field_info in cls.model_fields.items():
             if isinstance(field_info, OxydeFieldInfo) and field_info.is_virtual:
@@ -210,8 +208,11 @@ class OxydeModelMeta(ModelMetaclass):
         cls.__pending_fk_fields__ = pending_fk_fields
         cls.__fk_fields_resolved__ = False
 
-        # Finalize all pending models AFTER Pydantic completes
-        # (model_fields is now populated). Resolves FKs, parses metadata, caches PK.
+        # Resolving a lazy import during Pydantic class creation can register
+        # another model. Keep this class out of the pending queue until its
+        # fields are ready for finalization.
+        if cls._is_table:
+            register_table(cls, overwrite=True)
         finalize_pending()
 
         return cls
@@ -451,9 +452,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                     stacklevel=2,
                 )
 
-        if is_table:
-            register_table(cls, overwrite=True)
-        else:
+        if not is_table:
             cls._db_meta.field_metadata = {}
             cls._db_meta.relations = {}
 

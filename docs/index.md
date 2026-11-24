@@ -1,6 +1,6 @@
 # Oxyde for PostgreSQL
 
-PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and **Python 3.13+**. Version **0.3.3** adds declared PostgreSQL extensions through `Meta.extensions`, with installation ordered before tables and indexes. Version 0.3.2 added expression and operator-class indexes; see [Models](guide/models.md#operator-classes) and the [release notes](changelog.md).
+PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requiring **PostgreSQL 18+** and **Python 3.15+**. Version **0.3.3** adds declared PostgreSQL extensions through `Meta.extensions`, with installation ordered before tables and indexes. Version 0.3.2 added expression and operator-class indexes; see [Models](guide/models.md#operator-classes) and the [release notes](changelog.md).
 
 
 <p align="center">
