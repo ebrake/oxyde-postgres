@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Container
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
+from oxyde.models.lookups import _resolve_related_field
+from oxyde.models.metadata import db_column_for
 from oxyde.queries.aggregates import Avg, Max, Min, Sum
 from oxyde.queries.base import SupportsExecute, _resolve_execution_client
 from oxyde.queries.expressions import _is_scalar_annotation
@@ -54,10 +57,6 @@ class AggregationMixin(Generic[TModel]):
         """Must be implemented by FilteringMixin."""
         raise NotImplementedError
 
-    def _join_specs_to_ir(self) -> list[dict[str, Any]]:
-        """Must be implemented by JoiningMixin."""
-        raise NotImplementedError
-
     def annotate(self, **annotations: Any) -> Self:
         """
         Add computed fields.
@@ -87,13 +86,12 @@ class AggregationMixin(Generic[TModel]):
             )
         """
         field_meta = self.model_class._db_meta.field_metadata
-        taken = set(field_meta) | {meta.db_column for meta in field_meta.values()}
         merged = {**self._annotations, **annotations}
         for alias, obj in annotations.items():
-            if _is_scalar_annotation(obj) and alias in taken:
+            if _is_scalar_annotation(obj) and alias in field_meta:
                 raise ValueError(
-                    f"annotate() alias {alias!r} conflicts with a model field "
-                    "or column; choose another name"
+                    f"annotate() alias {alias!r} conflicts with a model field; "
+                    "choose another name"
                 )
         scalar = [a for a, o in merged.items() if _is_scalar_annotation(o)]
         if scalar and len(scalar) != len(merged):
@@ -139,7 +137,7 @@ class AggregationMixin(Generic[TModel]):
 
         for q_expr in q_exprs:
             if isinstance(q_expr, Q):
-                node = q_expr.to_filter_node(self.model_class)
+                node = q_expr.to_filter_node(self.model_class, clone)
                 if node:
                     conditions_to_add.append(node)
 
@@ -173,7 +171,7 @@ class AggregationMixin(Generic[TModel]):
                 )
 
             if model_kwargs:
-                node = Q(**model_kwargs).to_filter_node(self.model_class)
+                node = Q(**model_kwargs).to_filter_node(self.model_class, clone)
                 if node:
                     conditions_to_add.append(node)
 
@@ -227,6 +225,7 @@ class AggregationMixin(Generic[TModel]):
                 columns = first
                 rows = second
                 if rows:
+                    agg_query._restore_aggregate_timedeltas(columns, rows)
                     row_dict = dict(zip(columns, rows[0]))
                     value = row_dict.get(result_key)
                     return self._coerce_aggregate(value, field, agg_class)
@@ -240,6 +239,31 @@ class AggregationMixin(Generic[TModel]):
                 return getattr(row, result_key, None)
         return None
 
+    def _restore_aggregate_timedeltas(
+        self, columns: list[str], rows: list[list[Any]]
+    ) -> None:
+        """Restore typed MIN/MAX results from the seconds encoded by the driver."""
+        if not rows:
+            return
+        for index, alias in enumerate(columns):
+            aggregate = self._annotations.get(alias)
+            if not isinstance(aggregate, (Min, Max)):
+                continue
+            field = aggregate.field
+            related = _resolve_related_field(self.model_class, field)
+            if related is None:
+                model: type[Model] = self.model_class
+                column = db_column_for(model, field)
+            else:
+                model = related.final_model
+                column = related.column_meta.db_column
+            spec = (model._db_meta.column_types or {}).get(column)
+            if spec is not None and spec.get("kind") == "timedelta":
+                for row in rows:
+                    value = row[index]
+                    if isinstance(value, float):
+                        row[index] = timedelta(seconds=value)
+
     def _coerce_aggregate(self, value: Any, field: str, agg_class: type) -> Any:
         """Coerce aggregate result to the field's Python type.
 
@@ -251,7 +275,10 @@ class AggregationMixin(Generic[TModel]):
 
         meta = self.model_class._db_meta.field_metadata.get(field)
         if meta is None:
-            return value
+            related = _resolve_related_field(self.model_class, field)
+            if related is None:
+                return value
+            meta = related.column_meta
 
         python_type = meta.python_type
 

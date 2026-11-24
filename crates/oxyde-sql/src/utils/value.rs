@@ -301,7 +301,7 @@ fn compile<'a>(
 /// The driver decodes result columns by `column_types` and, without a spec,
 /// by the runtime DB type, which cannot read enums or arrays and returns an
 /// interval-as-BIGINT as raw microseconds. An alias therefore gets the spec of
-/// the column its expression passes through unchanged (see [`result_spec`]).
+/// the column its expression passes through unchanged (see [`scalar_result_spec`]).
 /// Anything that can change the type (arithmetic, a literal of another type,
 /// `concat_ws`, raw SQL) is left to native decoding: e.g.
 /// `GREATEST(int_col, 1.5)` is NUMERIC, not the integer column's type.
@@ -320,7 +320,7 @@ pub fn apply_annotation_result_types(ir: &mut QueryIR) {
     let types = ExprTypes::from(ir.column_types.as_ref());
     let inferred: Vec<(String, ColumnTypeSpec)> = annotations
         .iter()
-        .filter_map(|a| result_spec(&a.expr, types).map(|s| (a.alias.clone(), s.clone())))
+        .filter_map(|a| scalar_result_spec(&a.expr, types).map(|s| (a.alias.clone(), s.clone())))
         .collect();
     if inferred.is_empty() {
         return;
@@ -339,7 +339,11 @@ pub fn apply_annotation_result_types(ir: &mut QueryIR) {
 ///   arithmetic), the result is the enum or the query fails.
 /// * Otherwise only when every argument keeps the sibling column's type
 ///   ([`preserves`]): `GREATEST(int_col, 1.5)` widens to NUMERIC.
-fn result_spec<'a>(node: &'a ScalarExpr, types: ExprTypes<'a>) -> Option<&'a ColumnTypeSpec> {
+#[must_use]
+pub fn scalar_result_spec<'a>(
+    node: &'a ScalarExpr,
+    types: ExprTypes<'a>,
+) -> Option<&'a ColumnTypeSpec> {
     match node {
         ScalarExpr::Column { name } => types.known(name),
         ScalarExpr::Func { name, args } if is_type_preserving(name) => {

@@ -83,7 +83,7 @@ def _collect_attrs(sources: list[Any]) -> dict[str, int]:
             if val is not None:
                 try:
                     result[attr] = int(val)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     continue
                 break
     return result

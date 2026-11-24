@@ -80,7 +80,7 @@ python/oxyde/
   `rust-toolchain.toml` and rustup installs it automatically on first `cargo` use.
   CI uses the same pinned version, so a floating local stable may show clippy
   warnings CI does not (or vice versa) — always build through rustup.
-- **Python** 3.13+
+- **Python** 3.15+
 - **maturin** (`pip install maturin`)
 - **Docker** — database tests start PostgreSQL 18 via testcontainers. Alternatively set `OXYDE_TEST_POSTGRES_URL` to a disposable PostgreSQL 18+ database. Tests create and drop isolated schemas. Database tests fail if the server cannot start; they are not silently skipped.
 

@@ -2,7 +2,7 @@
 
 Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.com/mr-fatalyst/oxyde): a type-safe, Pydantic-centric asynchronous ORM with a high-performance Rust core designed for clarity, speed, and reliability. It builds on Oxyde's great work and optimizes it for PostgreSQL with bug fixes and PostgreSQL-specific features.
 
-**Requires PostgreSQL 18+ and Python 3.13+.** The Rust core checks the server version when connecting. Both `postgres://` and `postgresql://` connection URLs are supported.
+**Requires PostgreSQL 18+ and Python 3.15+.** The Rust core checks the server version when connecting. Both `postgres://` and `postgresql://` connection URLs are supported.
 
 ## Features
 
@@ -12,7 +12,7 @@ Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.
 - Array and JSON lookups: `contains`, `contained_by`, and `overlap`.
 - Async transactions with nested savepoints and public transaction-depth reporting.
 - Schema migrations with PostgreSQL advisory locking and transactional DDL.
-- Rust SQL generation, connection pooling, and execution, with Python 3.15 wheel support.
+- Rust SQL generation, connection pooling, and execution.
 - Cache-disabled unnamed statements for PostgreSQL/PgBouncer, including cold custom-type decoding without replaying queries.
 
 Version **0.3.3** automatically detects known PostgreSQL extension operator classes and column types (`db_type`), including pgvector types used by `hnsw` and `ivfflat` indexes. Use `Meta.extensions` for other requirements. Migrations install requirements before tables and indexes; removing a requirement or rolling back preserves the installed extension. Upgrading a 0.3.2 project with known extension usage adds a pending `ensure_extension` migration, which safely skips extensions already installed. Version 0.3.2 added expression and operator-class indexes, and 0.3.1 added scalar expressions. See the [model guide](https://github.com/ebrake/oxyde-postgres/blob/main/docs/guide/models.md) and [release notes](https://github.com/ebrake/oxyde-postgres/blob/main/docs/changelog.md).
@@ -30,7 +30,7 @@ The distribution names are `oxyde-postgres` and `oxyde-postgres-core`. Python im
 To build this checkout:
 
 ```bash
-uv venv --python 3.13
+uv venv --python 3.15
 source .venv/bin/activate
 uv pip install maturin
 maturin develop --manifest-path crates/oxyde-core-py/Cargo.toml

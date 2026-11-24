@@ -264,7 +264,7 @@ def _get_next_migration_number(migrations_dir: str | Path) -> str:
     try:
         last_num = int(last_file.split("_")[0])
         return f"{last_num + 1:04d}"
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return "0001"
 
 

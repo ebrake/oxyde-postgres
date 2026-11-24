@@ -134,13 +134,16 @@ class Q:
             qualified_column = None
             if resolved.joins:
                 join_path = "__".join(name for name, _ in resolved.joins)
-                # Add JOINs to query if provided
-                if query is not None:
-                    query._add_join_path(join_path)
-                # Qualified column name "alias.column": the alias is the join
-                # path with __ replaced by _
-                alias = "_".join(name for name, _ in resolved.joins)
+                alias = (
+                    query._add_join_path(join_path).alias
+                    if query is not None
+                    else join_path
+                )
                 qualified_column = f"{alias}.{column_meta.db_column}"
+            elif "." in column_meta.db_column:
+                qualified_column = (
+                    f"{model_class.get_table_name()}.{column_meta.db_column}"
+                )
 
             field_conditions = _build_lookup_conditions(
                 resolved.final_model,

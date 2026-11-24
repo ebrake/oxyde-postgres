@@ -318,6 +318,9 @@ pub struct JoinSpec {
     pub target_column: String,
     pub result_prefix: String,
     pub columns: Vec<JoinColumn>,
+    /// Database column of the related model's primary key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk_column: Option<String>,
 }
 
 impl JoinSpec {
@@ -327,17 +330,24 @@ impl JoinSpec {
         format!("{}__{}", self.result_prefix, field)
     }
 
-    /// Result column holding the joined row's primary key.
-    ///
-    /// Joined columns are aliased by *field* name, while `target_column` is
-    /// the database column; they differ when the pk has a `db_column`.
+    /// Database column used to identify the joined row.
+    #[must_use]
+    pub fn pk_column_name(&self) -> &str {
+        self.pk_column
+            .as_deref()
+            .filter(|pk| self.columns.iter().any(|c| c.column == *pk))
+            .unwrap_or(&self.target_column)
+    }
+
+    /// Result column holding the joined row's primary key, aliased by field name.
     #[must_use]
     pub fn pk_result_column(&self) -> String {
+        let pk_column = self.pk_column_name();
         let field = self
             .columns
             .iter()
-            .find(|c| c.column == self.target_column)
-            .map_or(self.target_column.as_str(), |c| c.field.as_str());
+            .find(|c| c.column == pk_column)
+            .map_or(pk_column, |c| c.field.as_str());
         self.result_column(field)
     }
 }
@@ -405,8 +415,19 @@ pub struct QueryIR {
     pub distinct: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_mappings: Option<HashMap<String, String>>,
+
+    /// Output labels of a grouped query's projected columns, keyed by the
+    /// column reference sent in `cols`/`group_by` (a base column, or
+    /// `alias.column` for a joined one). Python sends the names the caller
+    /// asked for, so a related group key and a base column whose name looks
+    /// like it come back under different labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_labels: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<JoinSpec>>,
+    /// False keeps the joins but omits their related result columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_joins: Option<bool>,
 
     // Aggregates (for COUNT, SUM, AVG, MAX, MIN)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -499,7 +520,9 @@ impl Default for QueryIR {
             model: None,
             distinct: None,
             column_mappings: None,
+            output_labels: None,
             joins: None,
+            project_joins: None,
             aggregates: None,
             annotations: None,
             returning: None,
@@ -519,6 +542,16 @@ impl Default for QueryIR {
 }
 
 impl QueryIR {
+    /// Whether the SELECT projects related columns for row hydration.
+    #[must_use]
+    pub fn projects_join_columns(&self) -> bool {
+        self.project_joins != Some(false)
+            && !self.count.unwrap_or(false)
+            && !self.exists.unwrap_or(false)
+            && self.aggregates.is_none()
+            && self.group_by.as_ref().is_none_or(Vec::is_empty)
+    }
+
     /// A copy of this IR for SQL building, with `bind_types` folded into
     /// `column_types` (explicit specs win) and the same done for `UNION`
     /// sub-queries. `None` when there is nothing to fold.
@@ -840,6 +873,7 @@ mod tests {
             table: "parents".into(),
             source_column: "parent_id".into(),
             target_column: target_column.into(),
+            pk_column: None,
             result_prefix: "parent".into(),
             columns: columns
                 .iter()
@@ -866,6 +900,16 @@ mod tests {
             join_spec("parent_pk", &[]).pk_result_column(),
             "parent__parent_pk"
         );
+    }
+
+    #[test]
+    fn join_pk_result_column_prefers_a_projected_primary_key_over_the_target() {
+        let mut join = join_spec("tags", &[("tags", "tags"), ("id", "parent_pk")]);
+        join.pk_column = Some("parent_pk".into());
+        assert_eq!(join.pk_result_column(), "parent__id");
+
+        join.columns.pop();
+        assert_eq!(join.pk_result_column(), "parent__tags");
     }
 
     #[test]

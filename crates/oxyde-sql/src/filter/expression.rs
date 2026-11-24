@@ -2,53 +2,19 @@
 
 use std::collections::HashMap;
 
-use oxyde_codec::{Aggregate, AggregateOp, ColumnTypeSpec, Filter, FilterNode};
+use oxyde_codec::{Aggregate, AggregateOp, ColumnTypeSpec, Filter, FilterNode, JoinSpec};
 use sea_query::ExprTrait;
 use sea_query::{Expr, Func, LikeExpr, SimpleExpr, Value};
 
 use super::array::{build_array_filter, ArrayOp};
 use super::pg_array::{out_of_range_element, pg_array_type};
 use super::render::render_col;
-use crate::aggregate::build_aggregate;
+use crate::aggregate::build_aggregate_for_table;
 use crate::error::{QueryError, Result};
 use crate::utils::bind::ensure_array_elements;
-use crate::utils::{bind_value, typed_value_expr, ColumnIdent, TableIdent};
+use crate::utils::identifier::resolve_column;
+use crate::utils::{bind_value, typed_value_expr};
 use crate::Dialect;
-
-/// Create column expression, handling "table.column" format for joins
-/// If default_table is provided and column is not already qualified, prepend it
-fn make_col_expr(col_name: &str, default_table: Option<&str>) -> Expr {
-    if let Some((table, column)) = col_name.split_once('.') {
-        // "user.age" -> ("user", "age") -> "user"."age"
-        Expr::col((
-            TableIdent(table.to_string()),
-            ColumnIdent(column.to_string()),
-        ))
-    } else if let Some(table) = default_table {
-        // Qualify with default table (for JOIN queries)
-        Expr::col((
-            TableIdent(table.to_string()),
-            ColumnIdent(col_name.to_string()),
-        ))
-    } else {
-        // Simple column name (no JOIN)
-        Expr::col(ColumnIdent(col_name.to_string()))
-    }
-}
-
-/// Resolve column type hint from col_types map.
-///
-/// A qualified name ("user.age") has its own entry when the joined column
-/// has a spec. It never falls back to the bare column name, which is the
-/// base table's column of that name and may have a different type.
-fn resolve_col_spec<'a>(
-    col_name: &str,
-    col_types: Option<&'a HashMap<String, ColumnTypeSpec>>,
-) -> &'a ColumnTypeSpec {
-    col_types
-        .and_then(|ct| ct.get(col_name))
-        .unwrap_or(&ColumnTypeSpec::Unknown)
-}
 
 /// Type of an aggregate's result, for binding the values a HAVING condition
 /// compares it with: derived from the column it aggregates, never from a
@@ -59,16 +25,22 @@ fn resolve_col_spec<'a>(
 /// `Decimal` value binds as a decimal; integers and floats bind as they are.
 fn aggregate_type<'a>(
     agg: &Aggregate,
+    scope: ColumnScope<'_>,
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
     db_types: Option<&'a HashMap<String, String>>,
 ) -> (ColumnTypeSpec, Option<&'a str>) {
-    let field = agg.field.as_deref().unwrap_or("*");
-    let field_spec = resolve_col_spec(field, col_types);
+    let field = resolve_column(
+        scope.base_table,
+        scope.joins,
+        agg.field.as_deref().unwrap_or("*"),
+        false,
+    );
+    let field_spec = field.lookup(col_types).unwrap_or(&ColumnTypeSpec::Unknown);
     match agg.op {
         AggregateOp::Count => (ColumnTypeSpec::BigInteger, None),
         AggregateOp::Min | AggregateOp::Max => (
             field_spec.clone(),
-            db_types.and_then(|dt| dt.get(field)).map(String::as_str),
+            field.lookup(db_types).map(String::as_str),
         ),
         AggregateOp::Sum | AggregateOp::Avg => {
             let spec = match field_spec {
@@ -210,10 +182,49 @@ pub fn build_filter_node(
     aggregates: Option<&[Aggregate]>,
     dialect: Dialect,
 ) -> Result<SimpleExpr> {
+    build_filter_node_with_scope(
+        node,
+        ColumnScope {
+            base_table: default_table,
+            table: default_table,
+            joins: &[],
+        },
+        col_types,
+        db_types,
+        aggregates,
+        dialect,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ColumnScope<'a> {
+    pub base_table: Option<&'a str>,
+    pub table: Option<&'a str>,
+    pub joins: &'a [JoinSpec],
+}
+
+impl<'a> ColumnScope<'a> {
+    pub(crate) fn unqualified(base_table: &'a str) -> Self {
+        Self {
+            base_table: Some(base_table),
+            table: None,
+            joins: &[],
+        }
+    }
+}
+
+pub(crate) fn build_filter_node_with_scope(
+    node: &FilterNode,
+    column_scope: ColumnScope<'_>,
+    col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    db_types: Option<&HashMap<String, String>>,
+    aggregates: Option<&[Aggregate]>,
+    dialect: Dialect,
+) -> Result<SimpleExpr> {
     match node {
         FilterNode::Condition(filter) => apply_filter(
             filter,
-            default_table,
+            column_scope,
             col_types,
             db_types,
             aggregates,
@@ -225,9 +236,9 @@ pub fn build_filter_node(
                     "AND node must have at least one condition".into(),
                 ));
             }
-            let first = build_filter_node(
+            let first = build_filter_node_with_scope(
                 &conditions[0],
-                default_table,
+                column_scope,
                 col_types,
                 db_types,
                 aggregates,
@@ -235,9 +246,9 @@ pub fn build_filter_node(
             )?;
             let mut result = first;
             for cond in &conditions[1..] {
-                let next = build_filter_node(
+                let next = build_filter_node_with_scope(
                     cond,
-                    default_table,
+                    column_scope,
                     col_types,
                     db_types,
                     aggregates,
@@ -253,9 +264,9 @@ pub fn build_filter_node(
                     "OR node must have at least one condition".into(),
                 ));
             }
-            let first = build_filter_node(
+            let first = build_filter_node_with_scope(
                 &conditions[0],
-                default_table,
+                column_scope,
                 col_types,
                 db_types,
                 aggregates,
@@ -263,9 +274,9 @@ pub fn build_filter_node(
             )?;
             let mut result = first;
             for cond in &conditions[1..] {
-                let next = build_filter_node(
+                let next = build_filter_node_with_scope(
                     cond,
-                    default_table,
+                    column_scope,
                     col_types,
                     db_types,
                     aggregates,
@@ -276,9 +287,9 @@ pub fn build_filter_node(
             Ok(result)
         }
         FilterNode::Not { condition } => {
-            let inner = build_filter_node(
+            let inner = build_filter_node_with_scope(
                 condition,
-                default_table,
+                column_scope,
                 col_types,
                 db_types,
                 aggregates,
@@ -290,17 +301,20 @@ pub fn build_filter_node(
 }
 
 /// Apply filter to expression.
-/// If `aggregates` is provided and the field matches an aggregate alias,
+/// If the aggregate scope contains a matching alias,
 /// the aggregate expression (e.g. SUM("views")) is used instead of a column ref.
 fn apply_filter(
     filter: &Filter,
-    default_table: Option<&str>,
+    column_scope: ColumnScope<'_>,
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
     db_types: Option<&HashMap<String, String>>,
     aggregates: Option<&[Aggregate]>,
     dialect: Dialect,
 ) -> Result<SimpleExpr> {
     let col_name = filter.column.as_ref().unwrap_or(&filter.field);
+    let column = resolve_column(column_scope.base_table, column_scope.joins, col_name, true);
+    let col_spec = column.lookup(col_types).unwrap_or(&ColumnTypeSpec::Unknown);
+    let col_db_type = column.lookup(db_types).map(String::as_str);
 
     // HAVING: substitute aggregate alias with aggregate expression
     let agg_match =
@@ -312,18 +326,17 @@ fn apply_filter(
                 "Array lookups cannot filter on aggregate aliases".into(),
             ));
         }
-        let spec = resolve_col_spec(col_name, col_types);
-        if matches!(spec, ColumnTypeSpec::Unknown) {
+        if matches!(col_spec, ColumnTypeSpec::Unknown) {
             return Err(QueryError::InvalidQuery(format!(
                 "Array lookup on '{col_name}' needs its column type, which this query does not provide"
             )));
         }
         return build_array_filter(
-            &make_col_expr(col_name, default_table),
+            &Expr::col(column.column_ref(column_scope.table)),
             op,
             &filter.value,
-            spec,
-            db_types.and_then(|dt| dt.get(col_name)).map(String::as_str),
+            col_spec,
+            col_db_type,
             dialect,
         );
     }
@@ -331,14 +344,23 @@ fn apply_filter(
     // An aggregate is typed by its result, not by the column of the same name.
     let agg_spec;
     let (col, spec, db_type) = if let Some(agg) = agg_match {
-        let (agg_type, agg_db_type) = aggregate_type(agg, col_types, db_types);
+        let (agg_type, agg_db_type) = aggregate_type(agg, column_scope, col_types, db_types);
         agg_spec = agg_type;
-        (Expr::expr(build_aggregate(agg)?), &agg_spec, agg_db_type)
+        (
+            Expr::expr(build_aggregate_for_table(
+                agg,
+                column_scope.base_table,
+                column_scope.table,
+                column_scope.joins,
+            )?),
+            &agg_spec,
+            agg_db_type,
+        )
     } else {
         (
-            make_col_expr(col_name, default_table),
-            resolve_col_spec(col_name, col_types),
-            db_types.and_then(|dt| dt.get(col_name)).map(String::as_str),
+            Expr::col(column.column_ref(column_scope.table)),
+            col_spec,
+            col_db_type,
         )
     };
 

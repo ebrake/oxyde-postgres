@@ -1,12 +1,12 @@
 //! Query execution: execute, execute_in_transaction, render_sql, explain.
 
-use std::time::Instant;
+use std::{borrow::Cow, collections::HashMap, time::Instant};
 
 use crate::convert::{
     backend_to_dialect, json_to_py, value_to_py, values_to_py, values_to_py_tagged,
 };
 use crate::types::{encode_insert_result, encode_mutation_result};
-use oxyde_codec::QueryIR;
+use oxyde_codec::{AggregateOp, ColumnTypeSpec, QueryIR};
 use oxyde_driver::{
     execute_insert_returning, execute_insert_returning_in_transaction, execute_mutation_returning,
     execute_mutation_returning_in_transaction, execute_query_columnar,
@@ -15,7 +15,8 @@ use oxyde_driver::{
     explain_query, pool_backend as driver_pool_backend, ExplainFormat, ExplainOptions,
     RelationInfo,
 };
-use oxyde_sql::utils::apply_annotation_result_types;
+use oxyde_sql::utils::identifier::{grouped_projection, output_label, resolve_column};
+use oxyde_sql::utils::{value::scalar_result_spec, ExprTypes};
 use oxyde_sql::{build_sql, emits_returning, Dialect};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -26,16 +27,131 @@ fn is_profiling_enabled() -> bool {
     std::env::var("OXYDE_PROFILE").is_ok_and(|v| v == "1")
 }
 
-/// Decode, validate and finalize a msgpack IR. Every entry point that builds
-/// SQL goes through here so IR post-processing (annotation result types) is
-/// applied exactly once, in one place.
+/// Decode and validate a msgpack IR for SQL generation and execution.
 fn decode_ir(bytes: &[u8]) -> PyResult<QueryIR> {
-    let mut ir =
+    let ir =
         QueryIR::from_msgpack(bytes).map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
     ir.validate()
         .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
-    apply_annotation_result_types(&mut ir);
     Ok(ir)
+}
+
+fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
+    if !ir.projects_join_columns() {
+        return None;
+    }
+
+    // Joined columns are typed by their `alias.column` reference, not by
+    // their result label, which a base column of the same name may share.
+    let column_types = ir.column_types.as_ref();
+    ir.joins.as_ref().map(|joins| {
+        joins
+            .iter()
+            .map(|join| {
+                let pk_column = join.pk_column_name();
+                // The encoder reports an out-of-range index if the pk is missing.
+                let pk_index = join
+                    .columns
+                    .iter()
+                    .position(|c| c.column == pk_column)
+                    .unwrap_or(join.columns.len());
+                RelationInfo {
+                    prefix: join.result_prefix.clone(),
+                    pk_index,
+                    field_names: join.columns.iter().map(|c| c.field.clone()).collect(),
+                    column_types: join
+                        .columns
+                        .iter()
+                        .map(|c| {
+                            column_types
+                                .and_then(|types| {
+                                    types.get(&format!("{}.{}", join.alias, c.column))
+                                })
+                                .cloned()
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    })
+}
+
+/// Column types for decoding a result, keyed by the result's column labels.
+///
+/// `ir.column_types` is keyed by column reference and stays as it is for SQL
+/// generation, including HAVING. Result labels can differ from it:
+///
+/// - A grouped query's keys come back under their output labels, typed by the
+///   column each one names.
+/// - Scalar annotations take their types from the expression. Grouped
+///   annotations can reuse physical column names, so use the runtime type
+///   when the expression's type is unknown.
+/// - An aggregate alias can reuse a column name while producing another type.
+///   MIN and MAX return their input's type, so they take the input column's
+///   hint. COUNT, SUM and AVG drop the hint and decode by the runtime type:
+///   SUM over a BIGINT is NUMERIC, which the BIGINT and Timedelta decoders
+///   cannot read.
+fn decode_column_types(ir: &QueryIR) -> Option<Cow<'_, HashMap<String, ColumnTypeSpec>>> {
+    if ir.count.unwrap_or(false) || ir.exists.unwrap_or(false) {
+        return None;
+    }
+    let column_types = ir.column_types.as_ref()?;
+    let joins = ir.joins.as_deref().unwrap_or_default();
+    let column_type = |field| {
+        let resolved = resolve_column(Some(&ir.table), joins, field, false);
+        resolved.lookup(Some(column_types))
+    };
+    let mut types = Cow::Borrowed(column_types);
+    for field in grouped_projection(ir) {
+        let label = output_label(ir, field);
+        match column_type(field) {
+            Some(spec) if types.get(&label) != Some(spec) => {
+                types.to_mut().insert(label, spec.clone());
+            }
+            Some(_) => {}
+            None if types.contains_key(&label) => {
+                types.to_mut().remove(&label);
+            }
+            None => {}
+        }
+    }
+    let grouped = ir
+        .group_by
+        .as_ref()
+        .is_some_and(|fields| !fields.is_empty());
+    let expr_types = ExprTypes::from(ir.column_types.as_ref());
+    for annotation in ir.annotations.iter().flatten() {
+        match scalar_result_spec(&annotation.expr, expr_types) {
+            Some(spec) if types.get(&annotation.alias) != Some(spec) => {
+                types
+                    .to_mut()
+                    .insert(annotation.alias.clone(), spec.clone());
+            }
+            None if grouped && types.contains_key(&annotation.alias) => {
+                types.to_mut().remove(&annotation.alias);
+            }
+            _ => {}
+        }
+    }
+    for agg in ir.aggregates.iter().flatten() {
+        let Some(alias) = agg.alias.as_ref() else {
+            continue;
+        };
+        let input = match agg.op {
+            AggregateOp::Min | AggregateOp::Max => agg.field.as_deref().and_then(column_type),
+            AggregateOp::Count | AggregateOp::Sum | AggregateOp::Avg => None,
+        };
+        match input {
+            Some(spec) => {
+                types.to_mut().insert(alias.clone(), spec.clone());
+            }
+            None if types.contains_key(alias) => {
+                types.to_mut().remove(alias);
+            }
+            None => {}
+        }
+    }
+    Some(types)
 }
 
 /// Execute a query: deserialize IR → validate → build SQL → execute → msgpack bytes → Coroutine[bytes].
@@ -67,26 +183,19 @@ pub(crate) fn execute<'py>(
         let results = match ir.op {
             oxyde_codec::Operation::Select | oxyde_codec::Operation::Raw => {
                 let exec_start = Instant::now();
-                let is_scalar = ir.count.unwrap_or(false) || ir.exists.unwrap_or(false);
-                let (result, num_rows) = if let (false, Some(joins)) = (is_scalar, &ir.joins) {
-                    let relations: Vec<RelationInfo> = joins
-                        .iter()
-                        .map(|j| RelationInfo {
-                            prefix: j.result_prefix.clone(),
-                            pk_col: j.pk_result_column(),
-                        })
-                        .collect();
+                let column_types = decode_column_types(&ir);
+                let (result, num_rows) = if let Some(relations) = relations_for(&ir) {
                     execute_query_columnar_dedup(
                         &pool_name,
                         &sql,
                         &params,
-                        ir.column_types.as_ref(),
+                        column_types.as_deref(),
                         &relations,
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
                 } else {
-                    execute_query_columnar(&pool_name, &sql, &params, ir.column_types.as_ref())
+                    execute_query_columnar(&pool_name, &sql, &params, column_types.as_deref())
                         .await
                         .map_err(|e| crate::errors::driver_err(&e))?
                 };
@@ -195,20 +304,13 @@ pub(crate) fn execute_in_transaction<'py>(
 
         let results = match ir.op {
             oxyde_codec::Operation::Select | oxyde_codec::Operation::Raw => {
-                let is_scalar = ir.count.unwrap_or(false) || ir.exists.unwrap_or(false);
-                let (result, _num_rows) = if let (false, Some(joins)) = (is_scalar, &ir.joins) {
-                    let relations: Vec<RelationInfo> = joins
-                        .iter()
-                        .map(|j| RelationInfo {
-                            prefix: j.result_prefix.clone(),
-                            pk_col: j.pk_result_column(),
-                        })
-                        .collect();
+                let column_types = decode_column_types(&ir);
+                let (result, _num_rows) = if let Some(relations) = relations_for(&ir) {
                     execute_query_columnar_dedup_in_transaction(
                         tx_id,
                         &sql,
                         &params,
-                        ir.column_types.as_ref(),
+                        column_types.as_deref(),
                         &relations,
                     )
                     .await
@@ -218,7 +320,7 @@ pub(crate) fn execute_in_transaction<'py>(
                         tx_id,
                         &sql,
                         &params,
-                        ir.column_types.as_ref(),
+                        column_types.as_deref(),
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
@@ -373,4 +475,259 @@ pub(crate) fn explain<'py>(
 
         Python::attach(|py| json_to_py(py, &plan))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_column_types, relations_for};
+    use oxyde_codec::{
+        Aggregate, AggregateOp, Annotation, ColumnTypeSpec, JoinColumn, JoinSpec, QueryIR,
+        ScalarExpr,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn only_joined_row_queries_use_relation_encoding() {
+        let mut ir = QueryIR::default();
+        assert!(relations_for(&ir).is_none());
+
+        ir.joins = Some(vec![JoinSpec {
+            path: "author".into(),
+            alias: "author".into(),
+            parent: None,
+            table: "authors".into(),
+            source_column: "author_id".into(),
+            target_column: "author_pk".into(),
+            pk_column: None,
+            result_prefix: "author".into(),
+            columns: vec![
+                JoinColumn {
+                    field: "name".into(),
+                    column: "name".into(),
+                },
+                JoinColumn {
+                    field: "id".into(),
+                    column: "author_pk".into(),
+                },
+            ],
+        }]);
+        // The result label "author__name" may belong to a base column of
+        // another type; the joined column is typed by "author.name".
+        ir.column_types = Some(HashMap::from([
+            ("author__name".into(), ColumnTypeSpec::BigInteger),
+            ("author.name".into(), ColumnTypeSpec::Text),
+        ]));
+        let relations = relations_for(&ir).unwrap();
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].prefix, "author");
+        assert_eq!(relations[0].pk_index, 1);
+        assert_eq!(relations[0].field_names, ["name", "id"]);
+        assert_eq!(
+            relations[0].column_types,
+            vec![Some(ColumnTypeSpec::Text), None]
+        );
+
+        ir.count = Some(true);
+        assert!(relations_for(&ir).is_none());
+        ir.count = None;
+        ir.exists = Some(true);
+        assert!(relations_for(&ir).is_none());
+        ir.exists = None;
+
+        ir.group_by = Some(vec!["author.author_pk".into()]);
+        assert!(relations_for(&ir).is_none());
+        ir.group_by = None;
+
+        ir.aggregates = Some(vec![Aggregate {
+            op: AggregateOp::Sum,
+            field: Some("views".into()),
+            alias: Some("total".into()),
+            distinct: None,
+        }]);
+        assert!(relations_for(&ir).is_none());
+        ir.aggregates = Some(vec![]);
+        assert!(relations_for(&ir).is_none());
+    }
+
+    #[test]
+    fn relation_identity_uses_the_primary_key_when_joining_an_alternate_key() {
+        let ir = QueryIR {
+            joins: Some(vec![JoinSpec {
+                path: "author".into(),
+                alias: "author".into(),
+                parent: None,
+                table: "authors".into(),
+                source_column: "author_tags".into(),
+                target_column: "tags".into(),
+                pk_column: Some("author_pk".into()),
+                result_prefix: "author".into(),
+                columns: vec![
+                    JoinColumn {
+                        field: "tags".into(),
+                        column: "tags".into(),
+                    },
+                    JoinColumn {
+                        field: "id".into(),
+                        column: "author_pk".into(),
+                    },
+                ],
+            }]),
+            ..Default::default()
+        };
+        let relations = relations_for(&ir).unwrap();
+        assert_eq!(relations[0].pk_index, 1);
+        assert_eq!(relations[0].field_names[relations[0].pk_index], "id");
+    }
+
+    fn agg(op: AggregateOp, field: &str, alias: &str) -> Aggregate {
+        Aggregate {
+            op,
+            field: Some(field.into()),
+            alias: Some(alias.into()),
+            distinct: None,
+        }
+    }
+
+    #[test]
+    fn counted_and_summed_aliases_use_runtime_decode_types() {
+        let ir = QueryIR {
+            column_types: Some(HashMap::from([
+                ("author__name".into(), ColumnTypeSpec::Text),
+                ("views".into(), ColumnTypeSpec::BigInteger),
+                ("duration".into(), ColumnTypeSpec::Timedelta),
+                ("author.name".into(), ColumnTypeSpec::Text),
+            ])),
+            aggregates: Some(vec![
+                agg(AggregateOp::Count, "author.name", "author__name"),
+                agg(AggregateOp::Sum, "views", "views"),
+                agg(AggregateOp::Avg, "duration", "duration"),
+            ]),
+            ..Default::default()
+        };
+
+        let decode_types = decode_column_types(&ir).unwrap();
+        assert!(!decode_types.contains_key("author__name"));
+        assert!(!decode_types.contains_key("views"));
+        assert!(!decode_types.contains_key("duration"));
+        assert_eq!(decode_types.get("author.name"), Some(&ColumnTypeSpec::Text));
+        assert_eq!(
+            ir.column_types.as_ref().unwrap().get("views"),
+            Some(&ColumnTypeSpec::BigInteger),
+        );
+    }
+
+    #[test]
+    fn min_and_max_aliases_decode_as_their_input() {
+        let ir = QueryIR {
+            column_types: Some(HashMap::from([
+                ("duration".into(), ColumnTypeSpec::Timedelta),
+                ("started".into(), ColumnTypeSpec::Timedelta),
+                ("label".into(), ColumnTypeSpec::Text),
+                ("author.score".into(), ColumnTypeSpec::Double),
+                ("author.duration".into(), ColumnTypeSpec::Timedelta),
+            ])),
+            aggregates: Some(vec![
+                agg(AggregateOp::Max, "duration", "duration"),
+                agg(AggregateOp::Min, "started", "started"),
+                agg(AggregateOp::Max, "author.score", "label"),
+                agg(AggregateOp::Max, "author.duration", "longest"),
+                agg(AggregateOp::Sum, "author.duration", "total"),
+            ]),
+            ..Default::default()
+        };
+
+        let decode_types = decode_column_types(&ir).unwrap();
+        assert_eq!(
+            decode_types.get("duration"),
+            Some(&ColumnTypeSpec::Timedelta)
+        );
+        assert_eq!(
+            decode_types.get("started"),
+            Some(&ColumnTypeSpec::Timedelta)
+        );
+        assert_eq!(decode_types.get("label"), Some(&ColumnTypeSpec::Double));
+        assert_eq!(
+            decode_types.get("longest"),
+            Some(&ColumnTypeSpec::Timedelta)
+        );
+        assert!(!decode_types.contains_key("total"));
+    }
+
+    #[test]
+    fn count_and_exists_use_runtime_decode_types() {
+        let mut ir = QueryIR {
+            column_types: Some(HashMap::from([
+                ("_count".into(), ColumnTypeSpec::Date),
+                ("elapsed_us".into(), ColumnTypeSpec::Timedelta),
+            ])),
+            count: Some(true),
+            ..Default::default()
+        };
+        assert!(decode_column_types(&ir).is_none());
+
+        ir.count = None;
+        ir.exists = Some(true);
+        ir.cols = Some(vec!["elapsed_us".into()]);
+        ir.group_by = ir.cols.clone();
+        ir.output_labels = Some(HashMap::from([("elapsed_us".into(), "exists".into())]));
+        assert!(decode_column_types(&ir).is_none());
+    }
+
+    #[test]
+    fn grouped_keys_decode_under_their_output_labels() {
+        let ir = QueryIR {
+            table: "items".into(),
+            column_types: Some(HashMap::from([
+                ("items.supplier__name".into(), ColumnTypeSpec::BigInteger),
+                ("supplier.name".into(), ColumnTypeSpec::Text),
+            ])),
+            group_by: Some(vec!["items.supplier__name".into(), "supplier.name".into()]),
+            aggregates: Some(vec![agg(AggregateOp::Count, "id", "n")]),
+            output_labels: Some(HashMap::from([
+                ("items.supplier__name".into(), "cached_supplier".into()),
+                ("supplier.name".into(), "supplier__name".into()),
+            ])),
+            ..Default::default()
+        };
+
+        let decode_types = decode_column_types(&ir).unwrap();
+        assert_eq!(
+            decode_types.get("cached_supplier"),
+            Some(&ColumnTypeSpec::BigInteger)
+        );
+        assert_eq!(
+            decode_types.get("supplier__name"),
+            Some(&ColumnTypeSpec::Text)
+        );
+    }
+
+    #[test]
+    fn grouped_scalar_alias_decodes_independently_of_its_namesake_column() {
+        let mut ir = QueryIR {
+            table: "posts".into(),
+            column_types: Some(HashMap::from([
+                ("bucket".into(), ColumnTypeSpec::Timedelta),
+                ("name".into(), ColumnTypeSpec::Text),
+            ])),
+            cols: Some(vec!["posts.bucket".into()]),
+            group_by: Some(vec!["posts.bucket".into(), "bucket".into()]),
+            output_labels: Some(HashMap::from([("posts.bucket".into(), "duration".into())])),
+            annotations: Some(vec![Annotation {
+                alias: "bucket".into(),
+                expr: ScalarExpr::Column {
+                    name: "name".into(),
+                },
+            }]),
+            ..Default::default()
+        };
+
+        let types = decode_column_types(&ir).unwrap();
+        assert_eq!(types.get("duration"), Some(&ColumnTypeSpec::Timedelta));
+        assert_eq!(types.get("bucket"), Some(&ColumnTypeSpec::Text));
+
+        ir.annotations.as_mut().unwrap()[0].expr = ScalarExpr::Raw { sql: "42".into() };
+        let types = decode_column_types(&ir).unwrap();
+        assert_eq!(types.get("duration"), Some(&ColumnTypeSpec::Timedelta));
+        assert!(!types.contains_key("bucket"));
+    }
 }

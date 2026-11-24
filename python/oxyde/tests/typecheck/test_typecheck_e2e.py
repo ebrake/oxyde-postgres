@@ -246,7 +246,6 @@ def test_mypy_accepts_model_source(
     )
 
 
-@pytest.mark.skipif(sys.version_info < (3, 15), reason="requires native lazy imports")
 @pytest.mark.parametrize("checker", ["mypy", "pyright", "ty"])
 def test_native_lazy_imports_generate_portable_stubs(
     checker: str, tmp_path: Path, generate_stubs
@@ -254,12 +253,12 @@ def test_native_lazy_imports_generate_portable_stubs(
     source_dir = tmp_path / "lazy_source"
     source_dir.mkdir()
     (source_dir / "module.py").write_text(
-        "from __future__ import annotations\n"
-        "from oxyde import Field, Model\n"
+        "lazy from oxyde import Field, Model\n"
         "lazy import sibling\n"
         "lazy from sibling import Related, DEFAULT_INTERVAL\n"
         "class Entry(Model):\n"
         "    id: int | None = Field(default=None, db_pk=True)\n"
+        "    related_model: Related | None = None\n"
         "    def related(self) -> Related | None:\n"
         "        return None\n"
         "    class Meta:\n"
@@ -268,8 +267,12 @@ def test_native_lazy_imports_generate_portable_stubs(
         "    return value\n"
     )
     (source_dir / "sibling.py").write_text(
+        "from oxyde import Field, Model\n"
         "DEFAULT_INTERVAL: int = 30\n"
-        "class Related:\n"
+        "class Related(Model):\n"
+        "    id: int | None = Field(default=None, db_pk=True)\n"
+        "    class Meta:\n"
+        "        is_table = True\n"
         "    def label(self) -> str:\n"
         "        return 'related'\n"
     )
@@ -279,6 +282,8 @@ def test_native_lazy_imports_generate_portable_stubs(
         "from sibling import Related\n"
         "interval: int = DEFAULT_INTERVAL\n"
         "def check(entry: Entry, related: Related) -> None:\n"
+        "    assert_type(entry.related_model, Related | None)\n"
+        "    assert_type(entry.related_model_id, int | None)\n"
         "    assert_type(entry.related(), Related | None)\n"
         "    assert_type(helper(related), Related)\n"
     )

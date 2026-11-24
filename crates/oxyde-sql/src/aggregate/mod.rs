@@ -1,22 +1,38 @@
 //! Aggregate function building
 
-use oxyde_codec::{Aggregate, AggregateOp};
+use oxyde_codec::{Aggregate, AggregateOp, JoinSpec};
 use sea_query::{Asterisk, Expr, Func, SimpleExpr};
 
 use crate::error::{QueryError, Result};
-use crate::utils::ColumnIdent;
+use crate::utils::identifier::resolve_column;
 
 /// Build aggregate expression from Aggregate specification
 pub fn build_aggregate(agg: &Aggregate) -> Result<SimpleExpr> {
+    build_aggregate_for_table(agg, None, None, &[])
+}
+
+pub(crate) fn build_aggregate_for_table(
+    agg: &Aggregate,
+    base_table: Option<&str>,
+    table: Option<&str>,
+    joins: &[JoinSpec],
+) -> Result<SimpleExpr> {
+    let column =
+        |name: &str| Expr::col(resolve_column(base_table, joins, name, false).column_ref(table));
     let distinct = agg.distinct.unwrap_or(false);
     let expr =
         match &agg.op {
             AggregateOp::Count => {
-                let col = match &agg.field {
-                    Some(f) if f != "*" => Expr::col(ColumnIdent(f.clone())),
+                let col = match agg.field.as_deref() {
+                    Some(field) if field != "*" => column(field),
+                    _ if distinct => {
+                        return Err(QueryError::InvalidQuery(
+                            "COUNT(DISTINCT ...) requires a field".into(),
+                        ));
+                    }
                     _ => Expr::col(Asterisk),
                 };
-                if distinct && agg.field.as_deref() != Some("*") {
+                if distinct {
                     Func::count_distinct(col).into()
                 } else {
                     Func::count(col).into()
@@ -26,7 +42,7 @@ pub fn build_aggregate(agg: &Aggregate) -> Result<SimpleExpr> {
                 let field = agg.field.as_ref().ok_or_else(|| {
                     QueryError::InvalidQuery("SUM aggregate requires field".into())
                 })?;
-                let col = Expr::col(ColumnIdent(field.clone()));
+                let col = column(field);
                 if distinct {
                     Expr::cust_with_expr("SUM(DISTINCT $1)", col)
                 } else {
@@ -37,7 +53,7 @@ pub fn build_aggregate(agg: &Aggregate) -> Result<SimpleExpr> {
                 let field = agg.field.as_ref().ok_or_else(|| {
                     QueryError::InvalidQuery("AVG aggregate requires field".into())
                 })?;
-                let col = Expr::col(ColumnIdent(field.clone()));
+                let col = column(field);
                 if distinct {
                     Expr::cust_with_expr("AVG(DISTINCT $1)", col)
                 } else {
@@ -49,14 +65,14 @@ pub fn build_aggregate(agg: &Aggregate) -> Result<SimpleExpr> {
                     QueryError::InvalidQuery("MAX aggregate requires field".into())
                 })?;
                 // DISTINCT is meaningless for MAX
-                Func::max(Expr::col(ColumnIdent(field.clone()))).into()
+                Func::max(column(field)).into()
             }
             AggregateOp::Min => {
                 let field = agg.field.as_ref().ok_or_else(|| {
                     QueryError::InvalidQuery("MIN aggregate requires field".into())
                 })?;
                 // DISTINCT is meaningless for MIN
-                Func::min(Expr::col(ColumnIdent(field.clone()))).into()
+                Func::min(column(field)).into()
             }
         };
     Ok(expr)

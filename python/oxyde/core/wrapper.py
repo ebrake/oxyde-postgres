@@ -49,7 +49,7 @@ from collections.abc import Callable
 from typing import Any
 
 # Expected ABI version - must match __abi_version__ in Rust module
-EXPECTED_ABI_VERSION = 1
+EXPECTED_ABI_VERSION = 2
 
 # Function registry: (rust_name, export_name, is_async, is_noop_fallback)
 # - rust_name: name in _oxyde_core module
@@ -143,7 +143,7 @@ def _load_functions() -> dict[str, Callable[..., Any]]:
         if abi_version != EXPECTED_ABI_VERSION:
             raise ImportError(
                 f"ABI version mismatch: expected {EXPECTED_ABI_VERSION}, "
-                f"got {abi_version}. Please reinstall oxyde-postgres-core."
+                f"got {abi_version}. Please install oxyde-postgres-core>=0.3.5."
             )
 
         # Load each function from registry

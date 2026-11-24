@@ -29,11 +29,11 @@ jobs:
         uses: astral-sh/setup-uv@v8.0.0
 
       - name: Set up Python
-        run: uv python install 3.13
+        run: uv python install 3.15
 
       - name: Install dependencies
         run: |
-          uv venv
+          uv venv --python 3.15
           uv pip install -r docs/requirements.txt
 
       - name: Configure git
@@ -48,7 +48,7 @@ jobs:
           VERSION="${{ inputs.version }}"
           VERSION="${VERSION#v}"           # Remove 'v' prefix
           VERSION="${VERSION%.*}"          # Remove patch version
-          echo "short=$VERSION" >> $GITHUB_OUTPUT
+          echo "short=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Deploy docs
         run: |

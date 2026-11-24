@@ -320,6 +320,16 @@ def _resolve_field_path(
     )
 
 
+def _resolve_related_field(model_class: type[Model], field: str) -> ResolvedPath | None:
+    """Resolve a related field name, allowing base fields and raw column names."""
+    if "__" not in field or field in model_class._db_meta.field_metadata:
+        return None
+    try:
+        return _resolve_field_path(model_class, field.split("__"))
+    except FieldError, FieldLookupError:
+        return None
+
+
 def _resolve_column_meta(model_class: type[Model], field_name: str) -> ColumnMeta:
     """Resolve column metadata for a field, creating basic metadata if needed."""
     meta = model_class._db_meta.field_metadata.get(field_name)
@@ -369,7 +379,7 @@ def _resolve_lookup(model_class: type[Model], key: str) -> tuple[ResolvedPath, s
         raise error
     try:
         return _resolve_field_path(model_class, [*field_path, lookup]), "exact"
-    except (FieldError, FieldLookupError):
+    except FieldError, FieldLookupError:
         raise error from None
 
 

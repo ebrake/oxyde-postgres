@@ -11,7 +11,7 @@ Attributes:
     parent_alias: SQL alias of parent table
     attr_name: Attribute name on parent model (e.g., "author")
     source_column: FK column on source table (e.g., "author_id")
-    target_column: PK column on target table (e.g., "id")
+    target_column: Referenced database column on the target table
     columns: List of (field_name, db_column) for SELECT
     target_model: Model class being joined
     parent_model: Model class of the parent

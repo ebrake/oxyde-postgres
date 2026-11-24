@@ -823,18 +823,23 @@ def _assemble_imports(
                 plain[bound] = alias
 
     import_nodes: list[ast.Import | ast.ImportFrom] = [
-        ast.ImportFrom(module=module, names=list(aliases.values()), level=level)
+        ast.ImportFrom(
+            module=module, names=list(aliases.values()), level=level, is_lazy=False
+        )
         for (level, module), aliases in from_groups.items()
     ]
     import_nodes.extend(
-        ast.ImportFrom(module=module, names=[ast.alias(name="*")], level=level)
+        ast.ImportFrom(
+            module=module, names=[ast.alias(name="*")], level=level, is_lazy=False
+        )
         for level, module in star_modules
     )
-    import_nodes.extend(ast.Import(names=[alias]) for alias in plain.values())
+    import_nodes.extend(
+        ast.Import(names=[alias], is_lazy=False) for alias in plain.values()
+    )
     stdlib_lines: list[str] = []
     other_lines: list[str] = []
     for node in import_nodes:
-        setattr(node, "is_lazy", False)
         line = ast.unparse(node)
         if (
             isinstance(node, ast.ImportFrom)

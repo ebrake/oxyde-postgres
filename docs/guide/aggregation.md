@@ -100,6 +100,34 @@ results = await User.objects.filter(
 ).group_by("city").all()
 ```
 
+### Related Fields
+
+Group keys, aggregate inputs and `order_by()` can name fields through foreign
+keys. The query joins the related table itself:
+
+```python
+# Posts per author name
+results = await (
+    Post.objects.annotate(count=Count("*"))
+    .group_by("author__name")
+    .order_by("author__name")
+    .values("author__name", "count")
+    .all()
+)
+# Result: [{"author__name": "Alice", "count": 2}, ...]
+```
+
+A related field returned by an aggregate query must be one of its group keys.
+
+!!! note "Field names come first"
+    A name is a field, then a path through foreign keys, then a raw column
+    name. If a model maps a field to a column named like a relation path
+    (`cached: str = Field(db_column="supplier__name")` next to a `supplier`
+    foreign key), `"supplier__name"` names the related field in grouping,
+    aggregates and ordering, as it does in `filter()`. Use the field name,
+    `"cached"`, for the column. Without grouping, `values()` still reads such
+    a name as the raw column.
+
 ## HAVING
 
 Filter on aggregate results:

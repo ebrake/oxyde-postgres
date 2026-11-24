@@ -63,7 +63,7 @@
 //!
 //! # ABI Version
 //!
-//! `__abi_version__ = 1` exposed for Python-side compatibility checking.
+//! `__abi_version__ = 2` exposed for Python-side compatibility checking.
 
 // Use mimalloc as global allocator if feature enabled
 #[cfg(feature = "mimalloc")]
@@ -85,7 +85,7 @@ mod types;
 use pyo3::prelude::*;
 
 /// ABI version for compatibility checking
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 
 /// Python module definition
 #[pymodule(gil_used = false)]

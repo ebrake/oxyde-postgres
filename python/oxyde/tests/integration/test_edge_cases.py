@@ -90,6 +90,19 @@ class TestUnion:
         # Union all: [1,2] + [1,3] = [1,1,2,3]
         assert ids == [1, 1, 2, 3]
 
+    @pytest.mark.asyncio
+    async def test_distinct_union_all_with_explicit_fields_and_join(self, db):
+        query = Post.objects.join("author").filter(author_id=1).select("id", "title")
+        union = query.distinct().union_all(query)
+        expected = [(1, "Rust Patterns")] * 2 + [(2, "Async Python")] * 2
+
+        posts = await union.all(using=db.name)
+        assert sorted((post.id, post.title) for post in posts) == expected
+
+        rows = await union.values("id", "title").all(using=db.name)
+        assert sorted((row["id"], row["title"]) for row in rows) == expected
+        assert all(row.keys() == {"id", "title"} for row in rows)
+
 
 class TestSqlDebug:
     def test_sql_returns_query(self):

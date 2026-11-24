@@ -251,8 +251,14 @@ mod tests {
 
     #[test]
     fn test_qualified_filter_enum_value_is_cast_on_postgres() {
+        let mut author = author_join();
+        author.columns.push(JoinColumn {
+            field: "status".into(),
+            column: "status".into(),
+        });
         let ir = QueryIR {
             table: "posts".into(),
+            joins: Some(vec![author]),
             cols: Some(vec!["id".into()]),
             filter_tree: Some(filter_with_column(
                 "status",
@@ -272,8 +278,14 @@ mod tests {
     fn test_qualified_column_type_wins_over_same_named_base_column() {
         // The base model's `status` is text; the joined `author.status` is an
         // enum. The query-level map holds both, keyed by SQL column reference.
+        let mut author = author_join();
+        author.columns.push(JoinColumn {
+            field: "status".into(),
+            column: "status".into(),
+        });
         let ir = QueryIR {
             table: "posts".into(),
+            joins: Some(vec![author]),
             cols: Some(vec!["id".into()]),
             filter_tree: Some(filter_with_column(
                 "status",
@@ -295,8 +307,14 @@ mod tests {
     fn test_qualified_column_without_a_spec_ignores_the_base_column() {
         // The base model's `name` is JSON; the joined `author.name` has no
         // spec (e.g. db_type="CITEXT"), so LIKE must not unwrap it as JSON.
+        let mut author = author_join();
+        author.columns.push(JoinColumn {
+            field: "name".into(),
+            column: "name".into(),
+        });
         let ir = QueryIR {
             table: "posts".into(),
+            joins: Some(vec![author]),
             cols: Some(vec!["id".into()]),
             filter_tree: Some(filter_with_column(
                 "name",
@@ -440,6 +458,7 @@ mod tests {
             table: "authors".into(),
             source_column: "author_id".into(),
             target_column: "id".into(),
+            pk_column: None,
             result_prefix: "author".into(),
             columns: vec![
                 JoinColumn {
@@ -497,6 +516,7 @@ mod tests {
             table: "authors".into(),
             source_column: "author_id".into(),
             target_column: "id".into(),
+            pk_column: None,
             result_prefix: "author".into(),
             columns: vec![JoinColumn {
                 field: "id".into(),

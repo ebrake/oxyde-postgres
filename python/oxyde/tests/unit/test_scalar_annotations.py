@@ -222,7 +222,7 @@ class TestGuards:
         with pytest.raises(ValueError, match="conflicts"):
             ScalarItem.objects.annotate(name=Coalesce("name", "x"))
         with pytest.raises(ValueError, match="conflicts"):
-            ScalarItem.objects.annotate(stock_qty=Coalesce("stock", 0))
+            ScalarItem.objects.annotate(stock_qty=Coalesce("stock", 0)).to_ir()
 
     def test_having_rejects_scalar_alias(self):
         q = ScalarItem.objects.annotate(e=eff_min())
