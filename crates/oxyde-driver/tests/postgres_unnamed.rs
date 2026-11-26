@@ -376,6 +376,7 @@ async fn cold_enum_arrays_reach_oxyde_encoder_in_the_owning_transaction() {
         "SELECT ARRAY['happy', NULL, 'with,comma']::pg_temp.encoded_mood[] AS moods",
         &[],
         Some(&types),
+        false,
     )
     .await
     .unwrap();

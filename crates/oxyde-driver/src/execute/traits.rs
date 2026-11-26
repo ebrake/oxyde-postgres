@@ -8,7 +8,9 @@ use sea_query::Value;
 use std::collections::HashMap;
 
 use crate::bind::bind_postgres;
-use crate::convert::encoder::{encode_stream, encode_stream_mutation_returning, RelationInfo};
+use crate::convert::encoder::{
+    encode_stream, encode_stream_mutation_returning, RelationInfo, ResultOptions,
+};
 use crate::convert::postgres::PgEncoder;
 use crate::error::{DriverError, Result};
 use crate::pool::DbPool;
@@ -33,6 +35,7 @@ pub trait PoolExec {
         sql: &str,
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)>;
 
     /// Execute a SELECT with JOIN dedup encoding.
@@ -42,6 +45,7 @@ pub trait PoolExec {
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
         relations: &[RelationInfo],
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)>;
 
     /// Execute a mutation with RETURNING clause, return pre-encoded msgpack map.
@@ -69,6 +73,7 @@ pub trait ConnExec {
         sql: &str,
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)>;
 
     /// Execute a SELECT with JOIN dedup encoding.
@@ -78,6 +83,7 @@ pub trait ConnExec {
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
         relations: &[RelationInfo],
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)>;
 
     /// Execute a mutation with RETURNING clause, return pre-encoded msgpack map.
@@ -103,12 +109,13 @@ impl PoolExec for DbPool {
         sql: &str,
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbPool::Postgres(pool) => {
                 let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(pool);
-                encode_stream::<PgEncoder, _>(stream, col_types, None)
+                encode_stream::<PgEncoder, _>(stream, col_types, None, options)
                     .await
                     .map_err(exec_err)
             }
@@ -121,12 +128,13 @@ impl PoolExec for DbPool {
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
         relations: &[RelationInfo],
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbPool::Postgres(pool) => {
                 let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(pool);
-                encode_stream::<PgEncoder, _>(stream, col_types, Some(relations))
+                encode_stream::<PgEncoder, _>(stream, col_types, Some(relations), options)
                     .await
                     .map_err(exec_err)
             }
@@ -178,12 +186,13 @@ impl ConnExec for DbTx {
         sql: &str,
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbTx::Postgres(tx) => {
                 let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(&mut **tx);
-                encode_stream::<PgEncoder, _>(stream, col_types, None)
+                encode_stream::<PgEncoder, _>(stream, col_types, None, options)
                     .await
                     .map_err(exec_err)
             }
@@ -196,12 +205,13 @@ impl ConnExec for DbTx {
         params: &[Value],
         col_types: Option<&HashMap<String, ColumnTypeSpec>>,
         relations: &[RelationInfo],
+        options: ResultOptions<'_>,
     ) -> Result<(Vec<u8>, usize)> {
         match self {
             DbTx::Postgres(tx) => {
                 let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
                 let stream = query.fetch(&mut **tx);
-                encode_stream::<PgEncoder, _>(stream, col_types, Some(relations))
+                encode_stream::<PgEncoder, _>(stream, col_types, Some(relations), options)
                     .await
                     .map_err(exec_err)
             }

@@ -31,7 +31,7 @@ fn decode_columnar(buf: &[u8]) -> (Vec<String>, Vec<Vec<rmpv::Value>>) {
 
 #[tokio::test]
 #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
-async fn postgres_encodes_out_of_range_temporal_values_as_nil() {
+async fn postgres_encodes_out_of_range_temporal_values_as_text() {
     let pool_name = format!("temporal_limits_{}", Uuid::new_v4().simple());
     init_pool(
         &pool_name,
@@ -44,7 +44,7 @@ async fn postgres_encodes_out_of_range_temporal_values_as_nil() {
     let sql = "SELECT 'infinity'::date AS infinite_date, \
                'infinity'::timestamp AS infinite_timestamp, \
                '294276-12-31'::date AS large_date";
-    let (bytes, count) = execute_query_columnar(&pool_name, sql, &[], None)
+    let (bytes, count) = execute_query_columnar(&pool_name, sql, &[], None, false)
         .await
         .unwrap();
     let (columns, rows) = decode_columnar(&bytes);
@@ -53,7 +53,14 @@ async fn postgres_encodes_out_of_range_temporal_values_as_nil() {
         columns,
         ["infinite_date", "infinite_timestamp", "large_date"]
     );
-    assert_eq!(rows, vec![vec![rmpv::Value::Nil; 3]]);
+    assert_eq!(
+        rows,
+        vec![vec![
+            rmpv::Value::from("infinity"),
+            rmpv::Value::from("infinity"),
+            rmpv::Value::from("294276-12-31")
+        ]]
+    );
 
     close_pool(&pool_name).await.unwrap();
 }
@@ -77,8 +84,9 @@ async fn postgres_dedup_uses_field_names_for_truncated_join_labels() {
         pk_index: 0,
         field_names: vec!["id".into(), "name".into()],
         column_types: vec![None, None],
+        text_columns: std::collections::HashSet::new(),
     }];
-    let (bytes, _) = execute_query_columnar_dedup(&pool_name, &sql, &[], None, &relations)
+    let (bytes, _) = execute_query_columnar_dedup(&pool_name, &sql, &[], None, &relations, false)
         .await
         .unwrap();
     let result: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
@@ -141,6 +149,8 @@ async fn postgres_end_to_end_pipeline() {
         table: "users".into(),
         cols: None,
         column_types: None,
+        result_kinds: None,
+        text_columns: None,
         column_db_types: None,
         bind_types: None,
         filter_tree: None,
@@ -182,6 +192,8 @@ async fn postgres_end_to_end_pipeline() {
         table: "users".into(),
         cols: Some(vec!["id".into(), "name".into()]),
         column_types: None,
+        result_kinds: None,
+        text_columns: None,
         column_db_types: None,
         bind_types: None,
         filter_tree: Some(FilterNode::Condition(Filter {
@@ -219,9 +231,10 @@ async fn postgres_end_to_end_pipeline() {
         pk_column: None,
     };
     let (select_sql, select_params) = build_sql(&select_ir, Dialect::Postgres).unwrap();
-    let (bytes, num_rows) = execute_query_columnar(&pool_name, &select_sql, &select_params, None)
-        .await
-        .unwrap();
+    let (bytes, num_rows) =
+        execute_query_columnar(&pool_name, &select_sql, &select_params, None, false)
+            .await
+            .unwrap();
 
     assert_eq!(num_rows, 1);
     let (columns, rows) = decode_columnar(&bytes);
@@ -300,7 +313,7 @@ async fn postgres_joined_aggregate_pipeline() {
     };
 
     let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
-    let (bytes, num_rows) = execute_query_columnar(&pool_name, &sql, &params, None)
+    let (bytes, num_rows) = execute_query_columnar(&pool_name, &sql, &params, None, false)
         .await
         .unwrap();
     assert_eq!(num_rows, 1);
@@ -338,7 +351,7 @@ async fn postgres_joined_aggregate_pipeline() {
     ir.order_by = Some(vec![("n".into(), "DESC".into())]);
 
     let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
-    let (bytes, num_rows) = execute_query_columnar(&pool_name, &sql, &params, None)
+    let (bytes, num_rows) = execute_query_columnar(&pool_name, &sql, &params, None, false)
         .await
         .unwrap();
     assert_eq!(num_rows, 1);

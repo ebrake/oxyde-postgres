@@ -8,3 +8,4 @@
 
 pub mod encoder;
 pub mod postgres;
+mod postgres_types;

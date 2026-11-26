@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::debug;
 
-use crate::convert::encoder::RelationInfo;
+use crate::convert::encoder::{RelationInfo, ResultOptions};
 use crate::error::{DriverError, Result};
 use crate::execute::traits::{ConnExec, PoolExec};
 use crate::{registry, transaction_registry};
@@ -17,11 +17,12 @@ fn is_profiling_enabled() -> bool {
 }
 
 /// Execute a SELECT query and return pre-encoded msgpack bytes + row count.
-pub async fn execute_query_columnar(
+pub async fn execute_query_columnar<'a>(
     pool_name: &str,
     sql: &str,
     params: &[Value],
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    options: impl Into<ResultOptions<'a>>,
 ) -> Result<(Vec<u8>, usize)> {
     debug!(
         "Executing columnar query on '{}': {} ({} params)",
@@ -35,7 +36,9 @@ pub async fn execute_query_columnar(
     let pool = handle.clone_pool();
 
     let start = Instant::now();
-    let results = pool.query_columnar(sql, params, col_types).await?;
+    let results = pool
+        .query_columnar(sql, params, col_types, options.into())
+        .await?;
     let elapsed_us = start.elapsed().as_micros();
 
     if profile {
@@ -50,12 +53,13 @@ pub async fn execute_query_columnar(
 }
 
 /// Execute a SELECT with JOIN dedup encoding.
-pub async fn execute_query_columnar_dedup(
+pub async fn execute_query_columnar_dedup<'a>(
     pool_name: &str,
     sql: &str,
     params: &[Value],
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
     relations: &[RelationInfo],
+    options: impl Into<ResultOptions<'a>>,
 ) -> Result<(Vec<u8>, usize)> {
     debug!(
         "Executing columnar dedup query on '{}': {} ({} params, {} relations)",
@@ -67,7 +71,7 @@ pub async fn execute_query_columnar_dedup(
 
     let handle = registry().get(pool_name).await?;
     let pool = handle.clone_pool();
-    pool.query_columnar_dedup(sql, params, col_types, relations)
+    pool.query_columnar_dedup(sql, params, col_types, relations, options.into())
         .await
 }
 
@@ -113,11 +117,12 @@ pub async fn execute_statement(pool_name: &str, sql: &str, params: &[Value]) -> 
 }
 
 /// Execute SELECT query in transaction returning pre-encoded msgpack bytes + row count.
-pub async fn execute_query_columnar_in_transaction(
+pub async fn execute_query_columnar_in_transaction<'a>(
     tx_id: u64,
     sql: &str,
     params: &[Value],
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    options: impl Into<ResultOptions<'a>>,
 ) -> Result<(Vec<u8>, usize)> {
     let registry = transaction_registry();
     let arc = registry
@@ -134,16 +139,18 @@ pub async fn execute_query_columnar_in_transaction(
         .tx
         .as_mut()
         .ok_or(DriverError::TransactionClosed(tx_id))?;
-    conn.query_columnar(sql, params, col_types).await
+    conn.query_columnar(sql, params, col_types, options.into())
+        .await
 }
 
 /// Execute SELECT with JOIN dedup in transaction.
-pub async fn execute_query_columnar_dedup_in_transaction(
+pub async fn execute_query_columnar_dedup_in_transaction<'a>(
     tx_id: u64,
     sql: &str,
     params: &[Value],
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
     relations: &[RelationInfo],
+    options: impl Into<ResultOptions<'a>>,
 ) -> Result<(Vec<u8>, usize)> {
     let registry = transaction_registry();
     let arc = registry
@@ -160,7 +167,7 @@ pub async fn execute_query_columnar_dedup_in_transaction(
         .tx
         .as_mut()
         .ok_or(DriverError::TransactionClosed(tx_id))?;
-    conn.query_columnar_dedup(sql, params, col_types, relations)
+    conn.query_columnar_dedup(sql, params, col_types, relations, options.into())
         .await
 }
 

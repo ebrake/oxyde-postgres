@@ -156,7 +156,7 @@ pub use execute::query::{
 // Encoder types and msgpack write helpers
 pub use convert::encoder::{
     write_array_len, write_json_value, write_map_len, write_rmpv_value, write_str, write_u64,
-    RelationInfo,
+    RelationInfo, ResultEncoding, ResultOptions,
 };
 
 // INSERT RETURNING
@@ -276,6 +276,7 @@ mod tests {
             "SELECT name FROM foo WHERE id = $1",
             &[Value::from(1_i64)],
             None,
+            false,
         )
         .await
         .unwrap();
@@ -321,6 +322,7 @@ mod tests {
             "SELECT name FROM foo WHERE id = $1",
             &[Value::from(10_i64)],
             None,
+            false,
         )
         .await
         .unwrap();
@@ -364,6 +366,7 @@ mod tests {
             "SELECT name FROM foo WHERE id = $1",
             &[Value::from(11_i64)],
             None,
+            false,
         )
         .await
         .unwrap();
@@ -454,6 +457,7 @@ mod tests {
             "SELECT name FROM foo WHERE id = $1",
             &[Value::from(1_i64)],
             None,
+            false,
         )
         .await
         .unwrap();

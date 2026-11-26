@@ -13,10 +13,13 @@ use oxyde_driver::{
     execute_query_columnar_dedup, execute_query_columnar_dedup_in_transaction,
     execute_query_columnar_in_transaction, execute_statement, execute_statement_in_transaction,
     explain_query, pool_backend as driver_pool_backend, ExplainFormat, ExplainOptions,
-    RelationInfo,
+    RelationInfo, ResultEncoding, ResultOptions,
 };
 use oxyde_sql::utils::identifier::{grouped_projection, output_label, resolve_column};
-use oxyde_sql::utils::{value::scalar_result_spec, ExprTypes};
+use oxyde_sql::utils::{
+    value::{scalar_preserves_text, scalar_result_spec},
+    ExprTypes,
+};
 use oxyde_sql::{build_sql, emits_returning, Dialect};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -47,7 +50,8 @@ fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
     ir.joins.as_ref().map(|joins| {
         joins
             .iter()
-            .map(|join| {
+            .enumerate()
+            .map(|(join_index, join)| {
                 let pk_column = join.pk_column_name();
                 // The encoder reports an out-of-range index if the pk is missing.
                 let pk_index = join
@@ -70,6 +74,35 @@ fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
                                 .cloned()
                         })
                         .collect(),
+                    text_columns: join
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, c)| {
+                            let keeps_text = ir.result_kinds == Some(true)
+                                && union_branches(ir).all(|branch| {
+                                    let Some(other) = branch
+                                        .joins
+                                        .as_ref()
+                                        .and_then(|joins| joins.get(join_index))
+                                    else {
+                                        return false;
+                                    };
+                                    let Some(column) = other.columns.get(index) else {
+                                        return false;
+                                    };
+                                    other.result_prefix == join.result_prefix
+                                        && column.field == c.field
+                                        && branch.text_columns.as_ref().is_some_and(|text| {
+                                            text.contains(&format!(
+                                                "{}.{}",
+                                                other.alias, column.column
+                                            ))
+                                        })
+                                });
+                            keeps_text.then_some(index)
+                        })
+                        .collect(),
                 }
             })
             .collect()
@@ -88,9 +121,8 @@ fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
 ///   when the expression's type is unknown.
 /// - An aggregate alias can reuse a column name while producing another type.
 ///   MIN and MAX return their input's type, so they take the input column's
-///   hint. COUNT, SUM and AVG drop the hint and decode by the runtime type:
-///   SUM over a BIGINT is NUMERIC, which the BIGINT and Timedelta decoders
-///   cannot read.
+///   hint. COUNT, SUM and AVG have a different SQL result type from their
+///   input. Their result-only encodings are resolved separately.
 fn decode_column_types(ir: &QueryIR) -> Option<Cow<'_, HashMap<String, ColumnTypeSpec>>> {
     if ir.count.unwrap_or(false) || ir.exists.unwrap_or(false) {
         return None;
@@ -154,6 +186,151 @@ fn decode_column_types(ir: &QueryIR) -> Option<Cow<'_, HashMap<String, ColumnTyp
     Some(types)
 }
 
+/// Result-only overrides keyed by the SQL output label.
+fn result_encodings(ir: &QueryIR) -> HashMap<String, ResultEncoding> {
+    if ir.result_kinds != Some(true) || ir.count == Some(true) || ir.exists == Some(true) {
+        return HashMap::new();
+    }
+    let mut encodings = branch_result_encodings(ir);
+    if ir.union_query.is_none() || encodings.is_empty() {
+        return encodings;
+    }
+    let labels = projection_labels(ir);
+    for branch in union_branches(ir).skip(1) {
+        let other = branch_result_encodings(branch);
+        let other_labels = projection_labels(branch);
+        for (label, encoding) in &mut encodings {
+            let position = |labels: &[Option<String>]| {
+                labels.iter().position(|name| name.as_ref() == Some(label))
+            };
+            if other.get(label) != Some(encoding) || position(&labels) != position(&other_labels) {
+                *encoding = ResultEncoding::Runtime;
+            }
+        }
+    }
+    encodings
+}
+
+fn union_branches(ir: &QueryIR) -> impl Iterator<Item = &QueryIR> {
+    std::iter::successors(Some(ir), |branch| branch.union_query.as_deref())
+}
+
+fn projection_labels(ir: &QueryIR) -> Vec<Option<String>> {
+    if let Some(aggregates) = &ir.aggregates {
+        return aggregates
+            .iter()
+            .map(|agg| agg.alias.clone())
+            .chain(
+                grouped_projection(ir)
+                    .iter()
+                    .map(|field| Some(output_label(ir, field))),
+            )
+            .collect();
+    }
+    ir.cols
+        .iter()
+        .flatten()
+        .map(|field| Some(output_label(ir, field)))
+        .chain(
+            ir.annotations
+                .iter()
+                .flatten()
+                .map(|annotation| Some(annotation.alias.clone())),
+        )
+        .collect()
+}
+
+fn branch_result_encodings(ir: &QueryIR) -> HashMap<String, ResultEncoding> {
+    use ColumnTypeSpec as Spec;
+    use ResultEncoding as Encoding;
+
+    let mut encodings = HashMap::new();
+    let joins = ir.joins.as_deref().unwrap_or_default();
+    let resolve = |field| resolve_column(Some(&ir.table), joins, field, false);
+    let is_text = |field: &str| {
+        let resolved = resolve_column(Some(&ir.table), joins, field, false);
+        ir.text_columns
+            .as_ref()
+            .is_some_and(|text| text.contains(resolved.type_key))
+    };
+    let mut set = |label, encoding| {
+        if let Some(encoding) = encoding {
+            encodings.insert(label, encoding);
+        } else {
+            encodings.remove(&label);
+        }
+    };
+    if ir.aggregates.is_none() && ir.cols.is_none() {
+        for field in ir.text_columns.iter().flatten() {
+            set(field.clone(), Some(Encoding::Wire));
+        }
+    } else {
+        let projected = if ir.aggregates.is_some() {
+            grouped_projection(ir)
+        } else {
+            ir.cols.as_deref().unwrap_or_default()
+        };
+        for field in projected {
+            set(
+                output_label(ir, field),
+                is_text(field).then_some(Encoding::Wire),
+            );
+        }
+    }
+
+    let types = ExprTypes::from(ir.column_types.as_ref());
+    for annotation in ir.annotations.iter().flatten() {
+        let preserves_text = ir
+            .text_columns
+            .as_ref()
+            .is_some_and(|text| scalar_preserves_text(&annotation.expr, types, text));
+        let (label, encoding) =
+            annotation_encoding(&annotation.alias, preserves_text.then_some(Encoding::Wire));
+        set(label.into(), encoding);
+    }
+    for agg in ir.aggregates.iter().flatten() {
+        let Some(alias) = &agg.alias else { continue };
+        let spec = agg
+            .field
+            .as_deref()
+            .and_then(|field| resolve(field).lookup(ir.column_types.as_ref()));
+        let encoding = match (&agg.op, spec) {
+            (AggregateOp::Min | AggregateOp::Max, _) => agg
+                .field
+                .as_deref()
+                .is_some_and(is_text)
+                .then_some(Encoding::Wire),
+            (AggregateOp::Sum | AggregateOp::Avg, Some(Spec::Timedelta)) => {
+                Some(Encoding::DurationMicros)
+            }
+            (AggregateOp::Sum, Some(Spec::BigInteger)) => Some(Encoding::IntegerSum),
+            (AggregateOp::Avg, Some(Spec::BigInteger | Spec::Double)) => Some(Encoding::Float),
+            (AggregateOp::Sum | AggregateOp::Avg, Some(Spec::Decimal { .. })) => {
+                Some(Encoding::Decimal)
+            }
+            _ => None,
+        };
+        let (label, encoding) = annotation_encoding(alias, encoding);
+        set(label.into(), encoding);
+    }
+    encodings
+}
+
+fn annotation_encoding(
+    alias: &str,
+    encoding: Option<ResultEncoding>,
+) -> (&str, Option<ResultEncoding>) {
+    // PostgreSQL truncates identifiers to 63 bytes at a UTF-8 boundary.
+    if alias.len() > 63 {
+        (
+            &alias[..alias.floor_char_boundary(63)],
+            Some(ResultEncoding::Wire),
+        )
+    } else {
+        (alias, encoding)
+    }
+}
+
 /// Execute a query: deserialize IR → validate → build SQL → execute → msgpack bytes → Coroutine[bytes].
 #[pyfunction]
 pub(crate) fn execute<'py>(
@@ -184,6 +361,11 @@ pub(crate) fn execute<'py>(
             oxyde_codec::Operation::Select | oxyde_codec::Operation::Raw => {
                 let exec_start = Instant::now();
                 let column_types = decode_column_types(&ir);
+                let encodings = result_encodings(&ir);
+                let options = ResultOptions {
+                    emit_kinds: ir.result_kinds.unwrap_or(false),
+                    encodings: Some(&encodings),
+                };
                 let (result, num_rows) = if let Some(relations) = relations_for(&ir) {
                     execute_query_columnar_dedup(
                         &pool_name,
@@ -191,13 +373,20 @@ pub(crate) fn execute<'py>(
                         &params,
                         column_types.as_deref(),
                         &relations,
+                        options,
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
                 } else {
-                    execute_query_columnar(&pool_name, &sql, &params, column_types.as_deref())
-                        .await
-                        .map_err(|e| crate::errors::driver_err(&e))?
+                    execute_query_columnar(
+                        &pool_name,
+                        &sql,
+                        &params,
+                        column_types.as_deref(),
+                        options,
+                    )
+                    .await
+                    .map_err(|e| crate::errors::driver_err(&e))?
                 };
                 let exec_us = exec_start.elapsed().as_micros();
 
@@ -305,6 +494,11 @@ pub(crate) fn execute_in_transaction<'py>(
         let results = match ir.op {
             oxyde_codec::Operation::Select | oxyde_codec::Operation::Raw => {
                 let column_types = decode_column_types(&ir);
+                let encodings = result_encodings(&ir);
+                let options = ResultOptions {
+                    emit_kinds: ir.result_kinds.unwrap_or(false),
+                    encodings: Some(&encodings),
+                };
                 let (result, _num_rows) = if let Some(relations) = relations_for(&ir) {
                     execute_query_columnar_dedup_in_transaction(
                         tx_id,
@@ -312,6 +506,7 @@ pub(crate) fn execute_in_transaction<'py>(
                         &params,
                         column_types.as_deref(),
                         &relations,
+                        options,
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
@@ -321,6 +516,7 @@ pub(crate) fn execute_in_transaction<'py>(
                         &sql,
                         &params,
                         column_types.as_deref(),
+                        options,
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
@@ -479,7 +675,7 @@ pub(crate) fn explain<'py>(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_column_types, relations_for};
+    use super::{decode_column_types, relations_for, result_encodings, ResultEncoding};
     use oxyde_codec::{
         Aggregate, AggregateOp, Annotation, ColumnTypeSpec, JoinColumn, JoinSpec, QueryIR,
         ScalarExpr,
@@ -517,11 +713,14 @@ mod tests {
             ("author__name".into(), ColumnTypeSpec::BigInteger),
             ("author.name".into(), ColumnTypeSpec::Text),
         ]));
+        ir.result_kinds = Some(true);
+        ir.text_columns = Some(["author.name".into()].into_iter().collect());
         let relations = relations_for(&ir).unwrap();
         assert_eq!(relations.len(), 1);
         assert_eq!(relations[0].prefix, "author");
         assert_eq!(relations[0].pk_index, 1);
         assert_eq!(relations[0].field_names, ["name", "id"]);
+        assert_eq!(relations[0].text_columns, [0].into_iter().collect());
         assert_eq!(
             relations[0].column_types,
             vec![Some(ColumnTypeSpec::Text), None]
@@ -586,6 +785,85 @@ mod tests {
             alias: Some(alias.into()),
             distinct: None,
         }
+    }
+
+    #[test]
+    fn result_encodings_follow_grouped_and_qualified_inputs() {
+        let ir = QueryIR {
+            table: "entries".into(),
+            result_kinds: Some(true),
+            text_columns: Some(["amount".into()].into_iter().collect()),
+            column_types: Some(HashMap::from([
+                (
+                    "amount".into(),
+                    ColumnTypeSpec::Decimal {
+                        precision: None,
+                        scale: None,
+                    },
+                ),
+                ("duration".into(), ColumnTypeSpec::Timedelta),
+                ("count".into(), ColumnTypeSpec::BigInteger),
+            ])),
+            group_by: Some(vec!["entries.amount".into()]),
+            output_labels: Some(HashMap::from([("entries.amount".into(), "label".into())])),
+            aggregates: Some(vec![
+                agg(AggregateOp::Min, "entries.amount", "minimum"),
+                agg(AggregateOp::Avg, "entries.duration", "mean"),
+                agg(AggregateOp::Sum, "entries.count", "total"),
+                agg(AggregateOp::Sum, "entries.amount", "price"),
+            ]),
+            ..Default::default()
+        };
+        let encodings = result_encodings(&ir);
+        assert!(matches!(encodings.get("label"), Some(ResultEncoding::Wire)));
+        assert!(matches!(
+            encodings.get("minimum"),
+            Some(ResultEncoding::Wire)
+        ));
+        assert!(matches!(
+            encodings.get("mean"),
+            Some(ResultEncoding::DurationMicros)
+        ));
+        assert!(matches!(
+            encodings.get("total"),
+            Some(ResultEncoding::IntegerSum)
+        ));
+        assert!(matches!(
+            encodings.get("price"),
+            Some(ResultEncoding::Decimal)
+        ));
+        assert!(!encodings.contains_key("amount"));
+    }
+
+    #[test]
+    fn union_aggregates_use_runtime_typing_when_branch_encodings_differ() {
+        let mut branch = QueryIR {
+            column_types: Some(HashMap::from([(
+                "duration".into(),
+                ColumnTypeSpec::Timedelta,
+            )])),
+            aggregates: Some(vec![agg(AggregateOp::Sum, "duration", "total")]),
+            ..Default::default()
+        };
+        let mut ir = branch.clone();
+        ir.result_kinds = Some(true);
+        ir.union_all = Some(true);
+        ir.union_query = Some(Box::new(branch.clone()));
+        assert_eq!(
+            result_encodings(&ir)["total"],
+            ResultEncoding::DurationMicros
+        );
+
+        branch.column_types = Some(HashMap::from([(
+            "price".into(),
+            ColumnTypeSpec::Decimal {
+                precision: Some(12),
+                scale: Some(2),
+            },
+        )]));
+        branch.aggregates = Some(vec![agg(AggregateOp::Sum, "price", "total")]);
+        ir.union_query = Some(Box::new(branch));
+        assert_eq!(result_encodings(&ir)["total"], ResultEncoding::Runtime);
     }
 
     #[test]
