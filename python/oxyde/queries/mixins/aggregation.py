@@ -10,10 +10,11 @@ from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.models.lookups import _resolve_related_field
-from oxyde.models.metadata import db_column_for
+from oxyde.queries._result_types import convert_rows
 from oxyde.queries.aggregates import Avg, Max, Min, Sum
 from oxyde.queries.base import SupportsExecute, _resolve_execution_client
 from oxyde.queries.expressions import _is_scalar_annotation
+from oxyde.queries.mixins.execution import _unpack_result
 from oxyde.queries.q import Q
 
 if TYPE_CHECKING:
@@ -214,22 +215,19 @@ class AggregationMixin(Generic[TModel]):
 
         # Execute and extract value
         query_ir = agg_query.to_ir()
+        query_ir["result_kinds"] = True
         result_bytes = await exec_client.execute(query_ir)
-        result = msgpack.unpackb(result_bytes, raw=False)
+        result = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
 
-        # Handle columnar format: (columns, rows)
-        if isinstance(result, (list, tuple)) and len(result) == 2:
-            first, second = result
-            if isinstance(first, list) and all(isinstance(c, str) for c in first):
-                # Columnar format
-                columns = first
-                rows = second
-                if rows:
-                    agg_query._restore_aggregate_timedeltas(columns, rows)
-                    row_dict = dict(zip(columns, rows[0]))
-                    value = row_dict.get(result_key)
-                    return self._coerce_aggregate(value, field, agg_class)
+        columnar = _unpack_result(result)
+        if columnar is not None:
+            columns, rows, _, kinds = columnar
+            if not rows:
                 return None
+            if kinds is not None:
+                convert_rows(rows[:1], kinds, set())
+            value = dict(zip(columns, rows[0])).get(result_key)
+            return self._coerce_aggregate(value, field, agg_class)
 
         if isinstance(result, list) and len(result) > 0:
             row = result[0]
@@ -239,38 +237,14 @@ class AggregationMixin(Generic[TModel]):
                 return getattr(row, result_key, None)
         return None
 
-    def _restore_aggregate_timedeltas(
-        self, columns: list[str], rows: list[list[Any]]
-    ) -> None:
-        """Restore typed MIN/MAX results from the seconds encoded by the driver."""
-        if not rows:
-            return
-        for index, alias in enumerate(columns):
-            aggregate = self._annotations.get(alias)
-            if not isinstance(aggregate, (Min, Max)):
-                continue
-            field = aggregate.field
-            related = _resolve_related_field(self.model_class, field)
-            if related is None:
-                model: type[Model] = self.model_class
-                column = db_column_for(model, field)
-            else:
-                model = related.final_model
-                column = related.column_meta.db_column
-            spec = (model._db_meta.column_types or {}).get(column)
-            if spec is not None and spec.get("kind") == "timedelta":
-                for row in rows:
-                    value = row[index]
-                    if isinstance(value, float):
-                        row[index] = timedelta(seconds=value)
-
     def _coerce_aggregate(self, value: Any, field: str, agg_class: type) -> Any:
         """Coerce aggregate result to the field's Python type.
 
-        PG returns NUMERIC for SUM/AVG even on integer fields.
-        Rust encodes NUMERIC as string. Coerce back using field metadata.
+        PostgreSQL returns NUMERIC for SUM/AVG of BIGINT columns.
+        It is decoded as Decimal, or text from a legacy columnar client.
         """
-        if value is None or not isinstance(value, str):
+        legacy_duration = agg_class in (Min, Max) and isinstance(value, float)
+        if not isinstance(value, (str, Decimal)) and not legacy_duration:
             return value
 
         meta = self.model_class._db_meta.field_metadata.get(field)
@@ -281,6 +255,13 @@ class AggregationMixin(Generic[TModel]):
             meta = related.column_meta
 
         python_type = meta.python_type
+        if legacy_duration:
+            return timedelta(seconds=value) if python_type is timedelta else value
+        if python_type is timedelta:
+            if agg_class is Sum:
+                return timedelta(microseconds=int(value))
+            if agg_class is Avg:
+                return timedelta(microseconds=float(value))
 
         # AVG always returns float/Decimal, even for int fields
         if agg_class is Avg:

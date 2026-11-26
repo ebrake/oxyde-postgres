@@ -110,7 +110,7 @@ class TestPr8ReviewRegressions:
             .all(using=db.name)
         )
 
-        assert plain == [30.0, 90.0]
+        assert plain == [timedelta(seconds=30), timedelta(seconds=90)]
         for aggregate, seconds in ((Max, 90), (Min, 30)):
             values = await (
                 TdModel.objects.annotate(duration=aggregate("duration"))
@@ -129,10 +129,7 @@ class TestPr8ReviewRegressions:
             .values_list("duration", flat=True)
             .all(using=db.name)
         )
-        # SUM of the BIGINT microseconds is NUMERIC; a Timedelta hint used to
-        # read it as None.
-        assert len(values) == 1
-        assert Decimal(values[0]) == Decimal(120_000_000)
+        assert values == [timedelta(seconds=120)]
 
     async def _seed_suppliers(self, db):
         """Items (Acme, "x"), (Acme, "y"), (Bolt, "x"), in id order."""
@@ -371,10 +368,8 @@ class TestAnnotateGroupBy:
             .values("author_id", "total")
             .all(using=db.name)
         )
-        assert [(row["author_id"], Decimal(row["total"])) for row in rows] == [
-            (2, Decimal(4)),
-            (3, Decimal(6)),
-        ]
+        assert [{"author_id": 2, "total": 4}, {"author_id": 3, "total": 6}] == rows
+        assert all(type(row["total"]) is int for row in rows)
 
     @pytest.mark.asyncio
     async def test_ungrouped_related_selection_raises(self, db):
