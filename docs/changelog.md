@@ -26,13 +26,45 @@
   aggregate inputs and `order_by()` can name related fields
   (`group_by("author__name")`, `Sum("author__score")`,
   `order_by("author__name")`) and join the related table themselves. Grouped
-  rows keep the requested names, including labels longer than PostgreSQL's
-  63-byte identifier limit. Terminal `.min()`/`.max()` and `Min`/`Max`
+  rows restore requested group and field labels, including labels longer than
+  PostgreSQL's 63-byte identifier limit. Terminal `.min()`/`.max()` and `Min`/`Max`
   annotations now decode like the input field. For example,
   `.max("duration")` on a timedelta field returns a `timedelta`.
-  `COUNT`/`SUM`/`AVG` aliases decode by their own result type. A column
+  `COUNT` returns an integer. The Rust core uses the input field's type for
+  `SUM` and `AVG` in typed results. A column
   whose `db_column` contains a dot is quoted as one identifier. Low-level
   filters accept qualified references such as `posts.id`.
+- **Breaking.** `values()`, `values_list()`, `fetch_all()`, and `fetch_rows()`
+  return typed UUID, Decimal, date, time, datetime, and timedelta values,
+  including array elements from model fields and untyped expressions such as
+  `RawSQL`. PostgreSQL `TIME` returns a naive `time` and `TIMETZ` returns a
+  timezone-aware `time`. The same rules apply to `first()`, `last()`, and
+  `get()` in values mode. The core preserves strings for `str` and
+  `list[str]` fields, including `Annotated` and optional forms, in direct
+  projections, `F()` references, type-preserving `Coalesce()` and `Greatest()`
+  calls, and `Min` and `Max`, including the terminal methods. Widening literals
+  such as `Decimal("1.5")` produce a computed, typed result. Enums return their
+  underlying values.
+
+    When upgrading, remove `UUID()`, `Decimal()`, `fromisoformat()`, and
+    `timedelta(seconds=…)` wrappers around results that now arrive typed.
+    For example, `UUID()` raises when passed an existing `UUID` object.
+
+- Values queries apply typed conversion, including for `Sum` and `Avg`
+  annotations, when the core returns result kinds. Untagged values remain raw.
+  Keep annotation aliases within 63 bytes. PostgreSQL truncates longer aliases
+  in grouped and non-grouped queries. `values()` returns the wire value under
+  the truncated name, and `values_list()` returns `None` for the requested alias.
+- Preserve PostgreSQL text for out-of-range temporal values, including
+  `infinity`, `-infinity`, and `24:00:00` with its offset for `TIMETZ`.
+  Non-finite `NUMERIC` results travel as PostgreSQL text and convert to
+  `Decimal` when tagged.
+- Terminal `.sum()` and `.avg()` return `timedelta` on duration fields.
+  The Rust core preserves whole microseconds and rounds fractional microseconds
+  to the nearest even microsecond on ties.
+- Model queries correctly decode `list[timedelta]` elements. Previously they
+  treated the stored microsecond counts as seconds.
+
 - In grouping, aggregates and ordering, a name that is both a relation path
   and a raw `db_column` (a `supplier` foreign key next to
   `db_column="supplier__name"`) now names the related field, as in `filter()`.

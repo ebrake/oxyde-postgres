@@ -177,6 +177,41 @@ ids = await User.objects.values_list("id", flat=True).all()
 # [1, 2, 3, ...]
 ```
 
+#### Result types
+
+Projected rows return Python values such as `UUID`, `Decimal`, `datetime`,
+`date`, `time`, and `timedelta`. PostgreSQL `TIME` returns a naive `time` and
+`TIMETZ` returns a timezone-aware `time`. Elements in one-dimensional arrays
+from model fields and untyped expressions such as `RawSQL` get the same typed
+conversion. SQL `NULL` becomes `None`. These rules also apply to `first()`, `last()`, and
+`get()` on a values query.
+```python
+# Account.id is annotated as UUID.
+account_ids = await Account.objects.values_list("id", flat=True).all()
+is_present = account.id in account_ids
+```
+
+The Rust core keeps strings for fields annotated as `str` or `list[str]` over
+typed columns such as `UUID` or `UUID[]`, including optional and `Annotated`
+forms. This applies to direct projections, `F()` references, type-preserving
+`Coalesce()` and `Greatest()` calls, and `Min` and `Max`, including the terminal
+methods. A pass-through keeps strings if any referenced field uses a string
+type. Widening literals such as `Decimal("1.5")` produce a computed, typed
+result. Enum columns return their underlying values.
+
+Typed conversion, including for `Sum` and `Avg` annotations, requires a core
+that returns result kinds. Untagged values remain raw. Keep annotation aliases
+within 63 bytes. PostgreSQL truncates longer aliases in grouped and non-grouped
+queries. `values()` returns the wire value under the truncated name.
+`values_list()` returns `None` for the requested alias because it cannot find
+that name in the result. Grouping restores long `group_by()` and field labels.
+
+The core preserves PostgreSQL text for temporal values outside Python's range,
+including `infinity`, `-infinity`, and `24:00:00` (with its offset for
+`TIMETZ`). The core sends non-finite `NUMERIC` values as PostgreSQL text
+(`NaN`, `Infinity`, or `-Infinity`). Fields with a decimal result kind
+return the corresponding `Decimal` value, including for aggregates.
+
 #### distinct()
 
 Remove duplicates:

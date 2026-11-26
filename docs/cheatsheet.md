@@ -69,8 +69,8 @@ Complete API reference.
 <tr><td><code>delete()</code></td><td><code>await qs.delete()</code></td><td><code>int</code></td><td>Bulk DELETE</td></tr>
 <tr><td><code>update()</code></td><td><code>await qs.update(status="x")</code></td><td><code>int</code></td><td>Bulk UPDATE (affected rows); <code>returning=True</code> → <code>list[Model]</code></td></tr>
 <tr><td><code>increment()</code></td><td><code>await qs.increment("views", by=1)</code></td><td><code>int</code></td><td>Atomic increment</td></tr>
-<tr><td><code>sum()</code></td><td><code>await qs.sum("views")</code></td><td><code>number</code></td><td>SUM</td></tr>
-<tr><td><code>avg()</code></td><td><code>await qs.avg("age")</code></td><td><code>float</code></td><td>AVG</td></tr>
+<tr><td><code>sum()</code></td><td><code>await qs.sum("views")</code></td><td><code>int | float | Decimal | timedelta | None</code></td><td>SUM, by field type</td></tr>
+<tr><td><code>avg()</code></td><td><code>await qs.avg("age")</code></td><td><code>float | Decimal | timedelta | None</code></td><td>AVG, by field type</td></tr>
 <tr><td><code>max()</code></td><td><code>await qs.max("price")</code></td><td><code>Any</code></td><td>MAX</td></tr>
 <tr><td><code>min()</code></td><td><code>await qs.min("price")</code></td><td><code>Any</code></td><td>MIN</td></tr>
 <tr><th colspan="4">Debug & Introspection</th></tr>

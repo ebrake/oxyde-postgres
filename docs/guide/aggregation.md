@@ -223,17 +223,42 @@ column name.
 
 ### Result Types
 
-Annotations that pass through a known column type preserve its decoding:
-`F("tags")` and `Coalesce("tags", None)` return the array as a list, and an
-interval field returns seconds as it does when selected directly. Enum aliases
-are decoded as enum values, including when another argument is `RawSQL` or
-arithmetic; PostgreSQL may reject incompatible argument types.
+Annotations that pass through a known column type use the same decoding as
+direct projections. `F("tags")` and `Coalesce("tags", None)` return an array as
+a list. `F("duration")` returns a `timedelta` for a duration field.
+The Rust core preserves strings for `str` and `list[str]` fields, including
+`Annotated` and optional forms, in direct projections, `F()` references,
+type-preserving `Coalesce()` and `Greatest()` calls, and `Min` and `Max`,
+including terminal `.min()` and `.max()`. A type-preserving call can combine
+columns, compatible literals, and nested calls. Its result keeps strings if any
+referenced field uses a string type. Enum aliases return their underlying
+values. PostgreSQL may reject incompatible argument types in expressions that
+include enum columns.
 
-Expressions that can change the result type, such as `F` arithmetic,
-`Greatest("integer_field", 1.5)`, `Concat`, and standalone `RawSQL`, use native
-result decoding. Binding-only hints for custom SQL types do not change the
-decoded result. See [Typed Literals and NULLs](expressions.md#typed-literals-and-nulls)
-for enum, array, and NULL binding rules.
+Widening literals such as `Decimal("1.5")` in `Greatest("integer_field",
+Decimal("1.5"))` produce a computed result. These expressions, `F` arithmetic,
+`Concat`, and standalone `RawSQL` use the database's result type. See
+[Typed Literals and NULLs](expressions.md#typed-literals-and-nulls) for enum,
+array, and NULL binding rules.
+
+In typed values queries, `Sum` and `Avg` use the same result types as
+`.sum()` and `.avg()`. Both return `timedelta` for duration fields and
+`Decimal` for decimal fields. Duration aggregates preserve whole microseconds.
+Fractional microseconds round to the nearest even microsecond on ties. Non-finite
+`NUMERIC` aggregates return the corresponding `Decimal` value. Integer sums return `int` when the result fits
+in a signed 64-bit integer and `Decimal` when it overflows. Integer averages
+and floating-point sums and averages return `float`. An empty aggregate
+returns `None`. Typed conversion requires a core that returns result kinds.
+Untagged values remain raw.
+
+For a union, the core applies aggregate typing only when the branches agree.
+For example, when one branch sums a duration and another sums a decimal,
+both results use PostgreSQL's shared `NUMERIC` type and return `Decimal`.
+
+Keep annotation aliases within 63 bytes. PostgreSQL truncates longer aliases in
+grouped and non-grouped queries. `values()` returns the wire value under the
+truncated name, and `values_list()` returns `None` for the requested alias.
+Grouping restores long `group_by()` and field labels.
 
 `Coalesce`, `Concat`, and `RawSQL` live in `oxyde.queries.expressions`.
 Imports from `oxyde`, `oxyde.queries`, and `oxyde.queries.aggregates` remain
