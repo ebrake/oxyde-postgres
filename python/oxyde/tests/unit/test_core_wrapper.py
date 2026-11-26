@@ -21,7 +21,7 @@ async def test_stale_core_uses_raising_stubs(monkeypatch, capsys):
 
     warning = capsys.readouterr().err
     assert "ABI version mismatch: expected 2, got 1" in warning
-    assert "oxyde-postgres-core>=0.3.5" in warning
+    assert "oxyde-postgres-core>=0.4.0" in warning
     with pytest.raises(RuntimeError, match="missing 'execute'"):
         await functions["execute"]("default", b"")
     with pytest.raises(RuntimeError, match="missing 'render_sql_debug'"):

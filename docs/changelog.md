@@ -1,39 +1,7 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — Typed PostgreSQL query results
 
-- Require Rust 1.100+ for source builds and pin development and CI to Rust 1.100.0.
-- Upgrade [SQLx to 0.9.1](https://github.com/transact-rs/sqlx/blob/v0.9.1/CHANGELOG.md)
-  and rebase the vendored PostgreSQL driver, preserving single-batch unnamed
-  queries for PgBouncer transaction pooling. The upgrade fixes statement-cache
-  leaks, stale cached plans, unnamed statement parsing after custom OID
-  resolution, Bind result-format counts, type dependency resolution, and
-  out-of-range date/time decoding. Connections now use TCP_NODELAY and reuse
-  the TLS connector across attempts. `hostaddr`/`PGHOSTADDR` now bypasses DNS
-  while retaining `host` as the TLS hostname, matching libpq.
-- PostgreSQL TLS now uses the aws-lc-rs crypto provider for rustls. Certificate
-  verification uses the operating system's trust store in place of the bundled
-  Mozilla roots. `ssl_root_cert` can add a custom CA.
-- Require Python 3.15+ for both packages. Native wheels target standard and
-  free-threaded CPython 3.15. Tests exercise both forms of native lazy import
-  in model modules and verify that the generated stubs pass static type checks.
-- Grouped output labels and related aggregate inputs require native core 0.3.5.
-  The minimum supported core is `oxyde-postgres-core>=0.3.5,<0.4.0`.
-  Native core 0.3.5 uses ABI 2. Upgrade both packages together because
-  oxyde-postgres 0.3.4 expects ABI 1.
-
-- Aggregates on PostgreSQL work with filters through foreign keys. Group keys,
-  aggregate inputs and `order_by()` can name related fields
-  (`group_by("author__name")`, `Sum("author__score")`,
-  `order_by("author__name")`) and join the related table themselves. Grouped
-  rows restore requested group and field labels, including labels longer than
-  PostgreSQL's 63-byte identifier limit. Terminal `.min()`/`.max()` and `Min`/`Max`
-  annotations now decode like the input field. For example,
-  `.max("duration")` on a timedelta field returns a `timedelta`.
-  `COUNT` returns an integer. The Rust core uses the input field's type for
-  `SUM` and `AVG` in typed results. A column
-  whose `db_column` contains a dot is quoted as one identifier. Low-level
-  filters accept qualified references such as `posts.id`.
 - **Breaking.** `values()`, `values_list()`, `fetch_all()`, and `fetch_rows()`
   return typed UUID, Decimal, date, time, datetime, and timedelta values,
   including array elements from model fields and untyped expressions such as
@@ -65,6 +33,41 @@
 - Model queries correctly decode `list[timedelta]` elements. Previously they
   treated the stored microsecond counts as seconds.
 
+- Require Rust 1.100+ for source builds and pin development and CI to Rust 1.100.0.
+- Upgrade [SQLx to 0.9.1](https://github.com/transact-rs/sqlx/blob/v0.9.1/CHANGELOG.md)
+  and rebase the vendored PostgreSQL driver, preserving single-batch unnamed
+  queries for PgBouncer transaction pooling. The upgrade fixes statement-cache
+  leaks, stale cached plans, unnamed statement parsing after custom OID
+  resolution, Bind result-format counts, type dependency resolution, and
+  out-of-range date/time decoding. Connections now use TCP_NODELAY and reuse
+  the TLS connector across attempts. `hostaddr`/`PGHOSTADDR` now bypasses DNS
+  while retaining `host` as the TLS hostname, matching libpq.
+- PostgreSQL TLS now uses the aws-lc-rs crypto provider for rustls. Certificate
+  verification uses the operating system's trust store in place of the bundled
+  Mozilla roots. `ssl_root_cert` can add a custom CA.
+- Upgrade both packages together. The ORM requires `oxyde-postgres-core>=0.4.0,<0.5.0` for typed query results.
+
+## 0.3.5 — PostgreSQL aggregates, joins, and Python 3.15
+
+- Require Python 3.15+ for both packages. Native wheels target standard and
+  free-threaded CPython 3.15. Tests exercise both forms of native lazy import
+  in model modules and verify that the generated stubs pass static type checks.
+- Grouped output labels and related aggregate inputs require native core 0.3.5.
+  The minimum supported core is `oxyde-postgres-core>=0.3.5,<0.4.0`.
+  Native core 0.3.5 uses ABI 2. Upgrade both packages together because
+  oxyde-postgres 0.3.4 expects ABI 1.
+
+- Aggregates on PostgreSQL work with filters through foreign keys. Group keys,
+  aggregate inputs and `order_by()` can name related fields
+  (`group_by("author__name")`, `Sum("author__score")`,
+  `order_by("author__name")`) and join the related table themselves. Grouped
+  rows keep the requested names, including labels longer than PostgreSQL's
+  63-byte identifier limit. Terminal `.min()`/`.max()` and `Min`/`Max`
+  annotations now decode like the input field. For example,
+  `.max("duration")` on a timedelta field returns a `timedelta`.
+  `COUNT`/`SUM`/`AVG` aliases decode by their own result type. A column
+  whose `db_column` contains a dot is quoted as one identifier. Low-level
+  filters accept qualified references such as `posts.id`.
 - In grouping, aggregates and ordering, a name that is both a relation path
   and a raw `db_column` (a `supplier` foreign key next to
   `db_column="supplier__name"`) now names the related field, as in `filter()`.
@@ -90,6 +93,8 @@
   omits joined columns raises `ValueError` if it orders by a related field.
 - `UNION` operands use the same join projection. Flat row fetches raise
   `ValueError` if a joined result would overwrite a base model field.
+
+## 0.3.4 — Primary key tracking and upserts
 
 - Database hydration uses Pydantic's compiled validator without the
   primary-key tracking callback when the returned row supplies the key.
@@ -124,8 +129,9 @@
 - A partial select tracks the fields returned by the database. Assignments
   made during model validation to unselected fields are excluded from the
   default `save()` update.
-- `save()` sends `update_columns` and value-less DO UPDATE IR supported by
-  core 0.3.4 and later.
+- `save()` sends `update_columns` and value-less DO UPDATE IR that core 0.3.3
+  rejects or ignores. The minimum supported core is now
+  `oxyde-postgres-core>=0.3.4,<0.4.0`.
 - `InsertQuery.bulk_values()` keeps `on_conflict_do_nothing()` and
   `on_conflict_update()` clauses.
 - `Field(alias=...)` now works like `pydantic.Field(alias=...)`: the alias is
