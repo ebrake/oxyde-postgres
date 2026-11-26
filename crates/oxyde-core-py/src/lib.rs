@@ -88,8 +88,8 @@ use pyo3::prelude::*;
 const ABI_VERSION: u32 = 2;
 
 /// Python module definition
-#[pymodule(gil_used = false)]
-fn _oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(name = "_oxyde_core", gil_used = false)]
+fn oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__abi_version__", ABI_VERSION)?;
 
     m.add_function(wrap_pyfunction!(pool::init_pool, m)?)?;
