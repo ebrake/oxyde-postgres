@@ -11,6 +11,9 @@
   out-of-range date/time decoding. Connections now use TCP_NODELAY and reuse
   the TLS connector across attempts. `hostaddr`/`PGHOSTADDR` now bypasses DNS
   while retaining `host` as the TLS hostname, matching libpq.
+- PostgreSQL TLS now uses the aws-lc-rs crypto provider for rustls. Certificate
+  verification uses the operating system's trust store in place of the bundled
+  Mozilla roots. `ssl_root_cert` can add a custom CA.
 - Require Python 3.15+ for both packages. Native wheels target standard and
   free-threaded CPython 3.15. Tests exercise both forms of native lazy import
   in model modules and verify that the generated stubs pass static type checks.
