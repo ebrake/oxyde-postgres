@@ -31,6 +31,35 @@ fn decode_columnar(buf: &[u8]) -> (Vec<String>, Vec<Vec<rmpv::Value>>) {
 
 #[tokio::test]
 #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+async fn postgres_encodes_out_of_range_temporal_values_as_nil() {
+    let pool_name = format!("temporal_limits_{}", Uuid::new_v4().simple());
+    init_pool(
+        &pool_name,
+        &std::env::var("OXYDE_TEST_POSTGRES_URL").expect("set OXYDE_TEST_POSTGRES_URL"),
+        PoolSettings::default(),
+    )
+    .await
+    .unwrap();
+
+    let sql = "SELECT 'infinity'::date AS infinite_date, \
+               'infinity'::timestamp AS infinite_timestamp, \
+               '294276-12-31'::date AS large_date";
+    let (bytes, count) = execute_query_columnar(&pool_name, sql, &[], None)
+        .await
+        .unwrap();
+    let (columns, rows) = decode_columnar(&bytes);
+    assert_eq!(count, 1);
+    assert_eq!(
+        columns,
+        ["infinite_date", "infinite_timestamp", "large_date"]
+    );
+    assert_eq!(rows, vec![vec![rmpv::Value::Nil; 3]]);
+
+    close_pool(&pool_name).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
 async fn postgres_dedup_uses_field_names_for_truncated_join_labels() {
     let pool_name = format!("long_labels_{}", Uuid::new_v4().simple());
     init_pool(

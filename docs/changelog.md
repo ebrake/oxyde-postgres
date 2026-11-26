@@ -3,6 +3,14 @@
 ## Unreleased
 
 - Require Rust 1.100+ for source builds and pin development and CI to Rust 1.100.0.
+- Upgrade [SQLx to 0.9.1](https://github.com/transact-rs/sqlx/blob/v0.9.1/CHANGELOG.md)
+  and rebase the vendored PostgreSQL driver, preserving single-batch unnamed
+  queries for PgBouncer transaction pooling. The upgrade fixes statement-cache
+  leaks, stale cached plans, unnamed statement parsing after custom OID
+  resolution, Bind result-format counts, type dependency resolution, and
+  out-of-range date/time decoding. Connections now use TCP_NODELAY and reuse
+  the TLS connector across attempts. `hostaddr`/`PGHOSTADDR` now bypasses DNS
+  while retaining `host` as the TLS hostname, matching libpq.
 - Require Python 3.15+ for both packages. Native wheels target standard and
   free-threaded CPython 3.15. Tests exercise both forms of native lazy import
   in model modules and verify that the generated stubs pass static type checks.
