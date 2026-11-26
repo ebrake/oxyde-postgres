@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Require Rust 1.100+ for source builds and pin development and CI to Rust 1.100.0.
 - Require Python 3.15+ for both packages. Native wheels target standard and
   free-threaded CPython 3.15. Tests exercise both forms of native lazy import
   in model modules and verify that the generated stubs pass static type checks.
