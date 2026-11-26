@@ -21,6 +21,56 @@ async fn connect(cache_capacity: usize) -> PgConnection {
         .unwrap()
 }
 
+const CACHED_SELECT: &str = "SELECT * FROM cached_plan_probe";
+
+async fn change_result_shape_of_cached_statement() -> PgConnection {
+    let mut conn = connect(10).await;
+    conn.execute("CREATE TEMP TABLE cached_plan_probe (value INT)")
+        .await
+        .unwrap();
+    conn.execute("INSERT INTO cached_plan_probe VALUES (1)")
+        .await
+        .unwrap();
+    let row = sqlx::query(CACHED_SELECT)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(row.columns().len(), 1);
+    assert_eq!(conn.cached_statements_size(), 1);
+    conn.execute("ALTER TABLE cached_plan_probe ADD COLUMN extra INT DEFAULT 42")
+        .await
+        .unwrap();
+    conn
+}
+
+#[tokio::test]
+#[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+async fn stale_cached_plan_is_retried_outside_a_transaction() {
+    let mut conn = change_result_shape_of_cached_statement().await;
+    let row = sqlx::query(CACHED_SELECT)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i32, _>("extra"), 42);
+}
+
+#[tokio::test]
+#[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+async fn stale_cached_plan_is_not_retried_inside_a_transaction() {
+    let mut conn = change_result_shape_of_cached_statement().await;
+    let mut tx = conn.begin().await.unwrap();
+    let error = sqlx::query(CACHED_SELECT)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("0A000")
+    );
+    tx.rollback().await.unwrap();
+    assert_eq!(conn.cached_statements_size(), 0);
+}
+
 #[tokio::test]
 #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
 async fn cache_disabled_queries_follow_ddl_without_named_statements() {

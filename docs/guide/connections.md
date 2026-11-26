@@ -178,6 +178,11 @@ settings = PoolSettings(
 )
 ```
 
+With the statement cache enabled, SQLx invalidates cached plans that become
+stale after schema changes and retries the query outside transactions. Inside a
+transaction, SQLx returns the original error and the transaction must be
+rolled back.
+
 Set `pg_statement_cache_capacity=0` to execute ordinary parameterized queries
 with unnamed statements. Parse, Bind, Describe portal, Execute, and Close are
 sent in a single batch ending in one Sync. Queries use the current result shape
