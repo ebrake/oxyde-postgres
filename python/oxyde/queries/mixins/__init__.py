@@ -26,8 +26,8 @@ Mixins:
         count(), sum(), avg(), max(), min() - terminal aggregates
 
     ExecutionMixin:
-        fetch_all(), fetch_one() - raw execution returning dicts
-        fetch_rows() - raw execution returning list of tuples
+        fetch_all(), fetch_one() - typed dictionaries, tuples, or flat values
+        fetch_rows() - typed results as dictionaries
         fetch_models() - execution returning model instances
         fetch_msgpack() - execution returning raw MessagePack bytes
         all(), first(), last(), exists() - convenience methods
