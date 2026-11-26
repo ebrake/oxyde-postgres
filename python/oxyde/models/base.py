@@ -120,6 +120,7 @@ from oxyde.models.utils import (
     _extract_inner_constraints,
     _LoadedFieldsSet,
     _unpack_annotated,
+    _unwrap_annotated_optional,
     _unwrap_optional,
 )
 
@@ -468,6 +469,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             return  # Already computed
 
         column_types: dict[str, dict] = {}
+        text_columns: set[str] = set()
         column_db_types: dict[str, str] = {}
         bind_types: dict[str, dict] = {}
         reverse_map: dict[str, str] = {}
@@ -476,6 +478,13 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             # have no column of their own, nor a reverse mapping
             if not is_column_field(meta):
                 continue
+            python_type = meta.python_type
+            if get_origin(python_type) is list:
+                items = get_args(python_type)
+                if items:
+                    python_type, _ = _unwrap_annotated_optional(items[0])
+            if python_type is str:
+                text_columns.add(meta.db_column)
             spec = column_type_for_meta(meta)
             if spec is not None:
                 column_types[meta.db_column] = spec
@@ -489,6 +498,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                 reverse_map[meta.db_column] = field_name
 
         cls._db_meta.column_types = column_types if column_types else None
+        cls._db_meta.text_columns = frozenset(text_columns)
         cls._db_meta.column_db_types = column_db_types or None
         cls._db_meta.bind_types = bind_types or None
         cls._db_meta.reverse_column_map = reverse_map
@@ -638,8 +648,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         for field_name, model_field in cls.model_fields.items():
             # Get type hint for nullable detection and FK inference
             hint = hints.get(field_name, model_field.annotation)
-            base_hint, _ = _unpack_annotated(hint)  # annotations not used anymore
-            python_type, optional_flag = _unwrap_optional(base_hint)
+            python_type, optional_flag = _unwrap_annotated_optional(hint)
 
             # Read db_* attributes (type-safe access via OxydeFieldInfo)
             db_pk = _get_db_attr(model_field, "db_pk", False)

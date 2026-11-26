@@ -71,6 +71,18 @@ def _unwrap_optional(hint: Any) -> tuple[Any, bool]:
     return hint, False
 
 
+def _unwrap_annotated_optional(hint: Any) -> tuple[Any, bool]:
+    """Unwrap interleaved Annotated and Optional layers."""
+    nullable = False
+    while True:
+        base, _ = _unpack_annotated(hint)
+        base, optional = _unwrap_optional(base)
+        nullable |= optional
+        if base is hint:
+            return base, nullable
+        hint = base
+
+
 _CONSTRAINT_ATTRS = ("max_length", "max_digits", "decimal_places")
 
 

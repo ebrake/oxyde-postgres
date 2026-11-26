@@ -224,7 +224,14 @@ class Query(
     def _ir_ref(self, field: str, join_specs: dict[str, _JoinDescriptor]) -> str:
         related = _resolve_related_field(self.model_class, field)
         if related is None:
-            return self._base_ir_ref(self._column_for_field(field))
+            column = self._column_for_field(field)
+            # Keep an explicit table qualifier unless it names a literal db_column.
+            if (
+                column == field
+                and column not in self.model_class._db_meta.reverse_column_map
+            ):
+                return column
+            return self._base_ir_ref(column)
         path = "__".join(name for name, _ in related.joins)
         return f"{join_specs[path].alias}.{related.column_meta.db_column}"
 
@@ -399,6 +406,17 @@ class Query(
                 column_types[f"{descriptor.alias}.{column}"] = spec
 
         return column_types or None
+
+    def _text_column_refs(self, join_specs: list[_JoinDescriptor]) -> list[str]:
+        columns = set(self.model_class._db_meta.text_columns)
+        for descriptor in join_specs:
+            target_columns = descriptor.target_model._db_meta.text_columns
+            columns.update(
+                f"{descriptor.alias}.{column}"
+                for _, column in descriptor.columns
+                if column in target_columns
+            )
+        return sorted(columns)
 
     def _bind_types_for_query(
         self, join_specs: list[_JoinDescriptor]
@@ -675,6 +693,7 @@ class Query(
                 append_pk=append_pk,
                 project_joins=project_joins,
                 union_join_paths=union_join_paths,
+                result_kinds=result_kinds,
             )
 
         return ir.build_select_ir(
@@ -682,6 +701,7 @@ class Query(
             columns=db_columns,
             column_types=self._column_types_for_query(descriptors),
             result_kinds=result_kinds,
+            text_columns=self._text_column_refs(descriptors) if result_kinds else None,
             bind_types=self._bind_types_for_query(descriptors),
             column_db_types=self._column_db_types_for_query(descriptors),
             model=_model_key(self.model_class),

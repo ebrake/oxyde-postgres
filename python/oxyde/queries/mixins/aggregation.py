@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.models.lookups import _resolve_related_field
-from oxyde.queries._result_types import convert_rows
+from oxyde.queries._result_types import convert_column
 from oxyde.queries.aggregates import Avg, Max, Min, Sum
 from oxyde.queries.base import SupportsExecute, _resolve_execution_client
 from oxyde.queries.expressions import _is_scalar_annotation
@@ -47,6 +47,12 @@ class AggregationMixin(Generic[TModel]):
     _count: bool
 
     def _clone(self) -> Self:
+        """Must be implemented by the main Query class."""
+        raise NotImplementedError
+
+    def _build_ir(
+        self, *, for_models: bool, result_kinds: bool | None = None
+    ) -> dict[str, Any]:
         """Must be implemented by the main Query class."""
         raise NotImplementedError
 
@@ -214,20 +220,22 @@ class AggregationMixin(Generic[TModel]):
         agg_query = agg_query.annotate(**{result_key: agg_class(field)})
 
         # Execute and extract value
-        query_ir = agg_query.to_ir()
-        query_ir["result_kinds"] = True
+        query_ir = agg_query._build_ir(for_models=False, result_kinds=True)
         result_bytes = await exec_client.execute(query_ir)
         result = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
 
         columnar = _unpack_result(result)
         if columnar is not None:
             columns, rows, _, kinds = columnar
-            if not rows:
+            if not rows or result_key not in columns:
                 return None
-            if kinds is not None:
-                convert_rows(rows[:1], kinds, set())
-            value = dict(zip(columns, rows[0])).get(result_key)
-            return self._coerce_aggregate(value, field, agg_class)
+            index = columns.index(result_key)
+            value = rows[0][index]
+            if kinds is not None and (kind := kinds[index]) is not None:
+                return convert_column(kind, [value])[0]
+            if len(result) < 4:
+                return self._coerce_aggregate(value, field, agg_class)
+            return value
 
         if isinstance(result, list) and len(result) > 0:
             row = result[0]
