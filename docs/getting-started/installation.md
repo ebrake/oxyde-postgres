@@ -19,7 +19,7 @@ Use a separate environment from upstream `oxyde` / `oxyde-core`, which share
 these module names.
 
 Native wheel builds cover CPython 3.15 and free-threaded CPython 3.15 on
-Linux (glibc and musl, x86_64 and ARM64), macOS (Intel and Apple Silicon), and
+Linux (glibc and musl, x86_64 and ARM64), macOS (Apple Silicon), and
 Windows (x86_64). If no compatible wheel is available, installation builds
 the core from source and requires Rust.
 

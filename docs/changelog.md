@@ -45,6 +45,7 @@
 - PostgreSQL TLS now uses the aws-lc-rs crypto provider for rustls. Certificate
   verification uses the operating system's trust store in place of the bundled
   Mozilla roots. `ssl_root_cert` can add a custom CA.
+- macOS wheels target Apple Silicon. Intel Mac installations build from source.
 - Upgrade both packages together. The ORM requires `oxyde-postgres-core>=0.4.0,<0.5.0` for typed query results.
 
 ## 0.3.5 — PostgreSQL aggregates, joins, and Python 3.15

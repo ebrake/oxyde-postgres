@@ -39,6 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      recovery_artifact_pattern: ${{ steps.reusable.outputs.artifact-pattern }}
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -71,6 +72,7 @@ jobs:
           fi
 
       - name: Verify reusable builds belong to the release tag
+        id: reusable
         if: inputs.artifacts_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -88,13 +90,23 @@ jobs:
           tag_sha = subprocess.check_output(["git", "rev-parse", os.environ["RELEASE_TAG"] + "^{commit}"], text=True).strip()
           if run["head_sha"] != tag_sha or run["path"] != ".github/workflows/release-core.yml":
               raise SystemExit("Reusable artifacts must come from this workflow at the exact release tag")
-          targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+          targets = [
+              "x86_64-unknown-linux-gnu",
+              "x86_64-unknown-linux-musl",
+              "aarch64-unknown-linux-gnu",
+              "aarch64-unknown-linux-musl",
+              "aarch64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+          ]
           if os.environ.get("ALLOW_MISSING_MACOS") == "true":
-              targets = [target for target in targets if not target.endswith("apple-darwin")]
+              targets.remove("aarch64-apple-darwin")
           expected = {"Build source distribution", *(f"Build {target} wheels" for target in targets)}
           successful = {job["name"] for job in json.loads(Path("prior-jobs.json").read_text())["jobs"] if job["conclusion"] == "success"}
           if expected - successful:
               raise SystemExit(f"Required builds did not succeed: {sorted(expected - successful)}")
+          artifacts = ["sdist", *(f"wheels-{target}" for target in targets)]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("artifact-pattern={" + ",".join(artifacts) + "}", file=output)
           print(f"Reusing {len(expected)} successful build jobs at {tag_sha}")
           PYTHON
 
@@ -138,10 +150,6 @@ jobs:
           - os: ubuntu-24.04
             target: aarch64-unknown-linux-musl
             manylinux: musllinux_1_2
-          # macOS x86_64 (Intel) - runs on ARM with Rosetta
-          - os: macos-15
-            target: x86_64-apple-darwin
-            manylinux: auto
           # macOS ARM64 (Apple Silicon)
           - os: macos-15
             target: aarch64-apple-darwin
@@ -170,7 +178,7 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux }}
 
       - name: Verify native wheel import
-        if: runner.os == 'Windows' || (runner.arch == 'ARM64' && matrix.platform.target == 'aarch64-apple-darwin') || (runner.os == 'macOS' && runner.arch == 'X64' && matrix.platform.target == 'x86_64-apple-darwin')
+        if: runner.os != 'Linux'
         run: |
           python -m pip install --no-deps --no-index --find-links dist oxyde-postgres-core
           python -c "import _oxyde_core"
@@ -209,12 +217,13 @@ jobs:
           merge-multiple: true
           run-id: ${{ inputs.artifacts_run_id || github.run_id }}
           github-token: ${{ github.token }}
+          pattern: ${{ needs.build-sdist.outputs.recovery_artifact_pattern }}
       - run: python -m unittest discover -s scripts/tests -v
       - run: python scripts/check_release_artifacts.py dist --package oxyde-postgres-core
 
   publish:
     name: Publish to PyPI
-    needs: validate
+    needs: [validate, build-sdist]
     if: ${{ !cancelled() && needs.validate.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
@@ -238,6 +247,7 @@ jobs:
           merge-multiple: true
           run-id: ${{ inputs.artifacts_run_id || github.run_id }}
           github-token: ${{ github.token }}
+          pattern: ${{ needs.build-sdist.outputs.recovery_artifact_pattern }}
 
       - name: List artifacts
         run: ls -la dist/
@@ -264,6 +274,7 @@ jobs:
           merge-multiple: true
           run-id: ${{ inputs.artifacts_run_id || github.run_id }}
           github-token: ${{ github.token }}
+          pattern: ${{ needs.build-sdist.outputs.recovery_artifact_pattern }}
 
       - name: Create Release
         uses: softprops/action-gh-release@v3.0.0
