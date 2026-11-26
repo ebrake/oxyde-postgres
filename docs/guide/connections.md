@@ -166,8 +166,13 @@ settings = PoolSettings(
 )
 ```
 
-!!! note "TLS without certificate verification"
-    Use `ssl_mode="verify-full"` to verify the server certificate and hostname, with `ssl_root_cert` when a custom CA is needed. `ssl_mode="require"` encrypts without verifying the certificate.
+!!! note "Server certificate verification"
+    `ssl_mode="verify-ca"` and `ssl_mode="verify-full"` trust the operating
+    system's certificate store by default. `verify-full` also checks the
+    server hostname. Set `ssl_root_cert` to trust an additional custom CA.
+    On Alpine and other musl-based images, install the `ca-certificates`
+    package to provide the system trust store. `ssl_mode="require"` encrypts
+    without verifying the certificate.
 
 ### PostgreSQL Settings
 
