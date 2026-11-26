@@ -283,12 +283,9 @@ fn fallback_str(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
 
 /// Encode a native PostgreSQL array column to a msgpack array, dispatched by
 /// the element spec. Uses `Vec<Option<T>>` to handle NULL elements.
-///
-/// Legacy note: timedelta/interval array elements were always read as plain
-/// i64 (BigInt group), unlike scalar timedelta (µs → f64) — preserved as is.
 fn encode_pg_array(buf: &mut Vec<u8>, row: &PgRow, idx: usize, item: &ColumnTypeSpec) {
     match item {
-        ColumnTypeSpec::BigInteger | ColumnTypeSpec::Timedelta => {
+        ColumnTypeSpec::BigInteger => {
             // Try i64 (BIGINT[]), then i32 (INTEGER[]), then i16 (SMALLINT[]).
             if !try_encode_pg_array_opt::<i64>(buf, row, idx, write_i64)
                 && !try_encode_pg_array_opt::<i32>(buf, row, idx, |b, v| {
@@ -297,6 +294,9 @@ fn encode_pg_array(buf: &mut Vec<u8>, row: &PgRow, idx: usize, item: &ColumnType
             {
                 encode_pg_array_opt::<i16>(buf, row, idx, |b, v| write_i64(b, i64::from(v)));
             }
+        }
+        ColumnTypeSpec::Timedelta => {
+            encode_pg_array_opt::<i64>(buf, row, idx, |b, v| write_f64(b, v as f64 / 1_000_000.0));
         }
         ColumnTypeSpec::Double => {
             encode_pg_array_opt::<f64>(buf, row, idx, write_f64);

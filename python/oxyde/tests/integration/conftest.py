@@ -348,6 +348,17 @@ class ArrayNote(Model):
         table_name = "array_notes"
 
 
+class TemporalArray(Model):
+    id: int | None = Field(default=None, db_pk=True)
+    durations: list[timedelta]
+    dates: list[date]
+    times: list[time]
+
+    class Meta:
+        is_table = True
+        table_name = "temporal_arrays"
+
+
 class ArrayShadow(Model):
     """Array columns named like the aliases and columns array lookups use
     internally."""
@@ -471,7 +482,7 @@ ALL_MODELS = [
     AllTypes, NullableTypes, BytesModel, TdModel, Product, FactoryKeyed, Singleton,
     ExcludedNamed, RenamedParent, RenamedChild, ConvertedValues,
     AliasCollision, AliasCollisionChild,
-    ArrayDoc, ArrayNote, ArrayShadow, ArrayShadowJson, Supplier, SuppliedItem,
+    ArrayDoc, ArrayNote, TemporalArray, ArrayShadow, ArrayShadowJson, Supplier, SuppliedItem,
     Tenant, TenantItem, ReviewLink, ReviewGroup, ReviewReport,
 ]
 
