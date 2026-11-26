@@ -353,12 +353,48 @@ pub fn scalar_result_spec<'a>(
     }
 }
 
+/// Whether a scalar projection preserves a text-preferring source column.
+/// As in the compiler, scalar column names are literal identifiers.
+#[must_use]
+pub fn scalar_preserves_text(
+    node: &ScalarExpr,
+    types: ExprTypes<'_>,
+    text_columns: &std::collections::HashSet<String>,
+) -> bool {
+    fn uses_text(node: &ScalarExpr, text_columns: &std::collections::HashSet<String>) -> bool {
+        match node {
+            ScalarExpr::Column { name } => text_columns.contains(name),
+            ScalarExpr::Func { name, args } if is_type_preserving(name) => {
+                args.iter().any(|arg| uses_text(arg, text_columns))
+            }
+            _ => false,
+        }
+    }
+
+    scalar_result_spec(node, types).is_some() && uses_text(node, text_columns)
+}
+
+fn same_result_family(left: &ColumnTypeSpec, right: &ColumnTypeSpec) -> bool {
+    use ColumnTypeSpec as Spec;
+
+    match (left, right) {
+        (Spec::Decimal { .. }, Spec::Decimal { .. })
+        | (Spec::String { .. } | Spec::Text, Spec::String { .. } | Spec::Text) => true,
+        (Spec::Array { item: left }, Spec::Array { item: right }) => {
+            same_result_family(left, right)
+        }
+        _ => left == right,
+    }
+}
+
 /// True when `node` yields a value of type `hint` inside a `coalesce`/`greatest`
 /// that is typed `hint`: a column of that type, a nested function that
 /// preserves it, or a literal that [`compile`] retypes to it.
 fn preserves(node: &ScalarExpr, types: ExprTypes<'_>, hint: &ColumnTypeSpec) -> bool {
     match node {
-        ScalarExpr::Column { name } => types.known(name) == Some(hint),
+        ScalarExpr::Column { name } => types
+            .known(name)
+            .is_some_and(|spec| same_result_family(spec, hint)),
         ScalarExpr::Func { name, args } if is_type_preserving(name) => {
             args.iter().all(|a| preserves(a, types, hint))
         }

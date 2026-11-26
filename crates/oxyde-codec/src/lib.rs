@@ -368,6 +368,14 @@ pub struct QueryIR {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_types: Option<HashMap<String, ColumnTypeSpec>>,
 
+    /// Include the column conversion kinds in the SELECT result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_kinds: Option<bool>,
+
+    /// Columns whose Python fields preserve wire strings, keyed like `column_types`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_columns: Option<std::collections::HashSet<String>>,
+
     /// Verbatim `db_type` overrides, keyed like `column_types`. Filters on
     /// PostgreSQL cast array values and array-lookup operands to an array
     /// override (`INTEGER[]` where the spec alone would say `BIGINT[]`), and
@@ -508,6 +516,8 @@ impl Default for QueryIR {
             table: String::new(),
             cols: None,
             column_types: None,
+            result_kinds: None,
+            text_columns: None,
             column_db_types: None,
             bind_types: None,
             filter_tree: None,
@@ -910,6 +920,33 @@ mod tests {
 
         join.columns.pop();
         assert_eq!(join.pk_result_column(), "parent__tags");
+    }
+
+    #[test]
+    fn result_kinds_msgpack_roundtrip() {
+        for result_kinds in [None, Some(false), Some(true)] {
+            let text_columns = (result_kinds == Some(true)).then(|| {
+                ["id".into(), "author.external_id".into()]
+                    .into_iter()
+                    .collect()
+            });
+            let ir = QueryIR {
+                result_kinds,
+                text_columns: text_columns.clone(),
+                ..Default::default()
+            };
+            let bytes = rmp_serde::to_vec_named(&ir).unwrap();
+            let decoded: QueryIR = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(decoded.result_kinds, result_kinds);
+            assert_eq!(decoded.text_columns, text_columns);
+            let map: HashMap<String, rmpv::Value> = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(
+                map.get("result_kinds").and_then(rmpv::Value::as_bool),
+                result_kinds
+            );
+            assert_eq!(map.contains_key("result_kinds"), result_kinds.is_some());
+            assert_eq!(map.contains_key("text_columns"), text_columns.is_some());
+        }
     }
 
     #[test]

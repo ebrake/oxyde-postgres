@@ -5,7 +5,7 @@
 //! own type-specific decoding; the generic functions handle the
 //! columnar structure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use oxyde_codec::ColumnTypeSpec;
 use sqlx::{Column, Database, Row};
@@ -19,6 +19,33 @@ pub struct ColumnMeta {
     /// outside the model (raw SQL, aggregate aliases) — those fall back to
     /// the runtime DB type.
     pub spec: Option<ColumnTypeSpec>,
+    pub result_encoding: Option<ResultEncoding>,
+}
+
+/// Result-only overrides for projections whose SQL type alone is insufficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultEncoding {
+    Wire,
+    Runtime,
+    DurationMicros,
+    IntegerSum,
+    Float,
+    Decimal,
+}
+
+#[derive(Clone, Copy)]
+pub struct ResultOptions<'a> {
+    pub emit_kinds: bool,
+    pub encodings: Option<&'a HashMap<String, ResultEncoding>>,
+}
+
+impl From<bool> for ResultOptions<'_> {
+    fn from(emit_kinds: bool) -> Self {
+        Self {
+            emit_kinds,
+            encodings: None,
+        }
+    }
 }
 
 /// Backend-specific cell encoder.
@@ -45,6 +72,7 @@ pub trait CellEncoder {
                     db_type: Column::type_info(c).to_string().to_uppercase(),
                     spec,
                     name,
+                    result_encoding: None,
                 }
             })
             .collect()
@@ -63,14 +91,23 @@ pub trait CellEncoder {
     /// Encode a cell using the database column type (fallback).
     fn encode_by_db_type(buf: &mut Vec<u8>, row: &Self::Row, idx: usize, db_type: &str);
 
-    /// Encode a single cell: spec first, then runtime DB type.
-    fn encode_cell(buf: &mut Vec<u8>, row: &Self::Row, idx: usize, col: &ColumnMeta) {
+    /// Name the Python conversion for a column whose MessagePack type is lossy.
+    fn result_kind(col: &ColumnMeta) -> Option<&'static str>;
+
+    /// Encode a cell and report any conversion kind discovered from its value.
+    fn encode_cell(
+        buf: &mut Vec<u8>,
+        row: &Self::Row,
+        idx: usize,
+        col: &ColumnMeta,
+    ) -> Option<&'static str> {
         if let Some(spec) = &col.spec {
             if Self::try_encode_by_spec(buf, row, idx, spec) {
-                return;
+                return None;
             }
         }
         Self::encode_by_db_type(buf, row, idx, &col.db_type);
+        None
     }
 }
 
@@ -209,6 +246,8 @@ pub struct RelationInfo {
     /// Type of each of the relation's columns, in projection order. The
     /// length is the relation's column count; `None` decodes by runtime type.
     pub column_types: Vec<Option<ColumnTypeSpec>>,
+    /// Positions that preserve their underlying wire values.
+    pub text_columns: HashSet<usize>,
 }
 
 /// Msgpack nil byte (0xc0) — used to detect NULL PKs from LEFT JOINs.
@@ -228,49 +267,78 @@ struct RelGroup<'a> {
 
 fn encode_pk_cell<E: CellEncoder>(row: &E::Row, col_idx: usize, col_meta: &ColumnMeta) -> Vec<u8> {
     let mut pk_buf = Vec::with_capacity(16);
-    E::encode_cell(&mut pk_buf, row, col_idx, col_meta);
+    let _ = E::encode_cell(&mut pk_buf, row, col_idx, col_meta);
     pk_buf
+}
+
+fn write_kinds(buf: &mut Vec<u8>, kinds: impl Iterator<Item = Option<&'static str>>) {
+    let kinds: Vec<_> = kinds.collect();
+    if kinds.iter().any(Option::is_some) {
+        write_array_len(buf, kinds.len() as u32);
+        for kind in kinds {
+            match kind {
+                Some(kind) => write_str(buf, kind),
+                None => write_nil(buf),
+            }
+        }
+    } else {
+        write_nil(buf);
+    }
 }
 
 /// Encode rows from a stream using columnar format (and optionally dedup for JOINs).
 ///
 /// Returns `(msgpack_bytes, row_count)`.
-pub async fn encode_stream<E, S>(
+pub async fn encode_stream<'a, E, S>(
     mut stream: S,
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
     relations: Option<&[RelationInfo]>,
+    options: impl Into<ResultOptions<'a>>,
 ) -> Result<(Vec<u8>, usize), sqlx::Error>
 where
     E: CellEncoder,
     S: futures::Stream<Item = Result<E::Row, sqlx::Error>> + Unpin,
     <<E::Row as Row>::Database as Database>::Column: Column,
 {
+    let ResultOptions {
+        emit_kinds,
+        encodings,
+    } = options.into();
+    let rels = relations.unwrap_or(&[]);
+    let has_rels = !rels.is_empty();
+    let result_len = if emit_kinds {
+        4
+    } else {
+        2 + u32::from(has_rels)
+    };
     let first_row = match stream.next().await {
         Some(Ok(row)) => row,
         Some(Err(e)) => return Err(e),
         None => {
-            let has_rels = relations.is_some_and(|r| !r.is_empty());
             let mut buf = Vec::with_capacity(8);
+            write_array_len(&mut buf, result_len);
+            write_array_len(&mut buf, 0);
+            write_array_len(&mut buf, 0);
             if has_rels {
-                write_array_len(&mut buf, 3);
-                write_array_len(&mut buf, 0);
-                write_array_len(&mut buf, 0);
                 write_map_len(&mut buf, 0);
-            } else {
-                write_array_len(&mut buf, 2);
-                write_array_len(&mut buf, 0);
-                write_array_len(&mut buf, 0);
+            } else if emit_kinds {
+                write_nil(&mut buf);
+            }
+            if emit_kinds {
+                write_nil(&mut buf);
             }
             return Ok((buf, 0));
         }
     };
 
-    let all_columns = E::extract_columns(&first_row, col_types);
-    let rels = relations.unwrap_or(&[]);
-    let has_rels = !rels.is_empty();
-
+    let mut all_columns = E::extract_columns(&first_row, col_types);
+    if let Some(encodings) = encodings {
+        for column in &mut all_columns {
+            column.result_encoding = encodings.get(&column.name).copied();
+        }
+    }
     let mut main_indices: Vec<usize> = Vec::new();
-    let mut main_columns: Vec<&ColumnMeta> = Vec::new();
+    let mut main_columns = Vec::new();
 
     let mut rel_groups: Vec<RelGroup<'_>> = Vec::new();
 
@@ -287,7 +355,7 @@ where
         };
         for (idx, col) in all_columns.iter().enumerate().take(main_width) {
             main_indices.push(idx);
-            main_columns.push(col);
+            main_columns.push((col, None));
         }
 
         let mut start = main_width;
@@ -313,10 +381,15 @@ where
             let col_metas = col_indices
                 .iter()
                 .zip(&ri.column_types)
-                .map(|(&idx, spec)| ColumnMeta {
+                .enumerate()
+                .map(|(pos, (&idx, spec))| ColumnMeta {
                     name: all_columns[idx].name.clone(),
                     db_type: all_columns[idx].db_type.clone(),
                     spec: spec.clone(),
+                    result_encoding: ri
+                        .text_columns
+                        .contains(&pos)
+                        .then_some(ResultEncoding::Wire),
                 })
                 .collect();
             rel_groups.push(RelGroup {
@@ -334,7 +407,7 @@ where
     } else {
         for (idx, col) in all_columns.iter().enumerate() {
             main_indices.push(idx);
-            main_columns.push(col);
+            main_columns.push((col, None));
         }
     }
 
@@ -346,7 +419,10 @@ where
 
         write_array_len(&mut main_rows_buf, main_indices.len() as u32);
         for (pos, &idx) in main_indices.iter().enumerate() {
-            E::encode_cell(&mut main_rows_buf, row, idx, main_columns[pos]);
+            let (col, kind) = &mut main_columns[pos];
+            if let Some(value_kind) = E::encode_cell(&mut main_rows_buf, row, idx, col) {
+                *kind = Some(value_kind);
+            }
         }
 
         if has_rels {
@@ -361,7 +437,12 @@ where
                         group.data_buf.extend_from_slice(&pk_bytes);
                         write_array_len(&mut group.data_buf, group.col_indices.len() as u32);
                         for (pos, &idx) in group.col_indices.iter().enumerate() {
-                            E::encode_cell(&mut group.data_buf, row, idx, &group.col_metas[pos]);
+                            let _ = E::encode_cell(
+                                &mut group.data_buf,
+                                row,
+                                idx,
+                                &group.col_metas[pos],
+                            );
                         }
                     }
                     group.refs_buf.extend_from_slice(&pk_bytes);
@@ -378,14 +459,10 @@ where
     }
 
     let mut buf = Vec::with_capacity(main_rows_buf.len() + 1024);
-    if has_rels {
-        write_array_len(&mut buf, 3);
-    } else {
-        write_array_len(&mut buf, 2);
-    }
+    write_array_len(&mut buf, result_len);
 
     write_array_len(&mut buf, main_columns.len() as u32);
-    for col in &main_columns {
+    for (col, _) in &main_columns {
         write_str(&mut buf, &col.name);
     }
 
@@ -396,7 +473,7 @@ where
         write_map_len(&mut buf, rel_groups.len() as u32);
         for group in rel_groups {
             write_str(&mut buf, group.prefix);
-            write_map_len(&mut buf, 3);
+            write_map_len(&mut buf, 3 + u32::from(emit_kinds));
 
             write_str(&mut buf, "columns");
             write_array_len(&mut buf, group.field_names.len() as u32);
@@ -411,7 +488,22 @@ where
             write_str(&mut buf, "refs");
             write_array_len(&mut buf, num_rows as u32);
             buf.extend_from_slice(&group.refs_buf);
+
+            if emit_kinds {
+                write_str(&mut buf, "kinds");
+                write_kinds(&mut buf, group.col_metas.iter().map(E::result_kind));
+            }
         }
+    } else if emit_kinds {
+        write_nil(&mut buf);
+    }
+    if emit_kinds {
+        write_kinds(
+            &mut buf,
+            main_columns
+                .iter()
+                .map(|(col, kind)| kind.or_else(|| E::result_kind(col))),
+        );
     }
 
     Ok((buf, num_rows))
@@ -452,7 +544,7 @@ where
     let mut rows_buf = Vec::new();
     write_array_len(&mut rows_buf, columns.len() as u32);
     for (i, col) in columns.iter().enumerate() {
-        E::encode_cell(&mut rows_buf, &first_row, i, col);
+        let _ = E::encode_cell(&mut rows_buf, &first_row, i, col);
     }
 
     while let Some(row_res) = stream.next().await {
@@ -460,7 +552,7 @@ where
         num_rows += 1;
         write_array_len(&mut rows_buf, columns.len() as u32);
         for (i, col) in columns.iter().enumerate() {
-            E::encode_cell(&mut rows_buf, &row, i, col);
+            let _ = E::encode_cell(&mut rows_buf, &row, i, col);
         }
     }
 
