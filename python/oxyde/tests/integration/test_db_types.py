@@ -33,6 +33,7 @@ def _has(model: type, field: str) -> bool:
 class PgDbTypes(Model):
     id: int | None = Field(default=None, db_pk=True)
     uuid_val: UUID | None = Field(default=None, db_nullable=True, db_type="UUID")
+    uuid_text: str | None = Field(default=None, db_nullable=True, db_type="UUID")
     jsonb_val: dict | None = Field(default=None, db_nullable=True, db_type="JSONB")
     varchar_val: str = Field(default="", db_type="VARCHAR(100)")
     numeric_val: Decimal | None = Field(
@@ -120,6 +121,30 @@ async def typed_db(request, postgres_database_url):
 
 
 class TestDbTypes:
+    @pytest.mark.asyncio
+    async def test_values_return_explicit_types(self, typed_db):
+        db, model = typed_db
+        uuid = UUID("12345678-1234-5678-1234-567812345678")
+        naive = datetime(2026, 11, 26, 13, 4, 5)
+        aware = naive.replace(tzinfo=timezone(timedelta(hours=2)))
+        fields = {
+            "uuid_text": str(uuid),
+            "ts_val": naive,
+            "tstz_val": aware,
+            "uuid_arr": [uuid],
+            "tstz_arr": [aware],
+        }
+        await model.objects.create(using=db.name, **fields)
+        [row] = await model.objects.all(using=db.name)
+        [values] = await model.objects.values(*fields).all(using=db.name)
+        for key, value in values.items():
+            assert value == getattr(row, key)
+            assert type(value) is type(getattr(row, key))
+        assert type(values["uuid_arr"][0]) is UUID
+        assert type(values["tstz_arr"][0]) is datetime
+        assert values["tstz_arr"][0].utcoffset() == timedelta(0)
+        assert values["uuid_text"] == str(uuid)
+
     @pytest.mark.asyncio
     async def test_varchar(self, typed_db):
         db, model = typed_db

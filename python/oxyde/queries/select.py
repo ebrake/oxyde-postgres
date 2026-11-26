@@ -503,6 +503,7 @@ class Query(
         append_pk: bool | None = None,
         project_joins: bool | None = None,
         union_join_paths: tuple[str, ...] | None = None,
+        result_kinds: bool | None = None,
     ) -> dict[str, Any]:
         table_name = self.model_class.get_table_name()
 
@@ -680,6 +681,7 @@ class Query(
             table=table_name,
             columns=db_columns,
             column_types=self._column_types_for_query(descriptors),
+            result_kinds=result_kinds,
             bind_types=self._bind_types_for_query(descriptors),
             column_db_types=self._column_db_types_for_query(descriptors),
             model=_model_key(self.model_class),

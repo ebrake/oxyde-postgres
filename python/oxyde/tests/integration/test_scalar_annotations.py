@@ -451,11 +451,11 @@ class TestAnnotationTypeInference:
     async def test_interval_alias_matches_the_field(self, sa_db):
         await SaBag.objects.create(wait=timedelta(seconds=90), using=sa_db.name)
         rows = await (
-            SaBag.objects.annotate(w=F("wait"), g=Greatest("wait", "wait"))
-            .values("wait", "w", "g")
+            SaBag.objects.annotate(w=F("wait"), g=Greatest("wait", "wait"), c=Coalesce("wait", None))
+            .values("wait", "w", "g", "c")
             .all(using=sa_db.name)
         )
-        assert rows[0]["w"] == rows[0]["wait"] == rows[0]["g"] == 90.0
+        assert rows == [dict.fromkeys(("wait", "w", "g", "c"), timedelta(seconds=90))]
 
     @pytest.mark.asyncio
     async def test_count_and_exists_ignore_annotations_with_special_names(self, sa_db):

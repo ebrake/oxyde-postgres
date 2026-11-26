@@ -128,6 +128,7 @@ def build_select_ir(
     table: str,
     columns: Sequence[str] | None = None,
     column_types: dict[str, dict] | None = None,
+    result_kinds: bool | None = None,
     bind_types: dict[str, dict] | None = None,
     column_db_types: dict[str, str] | None = None,
     model: str | None = None,
@@ -157,6 +158,7 @@ def build_select_ir(
     Args:
         column_types: Optional mapping of column name to ColumnTypeSpec dict
             ({"kind": ...}). Used by Rust for typed binding and decoding
+        result_kinds: Request conversion tags for the encoded result columns.
         bind_types: Binding-only ColumnTypeSpec dicts (keyed like column_types)
             for columns that have no column spec; never used to decode results.
         column_db_types: Optional mapping of column name (keyed like
@@ -184,6 +186,8 @@ def build_select_ir(
         payload["cols"] = []
     if column_types:
         payload["column_types"] = dict(column_types)
+    if result_kinds is not None:
+        payload["result_kinds"] = result_kinds
     if bind_types:
         payload["bind_types"] = dict(bind_types)
     if column_db_types:
