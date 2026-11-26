@@ -7,18 +7,17 @@ Model.model_config - no sanitization needed.
 
 from __future__ import annotations
 
-from collections.abc import Container, Coroutine, Sequence
+from collections.abc import Coroutine, Sequence
+from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.exceptions import FieldLookupError, MultipleObjectsReturned, NotFoundError
 from oxyde.models.db_schema import _validate_db_row, _validate_db_rows
-from oxyde.models.lookups import _resolve_related_field
 from oxyde.models.registry import registered_tables
 from oxyde.models.utils import _AggregateFieldsSet, _LoadedFieldsSet
-from oxyde.queries._result_types import convert_rows
-from oxyde.queries.aggregates import Avg, Sum
+from oxyde.queries._result_types import convert_column, convert_rows
 from oxyde.queries.base import (
     SupportsExecute,
     _collect_model_columns,
@@ -53,31 +52,6 @@ def _unpack_result(
     return columns, rows, relations, kinds
 
 
-def _text_columns(
-    model_class: type[Model],
-    columns: list[str],
-    kinds: list[str | None],
-    annotations: Container[str] = (),
-) -> set[int]:
-    """Find tagged model fields whose annotations preserve the wire text."""
-    metadata = model_class._db_meta.field_metadata
-    keep_text = set()
-    for index, kind in enumerate(kinds):
-        if kind is None:
-            continue
-        column = columns[index]
-        if column in annotations:
-            continue
-        meta = metadata.get(column)
-        if meta is None:
-            related = _resolve_related_field(model_class, column)
-            if related is not None:
-                meta = related.column_meta
-        if meta is not None and meta.python_type is str:
-            keep_text.add(index)
-    return keep_text
-
-
 def _remap_columns(columns: list[str], model_class: type[Model]) -> list[str]:
     """Remap db_column names to field names using cached reverse_column_map."""
     rmap = model_class._db_meta.reverse_column_map
@@ -89,15 +63,12 @@ def _remap_columns(columns: list[str], model_class: type[Model]) -> list[str]:
 def _merge_relation_columns(
     rows: list[dict[str, Any]],
     relations_map: dict[str, Any],
-    target_models: dict[str, type[Model]],
 ) -> None:
     """Flatten Rust's dedup relation encoding back into ``rows`` in place."""
     for prefix, rel in relations_map.items():
         columns, data, refs = rel["columns"], rel["data"], rel["refs"]
         if (kinds := rel.get("kinds")) is not None and data:
-            target = target_models.get(prefix)
-            keep_text = _text_columns(target, columns, kinds) if target else set()
-            convert_rows(list(data.values()), kinds, keep_text)
+            convert_rows(list(data.values()), kinds)
         for row, ref in zip(rows, refs):
             values = data.get(ref) if ref is not None else None
             for column, value in zip(columns, values or [None] * len(columns)):
@@ -174,39 +145,15 @@ class ExecutionMixin(Generic[TModel]):
             return [restored.get(column, column) for column in columns]
         return _remap_columns(columns, self.model_class)
 
-    def _coerce_aggregate(self, value: Any, field: str, agg_class: type) -> Any:
-        """Must be implemented by AggregationMixin."""
-        raise NotImplementedError
-
-    def _projected_columns(
-        self,
-        columns: list[str],
-        values: list[list[Any]],
-        kinds: list[str | None] | None,
-    ) -> list[str]:
-        columns = self._result_columns(columns)
-        if kinds is not None and values:
-            keep_text = _text_columns(
-                self.model_class, columns, kinds, self._annotations
-            )
-            convert_rows(values, kinds, keep_text)
-            if self._annotations:
-                for index, column in enumerate(columns):
-                    aggregate = self._annotations.get(column)
-                    if isinstance(aggregate, (Sum, Avg)):
-                        for row in values:
-                            row[index] = self._coerce_aggregate(
-                                row[index], aggregate.field, type(aggregate)
-                            )
-        return columns
-
     def _columnar_rows(
         self,
         columns: list[str],
         values: list[list[Any]],
         kinds: list[str | None] | None = None,
     ) -> tuple[list[str], list[dict[str, Any]]]:
-        columns = self._projected_columns(columns, values, kinds)
+        columns = self._result_columns(columns)
+        if kinds is not None and values:
+            convert_rows(values, kinds)
         return columns, [dict(zip(columns, row)) for row in values]
 
     def limit(self, value: int) -> Self:
@@ -250,20 +197,43 @@ class ExecutionMixin(Generic[TModel]):
 
     async def fetch_all(self, client: SupportsExecute) -> list[Any]:
         """Execute query and return typed rows in the selected result mode."""
-        rows = await self.fetch_rows(client)
-        if self._result_mode == "list":
-            if not rows:
-                return []
-            fields = self._selected_fields or list(rows[0].keys())
-            if self._values_flat:
-                if len(fields) != 1:
-                    raise ValueError(
-                        "values_list(flat=True) requires exactly one field"
-                    )
-                column = fields[0]
-                return [row.get(column) for row in rows]
-            return [tuple(row.get(field) for field in fields) for row in rows]
-        return rows
+        return await self._fetch_projected(
+            client, list_mode=self._result_mode == "list"
+        )
+
+    def _list_rows(
+        self,
+        columns: list[str],
+        values: list[list[Any]],
+        kinds: list[str | None] | None,
+    ) -> list[Any]:
+        if not values:
+            return []
+        columns = self._result_columns(columns)
+        # Like dict(zip(...)), duplicate names take the last value and retain
+        # the position where the name first appeared.
+        by_name = {column: index for index, column in enumerate(columns)}
+        indices = [by_name.get(field) for field in (self._selected_fields or by_name)]
+        if self._values_flat:
+            if len(indices) != 1:
+                raise ValueError("values_list(flat=True) requires exactly one field")
+            index = indices[0]
+            if index is None:
+                return [None] * len(values)
+            # This column is the final output, so it needs no write-back.
+            result = [row[index] for row in values]
+            if kinds is not None and (kind := kinds[index]) is not None:
+                result = convert_column(kind, result)
+            return result
+        if kinds is not None:
+            convert_rows(values, kinds)
+        if len(indices) > 1 and None not in indices:
+            get = itemgetter(*indices)
+            return [get(row) for row in values]
+        return [
+            tuple(row[index] if index is not None else None for index in indices)
+            for row in values
+        ]
 
     async def _fetch_by_mode(self, client: SupportsExecute) -> list[Any]:
         """Fetch results honoring the values()/values_list() result mode.
@@ -275,8 +245,11 @@ class ExecutionMixin(Generic[TModel]):
             return await self.fetch_all(client)
         return await self.fetch_models(client)
 
-    async def fetch_one(self, client: SupportsExecute) -> dict[str, Any] | None:
-        """Execute query and return first result as dict."""
+    async def fetch_one(self, client: SupportsExecute) -> Any:
+        """Return the first row as a dict, tuple, or bare value in flat list mode.
+
+        An empty result returns None.
+        """
         query = self.limit(1)
         results = await query.fetch_all(client)
         return results[0] if results else None
@@ -288,6 +261,11 @@ class ExecutionMixin(Generic[TModel]):
 
     async def fetch_rows(self, client: SupportsExecute) -> list[dict[str, Any]]:
         """Execute query and return typed rows as dictionaries."""
+        return await self._fetch_projected(client, list_mode=False)
+
+    async def _fetch_projected(
+        self, client: SupportsExecute, *, list_mode: bool
+    ) -> list[Any]:
         self._check_flat_relation_columns()
         result_bytes = await client.execute(
             self._build_ir(for_models=False, result_kinds=True)
@@ -296,18 +274,25 @@ class ExecutionMixin(Generic[TModel]):
         data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
         del result_bytes
         result = _unpack_result(data)
-        if result is None:
-            return data if isinstance(data, list) else []
+        if result is not None:
+            columns, values, relations, kinds = result
+            merge_relations = relations if self._selected_fields is None else None
+            if list_mode and not merge_relations:
+                return self._list_rows(columns, values, kinds)
 
-        columns, values, relations, kinds = result
-        _, rows = self._columnar_rows(columns, values, kinds)
-        if relations and self._selected_fields is None:
-            targets = {
-                join.result_prefix: join.target_model
-                for join in self._planned_join_specs().values()
-            }
-            _merge_relation_columns(rows, relations, targets)
-        return rows
+            _, rows = self._columnar_rows(columns, values, kinds)
+            if merge_relations:
+                _merge_relation_columns(rows, merge_relations)
+        else:
+            rows = data if isinstance(data, list) else []
+        if not list_mode or not rows:
+            return rows
+        fields = self._selected_fields or list(rows[0])
+        if self._values_flat:
+            if len(fields) != 1:
+                raise ValueError("values_list(flat=True) requires exactly one field")
+            return [row.get(fields[0]) for row in rows]
+        return [tuple(row.get(field) for field in fields) for row in rows]
 
     async def fetch_models(self, client: SupportsExecute) -> list[TModel]:
         """Execute query and return results as model instances.

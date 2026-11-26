@@ -126,6 +126,7 @@ class ModelMeta:
     extra: dict[str, Any] = dataclass_field(default_factory=dict)
     # Cached IR type hints for Rust decoding (computed at finalization)
     column_types: dict[str, dict] | None = None
+    text_columns: frozenset[str] = frozenset()
     # Column db_type overrides for PostgreSQL array casts and JSON lookups
     column_db_types: dict[str, str] | None = None
     # Binding-only specs for columns whose db_type has no column spec (never
