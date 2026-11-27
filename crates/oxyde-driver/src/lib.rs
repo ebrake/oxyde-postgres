@@ -132,18 +132,20 @@ pub(crate) fn ensure_cleanup_task() {
 // ── Public re-exports (preserves crate API) ────────────────────────────────
 
 // Types
-pub use error::{DbErrorKind, DriverError, Result};
+pub use error::{require_server_version, DbErrorKind, DriverError, Result};
 pub use explain::{ExplainFormat, ExplainOptions};
 pub use pool::{DatabaseBackend, DbPool};
 pub use settings::PoolSettings;
 
 // Pool API
-pub use pool::api::{close_all_pools, close_pool, init_pool, init_pool_overwrite, pool_backend};
+pub use pool::api::{
+    close_all_pools, close_pool, init_pool, init_pool_overwrite, pool_backend, pool_server_version,
+};
 
 // Transaction API
 pub use transaction::api::{
     begin_transaction, commit_transaction, create_savepoint, release_savepoint,
-    rollback_to_savepoint, rollback_transaction,
+    rollback_to_savepoint, rollback_transaction, transaction_server_version,
 };
 
 // Query / statement execution

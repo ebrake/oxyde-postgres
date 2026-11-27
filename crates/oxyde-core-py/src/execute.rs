@@ -643,12 +643,14 @@ pub(crate) fn render_sql_debug<'py>(
 
 /// Run EXPLAIN (ANALYZE) on a query, return plan as JSON or text → Coroutine.
 #[pyfunction]
+#[pyo3(signature = (pool_name, ir_bytes, analyze=None, format=None, io=None))]
 pub(crate) fn explain<'py>(
     py: Python<'py>,
     pool_name: String,
     ir_bytes: &Bound<'py, PyBytes>,
     analyze: Option<bool>,
     format: Option<String>,
+    io: Option<bool>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let ir_data = ir_bytes.as_bytes().to_vec();
     let format_token = format.unwrap_or_else(|| "text".to_string());
@@ -660,10 +662,12 @@ pub(crate) fn explain<'py>(
     let explain_options = ExplainOptions {
         analyze: analyze.unwrap_or(false),
         format: explain_format,
+        io: io.unwrap_or(false),
     };
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let ir = decode_ir(&ir_data)?;
+        explain_options.validate().map_err(PyValueError::new_err)?;
 
         let backend = driver_pool_backend(&pool_name)
             .await

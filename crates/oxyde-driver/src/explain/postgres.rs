@@ -12,12 +12,35 @@ pub enum ExplainFormat {
 pub struct ExplainOptions {
     pub analyze: bool,
     pub format: ExplainFormat,
+    pub io: bool,
+}
+
+/// `server_version_num` of the first PostgreSQL release with `EXPLAIN (IO)`.
+pub const EXPLAIN_IO_MIN_SERVER_VERSION: i32 = 190_000;
+
+impl ExplainOptions {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if self.io && !self.analyze {
+            return Err("EXPLAIN IO requires analyze=True");
+        }
+        Ok(())
+    }
+
+    /// Minimum `server_version_num` and feature name these options require.
+    #[must_use]
+    pub fn required_server_version(self) -> Option<(i32, &'static str)> {
+        self.io
+            .then_some((EXPLAIN_IO_MIN_SERVER_VERSION, "EXPLAIN IO"))
+    }
 }
 
 pub fn build_postgres_explain_sql(sql: &str, options: ExplainOptions) -> String {
     let mut clauses: Vec<String> = Vec::new();
     if options.analyze {
         clauses.push("ANALYZE TRUE".into());
+    }
+    if options.io {
+        clauses.push("IO TRUE".into());
     }
     if matches!(options.format, ExplainFormat::Json) {
         clauses.push("FORMAT JSON".into());

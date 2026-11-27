@@ -170,6 +170,9 @@ plan = await User.objects.filter(age__gte=18).explain(analyze=True)
 print(plan)
 ```
 
+On PostgreSQL 19 and newer, `.explain(analyze=True, io=True)` also reports
+I/O requests and prefetch statistics for supported scan nodes.
+
 PostgreSQL output example:
 
 ```

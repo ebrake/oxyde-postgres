@@ -1,9 +1,12 @@
 """Integration tests for edge cases, union, sql debug, and batch operations."""
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from oxyde import execute_raw
+from oxyde.exceptions import UnsupportedServerVersionError
 
 from .conftest import Author, Post, Tag
 
@@ -105,6 +108,29 @@ class TestUnion:
 
 
 class TestSqlDebug:
+    @pytest.mark.requires_pg19
+    @pytest.mark.asyncio
+    async def test_explain_io_reports_scan_statistics(self, db):
+        plan: Any = await Author.objects.filter(active=True).explain(
+            using=db.name, analyze=True, format="json", io=True
+        )
+        assert "I/O Count" in plan[0]["Plan"]
+
+    @pytest.mark.requires_pre_pg19
+    @pytest.mark.asyncio
+    async def test_explain_io_requires_postgres_19(self, db):
+        with pytest.raises(
+            UnsupportedServerVersionError, match="EXPLAIN IO requires PostgreSQL 19"
+        ):
+            await Author.objects.filter(active=True).explain(
+                using=db.name, analyze=True, io=True
+            )
+
+    @pytest.mark.asyncio
+    async def test_explain_io_requires_analyze(self, db):
+        with pytest.raises(ValueError, match="EXPLAIN IO requires analyze=True"):
+            await Author.objects.filter(active=True).explain(using=db.name, io=True)
+
     def test_sql_returns_query(self):
         """sql() returns (sql_string, params) without DB connection."""
         sql, params = Post.objects.filter(published=True, views__gt=100).sql(

@@ -85,6 +85,7 @@ class DebugMixin(Generic[TModel]):
         client: SupportsExecute | None = None,
         analyze: bool = False,
         format: str = "text",
+        io: bool = False,
     ) -> Coroutine[Any, Any, str]:
         """
         Get query execution plan from the database.
@@ -94,6 +95,7 @@ class DebugMixin(Generic[TModel]):
             client: Optional database client
             analyze: Whether to execute the query and show actual times
             format: Output format - "text" or "json"
+            io: Include scan I/O statistics (PostgreSQL 19+, requires analyze=True)
 
         Returns:
             Query plan from database
@@ -112,7 +114,7 @@ class DebugMixin(Generic[TModel]):
 
             # Call Rust explain function
             plan: str = await explain_query(
-                pool_name, ir_bytes, analyze=analyze, format=format
+                pool_name, ir_bytes, analyze=analyze, format=format, io=io
             )
             return plan
 

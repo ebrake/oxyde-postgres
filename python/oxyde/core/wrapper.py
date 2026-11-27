@@ -44,6 +44,7 @@ Functions Exported:
 
 from __future__ import annotations
 
+import inspect
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -185,13 +186,52 @@ register_validator = _exports["register_validator"]
 pool_backend = _exports["pool_backend"]
 render_sql = _exports["render_sql"]
 render_sql_debug = _exports["render_sql_debug"]
-explain_query = _exports["explain_query"]
 migration_compute_diff = _exports["migration_compute_diff"]
 migration_to_sql = _exports["migration_to_sql"]
 migration_validate_schema = _exports["migration_validate_schema"]
 migration_validate_extension_name = _exports["migration_validate_extension_name"]
 migration_infer_name = _exports["migration_infer_name"]
 SchemaReplay = _exports["SchemaReplay"]
+
+
+_EXPLAIN_IO_UNSUPPORTED = (
+    "explain(io=True) requires an oxyde-postgres-core build with EXPLAIN IO "
+    "support; the installed native core does not accept 'io'. Upgrade "
+    "oxyde-postgres-core to the release matching oxyde-postgres."
+)
+
+
+def _accepts_keyword(function: Callable[..., Any], name: str) -> bool:
+    """Whether ``function`` accepts keyword ``name``; False when unknowable."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except TypeError, ValueError:
+        return False
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (
+            parameter.name == name
+            and parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+        )
+        for parameter in parameters
+    )
+
+
+async def explain_query(
+    pool_name: str,
+    ir_bytes: bytes,
+    analyze: bool = False,
+    format: str = "text",
+    io: bool = False,
+) -> Any:
+    native = _exports["explain_query"]
+    if not io:
+        return await native(pool_name, ir_bytes, analyze=analyze, format=format)
+    # Older native cores predate the ``io`` keyword; fail before PostgreSQL.
+    if not _accepts_keyword(native, "io"):
+        raise RuntimeError(_EXPLAIN_IO_UNSUPPORTED)
+    return await native(pool_name, ir_bytes, analyze=analyze, format=format, io=True)
+
 
 # ── Core exception classes ────────────────────────────────────────────────
 # Raised by the Rust core; constraint classification happens in the driver
@@ -227,6 +267,16 @@ except ImportError:  # pragma: no cover - extension missing
         """Stub: Rust core module not available."""
 
 
+try:
+    from _oxyde_core import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
+        UnsupportedServerVersionError,
+    )
+except ImportError:  # pragma: no cover - extension missing or older
+
+    class UnsupportedServerVersionError(DatabaseError):  # type: ignore[no-redef]
+        """Stub: Rust core does not expose feature version checks."""
+
+
 __all__ = [
     "execute",
     "execute_in_transaction",
@@ -252,6 +302,7 @@ __all__ = [
     "migration_infer_name",
     "SchemaReplay",
     "DatabaseError",
+    "UnsupportedServerVersionError",
     "IntegrityError",
     "UniqueViolationError",
     "ForeignKeyViolationError",

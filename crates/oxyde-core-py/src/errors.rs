@@ -17,6 +17,12 @@ pyo3::create_exception!(
 );
 pyo3::create_exception!(
     _oxyde_core,
+    UnsupportedServerVersionError,
+    DatabaseError,
+    "The PostgreSQL server version does not support the requested feature."
+);
+pyo3::create_exception!(
+    _oxyde_core,
     IntegrityError,
     DatabaseError,
     "A database constraint was violated."
@@ -49,6 +55,9 @@ pyo3::create_exception!(
 /// Convert a `DriverError` into the matching Python exception.
 pub(crate) fn driver_err(e: &DriverError) -> PyErr {
     let message = e.to_string();
+    if matches!(e, DriverError::UnsupportedServerVersion { .. }) {
+        return UnsupportedServerVersionError::new_err(message);
+    }
     match e.db_kind() {
         Some(DbErrorKind::UniqueViolation) => UniqueViolationError::new_err(message),
         Some(DbErrorKind::ForeignKeyViolation) => ForeignKeyViolationError::new_err(message),

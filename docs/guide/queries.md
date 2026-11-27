@@ -465,7 +465,13 @@ print(plan)
 
 # With actual execution times
 plan = await User.objects.filter(age__gte=18).explain(analyze=True)
+
+# With scan I/O statistics (PostgreSQL 19+)
+plan = await User.objects.filter(age__gte=18).explain(analyze=True, io=True)
 ```
+
+`io=True` requires `analyze=True`, which executes the query. On PostgreSQL 18,
+requesting `io=True` raises `oxyde.exceptions.UnsupportedServerVersionError`.
 
 ## Query Immutability
 
