@@ -143,7 +143,7 @@ def _load_functions() -> dict[str, Callable[..., Any]]:
         if abi_version != EXPECTED_ABI_VERSION:
             raise ImportError(
                 f"ABI version mismatch: expected {EXPECTED_ABI_VERSION}, "
-                f"got {abi_version}. Please install oxyde-postgres-core>=0.4.0."
+                f"got {abi_version}. Please install oxyde-postgres-core>=0.4.1."
             )
 
         # Load each function from registry

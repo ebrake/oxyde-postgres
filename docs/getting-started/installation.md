@@ -13,8 +13,9 @@ pip install oxyde-postgres
 ```
 
 This installs both `oxyde-postgres` and its native dependency
-`oxyde-postgres-core`. Version 0.4.0 requires core `>=0.4.0,<0.5.0` for typed
-query results. Imports remain `oxyde` and `_oxyde_core`, and the CLI is `oxyde`.
+`oxyde-postgres-core`. Version 0.4.1 requires core `>=0.4.1,<0.5.0` for
+inserts into models without primary keys. Imports are `oxyde` and `_oxyde_core`,
+and the CLI is `oxyde`.
 Use a separate environment from upstream `oxyde` / `oxyde-core`, which share
 these module names.
 

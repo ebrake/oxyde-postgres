@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 — Foreign-key assignment and inserts without primary keys
 
 - Passing or assigning a related instance copies its key to the foreign-key
   column once the key has been loaded, saved, or supplied explicitly.
@@ -20,6 +20,7 @@
 - PostgreSQL `create()` and `bulk_create()` now support models with no primary
   key. The affected-row count confirms which submitted fields were persisted
   when the full insert succeeds.
+- The ORM requires `oxyde-postgres-core>=0.4.1,<0.5.0` for the new insert behavior.
 
 ## 0.4.0 — Typed PostgreSQL query results
 
