@@ -82,7 +82,7 @@ python/oxyde/
   warnings CI does not (or vice versa) — always build through rustup.
 - **Python** 3.15+
 - **maturin** (`pip install maturin`)
-- **Docker** — database tests start PostgreSQL 18 via testcontainers. Alternatively set `OXYDE_TEST_POSTGRES_URL` to a disposable PostgreSQL 18+ database. Tests create and drop isolated schemas. Database tests fail if the server cannot start; they are not silently skipped.
+- **Docker** — database tests start PostgreSQL 18 by default via testcontainers. CI tests PostgreSQL 18 and 19. Set `OXYDE_TEST_POSTGRES_IMAGE=postgres:19-alpine` to test PostgreSQL 19 locally, or set `OXYDE_TEST_POSTGRES_URL` to a disposable PostgreSQL 18+ database. Tests create and drop isolated schemas. Database tests fail if the server cannot start.
 
 ## Development Setup
 
@@ -125,7 +125,7 @@ Day-to-day commands are `make` targets (see the `Makefile` at the repo root):
 |---|---|
 | `make build-core` | Rebuild the Rust extension (`maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml`) |
 | `make test-rust` | All Rust tests (`cargo test --workspace --no-default-features`) |
-| `make test` | All Python tests (PostgreSQL 18 required for database tests) |
+| `make test` | All Python tests (PostgreSQL 18+ required for database tests) |
 | `make test-unit` / `test-smoke` / `test-integration` | One Python suite |
 | `make coverage` | Python tests with coverage |
 | `make lint` | Everything CI checks: ruff, mypy, cargo fmt/check/clippy |
@@ -174,7 +174,7 @@ description: changed DDL bytes are a feature decision, never a side effect.
 Tests are split into suites under `python/oxyde/tests/`:
 
 - `unit/` — no database needed
-- `smoke/` — quick end-to-end sanity on PostgreSQL 18
+- `smoke/` — quick end-to-end sanity on PostgreSQL
 - `integration/` — real PostgreSQL via testcontainers (needs Docker)
 - `typecheck/` — mypy against generated stubs
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import closing
 from urllib.parse import quote, urlencode
 
 import psycopg2
@@ -17,10 +18,29 @@ def postgres_url():
         yield configured
         return
     from testcontainers.postgres import PostgresContainer
-    with PostgresContainer("postgres:18-alpine") as container:
+    image = os.environ.get("OXYDE_TEST_POSTGRES_IMAGE", "postgres:18-alpine")
+    with PostgresContainer(image) as container:
         host = container.get_container_host_ip()
         port = container.get_exposed_port(5432)
         yield f"postgresql://test:test@{host}:{port}/test"
+
+
+@pytest.fixture(scope="session")
+def server_version_num(postgres_url):
+    with closing(psycopg2.connect(postgres_url)) as conn, conn.cursor() as cursor:
+        cursor.execute("SHOW server_version_num")
+        return int(cursor.fetchone()[0])
+
+
+@pytest.fixture(autouse=True)
+def _skip_for_postgres_version(request):
+    if request.node.get_closest_marker("requires_pg19"):
+        if request.getfixturevalue("server_version_num") < 190000:
+            pytest.skip("requires PostgreSQL 19 or newer")
+    if request.node.get_closest_marker("requires_pre_pg19"):
+        if request.getfixturevalue("server_version_num") >= 190000:
+            pytest.skip("requires PostgreSQL earlier than 19")
+
 
 @pytest.fixture
 def postgres_database_url(postgres_url):
