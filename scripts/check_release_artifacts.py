@@ -11,17 +11,16 @@ from email.parser import BytesParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGE = "oxyde-postgres"
+CONFIG = ROOT / "pyproject.toml"
 
 
-def expected_licenses(package: str) -> dict[str, bytes]:
+def expected_licenses() -> dict[str, bytes]:
     licenses = {"Oxyde MIT": (ROOT / "LICENSE").read_bytes()}
     if b"Copyright (c) 2025 Nikita Ryzhenkov" not in licenses["Oxyde MIT"]:
         raise ValueError("Original Oxyde copyright notice is missing")
-    if package == "oxyde-postgres-core":
-        for name in ("LICENSE-MIT", "LICENSE-APACHE"):
-            licenses[f"SQLx {name}"] = (
-                ROOT / "vendor/sqlx-postgres" / name
-            ).read_bytes()
+    for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+        licenses[f"SQLx {name}"] = (ROOT / "vendor/sqlx-postgres" / name).read_bytes()
     return licenses
 
 
@@ -64,12 +63,22 @@ def validate_artifact(path: Path, package: str, version: str) -> None:
                 f"{path.name}: package name or version does not match "
                 f"{package} {version}"
             )
-        config = ROOT / (
-            "pyproject.toml" if package.endswith("-core") else "python/pyproject.toml"
-        )
-        requires_python = tomllib.loads(config.read_text())["project"]["requires-python"]
+        for requirement in headers.get_all("Requires-Dist", []):
+            name = re.match(r"[a-zA-Z0-9._-]+", requirement.lstrip())
+            if (
+                name
+                and re.sub(r"[-_.]+", "-", name[0]).lower() == "oxyde-postgres-core"
+            ):
+                raise ValueError(
+                    f"{path.name}: must not depend on the separate core package"
+                )
+        requires_python = tomllib.loads(CONFIG.read_text())["project"][
+            "requires-python"
+        ]
         if headers["Requires-Python"] != requires_python:
-            raise ValueError(f"{path.name}: Python requirement must be {requires_python}")
+            raise ValueError(
+                f"{path.name}: Python requirement must be {requires_python}"
+            )
         if "Nikita Ryzhenkov" not in str(headers.get("Author-email", "")) + str(
             headers.get("Author", "")
         ):
@@ -82,7 +91,7 @@ def validate_artifact(path: Path, package: str, version: str) -> None:
         for name, value in files.items()
         if "license" in name.lower()
     ]
-    for label, content in expected_licenses(package).items():
+    for label, content in expected_licenses().items():
         if content.replace(b"\r\n", b"\n").strip() not in bundled:
             raise ValueError(
                 f"{path.name}: complete {label} license/copyright notice is missing"
@@ -92,16 +101,11 @@ def validate_artifact(path: Path, package: str, version: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
-    parser.add_argument(
-        "--package", choices=["oxyde-postgres-core", "oxyde-postgres"], required=True
-    )
+    parser.add_argument("--package", choices=[PACKAGE], required=True)
     args = parser.parse_args()
-    config = ROOT / (
-        "pyproject.toml" if args.package.endswith("-core") else "python/pyproject.toml"
-    )
-    match = re.search(r'^version = "([^"\n]+)"$', config.read_text(), re.MULTILINE)
+    match = re.search(r'^version = "([^"\n]+)"$', CONFIG.read_text(), re.MULTILINE)
     if match is None:
-        raise ValueError(f"A static release version is required in {config}")
+        raise ValueError(f"A static release version is required in {CONFIG}")
     version = match.group(1)
     prefix = args.package.replace("-", "_") + "-"
     artifacts = sorted(

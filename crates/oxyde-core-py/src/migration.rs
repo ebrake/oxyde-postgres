@@ -96,7 +96,7 @@ pub(crate) fn migration_to_sql(operations_json: &str, dialect: &str) -> PyResult
 }
 
 /// Stateful, database-free schema replay shared by Python and Rust callers.
-#[pyclass]
+#[pyclass(module = "oxyde._oxyde_core")]
 pub(crate) struct SchemaReplay {
     state: oxyde_migrate::Snapshot,
 }

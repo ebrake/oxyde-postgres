@@ -101,7 +101,9 @@ def test_missing_core_is_clear_and_context_is_lazy(monkeypatch):
     monkeypatch.setattr(oxyde.core, "SchemaReplay", Mock())
     MigrationContext(mode="collect")
     MigrationContext(mode="execute")
-    with pytest.raises(RuntimeError, match=r"0.3.*core>=0.3.0"):
+    with pytest.raises(
+        RuntimeError, match=r"lacks SchemaReplay.*Reinstall oxyde-postgres"
+    ):
         SchemaState()
 
 

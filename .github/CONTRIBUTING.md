@@ -61,7 +61,7 @@ python/oxyde/
 │   ├── aggregates.py   # Count, Sum, Avg, Max, Min
 │   └── mixins/         # Query method mixins
 ├── core/
-│   ├── wrapper.py      # Bridge to the compiled _oxyde_core module
+│   ├── wrapper.py      # Bridge to the compiled oxyde._oxyde_core module
 │   ├── ir.py           # IR builders (query state → dict for msgpack)
 │   ├── column_types.py # THE single Python → ColumnTypeSpec mapping point
 │   └── types.py        # Value serialization for msgpack
@@ -81,7 +81,7 @@ python/oxyde/
   CI uses the same pinned version, so a floating local stable may show clippy
   warnings CI does not (or vice versa) — always build through rustup.
 - **Python** 3.15+
-- **maturin** (`pip install maturin`)
+- **uv** and **maturin** for editable builds
 - **Docker** — database tests start PostgreSQL 18 by default via testcontainers. CI tests PostgreSQL 18 and 19. Set `OXYDE_TEST_POSTGRES_IMAGE=postgres:19-alpine` to test PostgreSQL 19 locally, or set `OXYDE_TEST_POSTGRES_URL` to a disposable PostgreSQL 18+ database. Tests create and drop isolated schemas. Database tests fail if the server cannot start.
 
 ## Development Setup
@@ -92,29 +92,16 @@ python/oxyde/
 git clone https://github.com/ebrake/oxyde-postgres.git
 cd oxyde-postgres
 
-python -m venv .venv
+uv venv --python 3.15
 source .venv/bin/activate  # Linux/macOS
 # or: .venv\Scripts\activate  # Windows
 ```
 
-### 2. Build Rust Workspace
+### 2. Build and Install the Package
 
 ```bash
-cargo build --release
-```
-
-### 3. Install Rust Python Extension
-
-```bash
-maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
-```
-
-### 4. Install Python Package
-
-```bash
-cd python
-pip install -e .[dev]
-cd ..
+uv pip install maturin
+make build-core-dev
 ```
 
 ## Development Workflow
@@ -123,7 +110,7 @@ Day-to-day commands are `make` targets (see the `Makefile` at the repo root):
 
 | Command | What it does |
 |---|---|
-| `make build-core` | Rebuild the Rust extension (`maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml`) |
+| `make build-core-dev` / `make build-core` | Install the editable package with dev dependencies and a debug or release build of the extension |
 | `make test-rust` | All Rust tests (`cargo test --workspace --no-default-features`) |
 | `make test` | All Python tests (PostgreSQL 18+ required for database tests) |
 | `make test-unit` / `test-smoke` / `test-integration` | One Python suite |
@@ -184,7 +171,7 @@ make test-unit     # or test-smoke / test-integration
 make coverage
 
 # A single file goes through pytest directly:
-cd python && pytest oxyde/tests/unit/test_query.py
+pytest python/oxyde/tests/unit/test_query.py
 ```
 
 ## Code Style
@@ -302,7 +289,7 @@ IR payload should stay under 10KB for best performance. Large bulk operations ma
 
 ## Pull Request Guidelines
 
-1. **Build the Rust core from source** before submitting a fix. The `oxyde-postgres-core` package on PyPI may be behind `main` — your issue might already be fixed. Always run `make build-core` first.
+1. **Build from the current checkout** with `make build-core-dev` before testing a fix.
 2. **Create a branch** from `main`
 3. **Write tests** for new functionality
 4. **Run `make test-rust`, `make test` and `make lint`** before submitting — CI runs exactly these
@@ -317,12 +304,12 @@ IR payload should stay under 10KB for best performance. Large bulk operations ma
 
 ## Release preparation
 
-Set the same version for `oxyde-postgres-core` and `oxyde-postgres` in the package manifests, lockfiles, and Python runtime version. Push a single `v<version>` tag at the release commit, or dispatch `release-core.yml` at an existing release tag with the matching version. The coordinated release builds and publishes the native core first, stages one GitHub release with its wheels, then dispatches `release-python.yml` to publish the Python package and complete that same release. Configure PyPI publishing and repository hosting for the new project before pushing release tags. Release notes are maintained in `docs/changelog.md`.
+Set the same version in `pyproject.toml`, the Cargo workspace and lockfile, and `python/oxyde/__init__.py`. Configure the PyPI trusted publisher for `oxyde-postgres` to use `release.yml` and the `pypi` environment. Push a `v<version>` tag at the release commit or dispatch `release.yml` from the existing tag with its matching version. The workflow publishes the source distribution and native wheels to PyPI and attaches them to the GitHub release. Update `docs/changelog.md` with the release notes.
 
-If publishing is blocked after all required builds succeed, dispatch `release-core.yml` from `main` with the same version and `artifacts_run_id` set to the earlier run. The workflow requires the source distribution and all six wheel build jobs to have succeeded at the exact release tag. It selects artifacts for those targets and repeats validation before publishing. This permits fixes to release validation without rebuilding or moving the tag.
+If publishing is blocked after all required builds succeed, dispatch `release.yml` from `main` with the same version and `artifacts_run_id` set to the earlier run. The workflow requires the source distribution and all six wheel build jobs to have succeeded at the exact release tag. It selects artifacts for those targets and repeats validation before publishing. This permits fixes to release validation without rebuilding or moving the tag.
 
 With explicit release-owner authorization, set `allow_missing_macos=true` on a recovery dispatch to publish the completed Linux and Windows builds while macOS wheels are unavailable. The source distribution and every Linux and Windows build must still pass at the exact release tag, and all downloaded artifacts must pass validation. The default remains the complete platform matrix.
 
-To add macOS ARM64 wheels to an existing release, build and test them from its published source distribution, upload them to that GitHub release, then dispatch `release-core.yml` from `main` with `append_macos_arm64=true`, the existing `version`, and `wheel_sha256` containing a JSON object of verified wheel filenames and SHA-256 digests. This mode checks out the release tag, checks every wheel's digest, metadata, and licenses, and publishes only those wheels through the existing trusted publisher. It keeps the release public and skips the normal build and Python-package release jobs.
+To add macOS ARM64 wheels to an existing release, build and test them from its published source distribution, upload them to that GitHub release, then dispatch `release.yml` from `main` with `append_macos_arm64=true`, the existing `version`, and `wheel_sha256` containing a JSON object of verified wheel filenames and SHA-256 digests. This mode checks out the release tag, checks every wheel's digest, metadata, and licenses, and publishes only those wheels through the existing trusted publisher.
 
 On macOS, select the virtual environment's interpreter when running Rust tests: `PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --workspace --no-default-features`. Native extension builds retain the extension-module feature.

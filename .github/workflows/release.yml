@@ -49,15 +49,22 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           python - <<'PYTHON'
-          import os, tomllib
+          import ast, os, tomllib
           from pathlib import Path
-          core = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
-          orm = tomllib.loads(Path("python/pyproject.toml").read_text())["project"]["version"]
+          package = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          cargo = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          module = ast.parse(Path("python/oxyde/__init__.py").read_text())
+          runtime = next(
+              ast.literal_eval(node.value)
+              for node in module.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+          )
           requested = os.environ.get("REQUESTED_VERSION") or os.environ["GITHUB_REF_NAME"].removeprefix("v")
-          if requested != core or core != orm:
-              raise SystemExit(f"Release {requested} does not match core={core}, ORM={orm}")
+          if requested != package or package != cargo or cargo != runtime:
+              raise SystemExit(f"Release {requested} does not match package={package}, Cargo={cargo}, runtime={runtime}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              print(f"version={core}\ntag=v{core}", file=output)
+              print(f"version={package}\ntag=v{package}", file=output)
           PYTHON
 
       - name: Verify the source release tag
@@ -88,7 +95,7 @@ jobs:
           from pathlib import Path
           run = json.loads(Path("prior-run.json").read_text())
           tag_sha = subprocess.check_output(["git", "rev-parse", os.environ["RELEASE_TAG"] + "^{commit}"], text=True).strip()
-          if run["head_sha"] != tag_sha or run["path"] != ".github/workflows/release-core.yml":
+          if run["head_sha"] != tag_sha or run["path"] != ".github/workflows/release.yml":
               raise SystemExit("Reusable artifacts must come from this workflow at the exact release tag")
           targets = [
               "x86_64-unknown-linux-gnu",
@@ -116,7 +123,7 @@ jobs:
         with:
           maturin-version: v1.16.0
           command: sdist
-          args: -m crates/oxyde-core-py/Cargo.toml --out dist
+          args: --out dist
 
       - name: Upload sdist
         if: inputs.artifacts_run_id == ''
@@ -173,15 +180,16 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           maturin-version: v1.16.0
-          args: --release --locked --out dist -m crates/oxyde-core-py/Cargo.toml -i 3.15
+          args: --release --locked --out dist -i 3.15
           sccache: 'true'
           manylinux: ${{ matrix.platform.manylinux }}
 
       - name: Verify native wheel import
         if: runner.os != 'Linux'
+        shell: bash
         run: |
-          python -m pip install --no-deps --no-index --find-links dist oxyde-postgres-core
-          python -c "import _oxyde_core"
+          python -m pip install dist/oxyde_postgres-*-cp315-cp315-*.whl
+          python -c "import oxyde, oxyde._oxyde_core"
 
       - name: Set up Python 3.15t (macOS/Windows)
         if: runner.os != 'Linux'
@@ -194,7 +202,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           maturin-version: v1.16.0
-          args: --release --locked --out dist -m crates/oxyde-core-py/Cargo.toml -i 3.15t
+          args: --release --locked --out dist -i 3.15t
           sccache: 'true'
           manylinux: ${{ matrix.platform.manylinux }}
 
@@ -219,7 +227,7 @@ jobs:
           github-token: ${{ github.token }}
           pattern: ${{ needs.build-sdist.outputs.recovery_artifact_pattern }}
       - run: python -m unittest discover -s scripts/tests -v
-      - run: python scripts/check_release_artifacts.py dist --package oxyde-postgres-core
+      - run: python scripts/check_release_artifacts.py dist --package oxyde-postgres
 
   publish:
     name: Publish to PyPI
@@ -232,7 +240,7 @@ jobs:
       actions: read
     environment:
       name: pypi
-      url: https://pypi.org/project/oxyde-postgres-core/
+      url: https://pypi.org/project/oxyde-postgres/
 
     steps:
       - name: Install uv
@@ -256,13 +264,12 @@ jobs:
         run: uv publish --trusted-publishing always dist/*
 
   release:
-    name: Stage combined release and publish Python package
+    name: Publish GitHub release
     needs: [publish, build-sdist]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.build-sdist.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      actions: write
 
     steps:
       - uses: actions/checkout@v6.0.2
@@ -280,20 +287,14 @@ jobs:
         uses: softprops/action-gh-release@v3.0.0
         with:
           files: dist/*
+          fail_on_unmatched_files: true
           body_path: docs/changelog.md
           tag_name: ${{ needs.build-sdist.outputs.tag }}
           # The existing tag fixes the source commit. A branch target avoids
           # GitHub's workflow-write restriction when main advances later.
           target_commitish: ${{ github.event.repository.default_branch }}
           name: Oxyde for PostgreSQL ${{ needs.build-sdist.outputs.version }}
-          draft: true
-
-      - name: Publish Python package and complete combined release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.build-sdist.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.build-sdist.outputs.version }}
-        run: gh workflow run release-python.yml --ref "$RELEASE_TAG" -f version="$RELEASE_VERSION"
+          make_latest: true
 
   append-macos-arm64:
     name: Publish additional macOS ARM64 wheels
@@ -304,7 +305,7 @@ jobs:
       id-token: write
     environment:
       name: pypi
-      url: https://pypi.org/project/oxyde-postgres-core/
+      url: https://pypi.org/project/oxyde-postgres/
     steps:
       - uses: actions/checkout@v6.0.2
         with:
@@ -331,10 +332,10 @@ jobs:
           expected = json.loads(os.environ["WHEEL_SHA256"])
           if not isinstance(expected, dict) or not expected:
               raise SystemExit("A nonempty verified wheel digest manifest is required")
-          pattern = rf"oxyde_postgres_core-{re.escape(version)}-cp\d+-cp\d+t?-macosx_\d+_\d+_arm64\.whl"
+          pattern = rf"oxyde_postgres-{re.escape(version)}-cp\d+-cp\d+t?-macosx_\d+_\d+_arm64\.whl"
           for name, digest in expected.items():
               if not re.fullmatch(pattern, name) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-                  raise SystemExit("Only macOS ARM64 core wheels with verified SHA-256 digests are allowed")
+                  raise SystemExit("Only macOS ARM64 wheels with verified SHA-256 digests are allowed")
           directory = Path("dist")
           directory.mkdir()
           for name, digest in expected.items():
@@ -342,7 +343,7 @@ jobs:
               wheel = directory / name
               if hashlib.sha256(wheel.read_bytes()).hexdigest() != digest:
                   raise SystemExit(f"Wheel digest mismatch: {name}")
-              validate_artifact(wheel, "oxyde-postgres-core", version)
+              validate_artifact(wheel, "oxyde-postgres", version)
               print(f"Verified additional wheel: {name}")
           PYTHON
 

@@ -46,11 +46,11 @@ lint-rust:
 	$(CARGO) fmt --all -- --check
 
 format:
-	cd $(PYTHON_DIR) && ruff format .
+	ruff format python
 	$(CARGO) fmt --all
 
 build-core:
-	$(MATURIN) develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
+	$(MATURIN) develop --uv --release -E dev
 
 build-core-dev:
-	$(MATURIN) develop --manifest-path crates/oxyde-core-py/Cargo.toml
+	$(MATURIN) develop --uv -E dev

@@ -63,8 +63,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Build and install from the repository root in an activated virtual environment
 pip install maturin
-maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
-pip install -e ./python
+maturin develop --release
 ```
 
 ## Models

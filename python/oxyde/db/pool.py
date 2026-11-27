@@ -64,34 +64,40 @@ except ImportError:
     # Stub for when the Rust module is not built
     async def _execute(pool_name: str, ir_bytes: bytes) -> bytes:
         raise RuntimeError(
-            "Rust core module not available. Please install oxyde-postgres-core."
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
         )
 
     async def _init_pool(name: str, url: str, settings: dict[str, Any] | None) -> None:
         raise RuntimeError(
-            "Rust core module not available. Please install oxyde-postgres-core."
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
         )
 
     async def _init_pool_overwrite(
         name: str, url: str, settings: dict[str, Any] | None
     ) -> None:
         raise RuntimeError(
-            "Rust core module not available. Please install oxyde-postgres-core."
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
         )
 
     async def close_pool(name: str) -> None:
         raise RuntimeError(
-            "Rust core module not available. Please install oxyde-postgres-core."
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
         )
 
     async def close_all_pools() -> None:
         raise RuntimeError(
-            "Rust core module not available. Please install oxyde-postgres-core."
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
         )
 
     async def _pool_backend(pool_name: str) -> str:
         raise RuntimeError(
-            "Rust core module not available. Please install oxyde-postgres-core."
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
         )
 
 

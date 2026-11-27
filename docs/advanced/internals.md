@@ -339,9 +339,8 @@ pub(crate) static TRANSACTION_ID: AtomicU64 = AtomicU64::new(1);
 # Build all crates
 cargo build --release
 
-# Build Python extension
-cd crates/oxyde-core-py
-maturin develop --release
+# Build the Python package and extension from the repository root
+make build-core
 
 # Run Rust tests
 cargo test --workspace
@@ -419,9 +418,9 @@ print(params)
 
 4. Add Python wrapper in `python/oxyde/queries/`
 
-5. Rebuild:
+5. Rebuild from the repository root:
    ```bash
-   cd crates/oxyde-core-py && maturin develop --release
+   make build-core-dev
    ```
 
 ## Next Steps

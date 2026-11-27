@@ -2,8 +2,7 @@
 
 Expressions compute values in PostgreSQL for annotations and atomic updates.
 `F` references a column and supports arithmetic; `Coalesce`, `Greatest`,
-`Concat`, `Value`, and `RawSQL` compose with it. Scalar annotations require
-`oxyde-postgres-core>=0.3.1,<0.4.0`.
+`Concat`, `Value`, and `RawSQL` compose with it.
 
 ## Why F Expressions?
 
