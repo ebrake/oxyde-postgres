@@ -10,6 +10,13 @@ pub enum DriverError {
     #[error("Connection error: {0}")]
     ConnectionError(String),
 
+    #[error("{feature} requires PostgreSQL {major} or newer; server_version_num is {actual}", major = .required / 10_000)]
+    UnsupportedServerVersion {
+        feature: &'static str,
+        required: i32,
+        actual: i32,
+    },
+
     #[error("Pool '{0}' already exists")]
     PoolAlreadyExists(String),
 
@@ -86,3 +93,14 @@ impl DriverError {
 }
 
 pub type Result<T> = std::result::Result<T, DriverError>;
+
+pub fn require_server_version(actual: i32, required: i32, feature: &'static str) -> Result<()> {
+    if actual < required {
+        return Err(DriverError::UnsupportedServerVersion {
+            feature,
+            required,
+            actual,
+        });
+    }
+    Ok(())
+}

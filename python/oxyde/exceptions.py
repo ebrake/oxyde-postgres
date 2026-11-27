@@ -1,6 +1,6 @@
 """Exception hierarchy for Oxyde ORM.
 
-All Oxyde exceptions inherit from OxydeError, allowing catch-all handling:
+Field and manager exceptions inherit from OxydeError:
 
     try:
         user = await User.objects.get(id=999)
@@ -20,9 +20,13 @@ Exception hierarchy:
             ├── ForeignKeyViolationError - FOREIGN KEY constraint
             ├── NotNullViolationError    - NOT NULL constraint
             └── CheckViolationError      - CHECK constraint
+
+UnsupportedServerVersionError inherits from the Rust core's DatabaseError.
 """
 
 from __future__ import annotations
+
+from oxyde.core.wrapper import UnsupportedServerVersionError
 
 
 class OxydeError(Exception):
@@ -86,4 +90,5 @@ __all__ = [
     "ForeignKeyViolationError",
     "NotNullViolationError",
     "CheckViolationError",
+    "UnsupportedServerVersionError",
 ]

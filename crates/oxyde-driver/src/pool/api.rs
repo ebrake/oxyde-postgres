@@ -54,16 +54,19 @@ async fn init_pool_inner(
             .fetch_one(pg_pool)
             .await;
     let version_result = match version {
-        Ok(version) => validate_server_version(version),
+        Ok(version) => validate_server_version(version).map(|()| version),
         Err(error) => Err(DriverError::ConnectionError(format!(
             "Cannot determine PostgreSQL server version: {error}"
         ))),
     };
-    if let Err(error) = version_result {
-        pg_pool.close().await;
-        return Err(error);
-    }
-    let handle = PoolHandle::new(backend, pool);
+    let server_version_num = match version_result {
+        Ok(version) => version,
+        Err(error) => {
+            pg_pool.close().await;
+            return Err(error);
+        }
+    };
+    let handle = PoolHandle::new(backend, pool, server_version_num);
 
     if overwrite {
         // Close old pool if exists
@@ -118,6 +121,14 @@ pub async fn close_all_pools() -> Result<()> {
 /// Get the database backend type for a named pool.
 pub async fn pool_backend(name: &str) -> Result<DatabaseBackend> {
     registry().get(name).await.map(|handle| handle.backend)
+}
+
+/// Get the server_version_num recorded when the pool was opened.
+pub async fn pool_server_version(name: &str) -> Result<i32> {
+    registry()
+        .get(name)
+        .await
+        .map(|handle| handle.server_version_num)
 }
 
 fn backend_from_url(url: &str) -> Option<DatabaseBackend> {

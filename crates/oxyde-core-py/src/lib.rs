@@ -123,6 +123,10 @@ fn oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Exception classes (constraint classification comes from the driver)
     m.add("DatabaseError", m.py().get_type::<errors::DatabaseError>())?;
     m.add(
+        "UnsupportedServerVersionError",
+        m.py().get_type::<errors::UnsupportedServerVersionError>(),
+    )?;
+    m.add(
         "IntegrityError",
         m.py().get_type::<errors::IntegrityError>(),
     )?;

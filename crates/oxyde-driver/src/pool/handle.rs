@@ -19,11 +19,16 @@ pub enum DbPool {
 pub struct PoolHandle {
     pub(crate) backend: DatabaseBackend,
     pub(crate) pool: DbPool,
+    pub(crate) server_version_num: i32,
 }
 
 impl PoolHandle {
-    pub fn new(backend: DatabaseBackend, pool: DbPool) -> Self {
-        Self { backend, pool }
+    pub fn new(backend: DatabaseBackend, pool: DbPool, server_version_num: i32) -> Self {
+        Self {
+            backend,
+            pool,
+            server_version_num,
+        }
     }
 
     pub async fn close(&self) {
