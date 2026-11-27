@@ -407,10 +407,16 @@ class Query(
 
         return column_types or None
 
-    def _text_column_refs(self, join_specs: list[_JoinDescriptor]) -> list[str]:
-        columns = set(self.model_class._db_meta.text_columns)
+    def _text_column_refs(
+        self, join_specs: list[_JoinDescriptor], *, for_models: bool
+    ) -> list[str]:
+        def wire_columns(model: type[Model]) -> frozenset[str]:
+            metadata = model._db_meta
+            return metadata.model_wire_columns if for_models else metadata.text_columns
+
+        columns = set(wire_columns(self.model_class))
         for descriptor in join_specs:
-            target_columns = descriptor.target_model._db_meta.text_columns
+            target_columns = wire_columns(descriptor.target_model)
             columns.update(
                 f"{descriptor.alias}.{column}"
                 for _, column in descriptor.columns
@@ -701,7 +707,11 @@ class Query(
             columns=db_columns,
             column_types=self._column_types_for_query(descriptors),
             result_kinds=result_kinds,
-            text_columns=self._text_column_refs(descriptors) if result_kinds else None,
+            text_columns=(
+                self._text_column_refs(descriptors, for_models=for_models)
+                if result_kinds
+                else None
+            ),
             bind_types=self._bind_types_for_query(descriptors),
             column_db_types=self._column_db_types_for_query(descriptors),
             model=_model_key(self.model_class),

@@ -48,21 +48,31 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from oxyde._msgpack import msgpack
 from oxyde.core.types import serialize_value
 from oxyde.db.registry import register_connection
 
+if TYPE_CHECKING:
+    from oxyde.queries._result_set import ResultSet
+
 try:
     from oxyde.core import close_all_pools, close_pool
     from oxyde.core import execute as _execute
+    from oxyde.core import execute_rows as _execute_rows
     from oxyde.core import init_pool as _init_pool
     from oxyde.core import init_pool_overwrite as _init_pool_overwrite
     from oxyde.core import pool_backend as _pool_backend
 except ImportError:
     # Stub for when the Rust module is not built
     async def _execute(pool_name: str, ir_bytes: bytes) -> bytes:
+        raise RuntimeError(
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
+        )
+
+    async def _execute_rows(pool_name: str, ir_bytes: bytes) -> ResultSet:
         raise RuntimeError(
             "Rust core module not available. Reinstall oxyde-postgres, "
             "or run make build-core-dev in a source checkout."
@@ -285,14 +295,21 @@ class AsyncDatabase:
         Returns:
             MessagePack bytes containing query results.
         """
+        result: bytes = await _execute(self.name, self._pack_query(ir))
+        return result
+
+    async def execute_rows(self, ir: dict[str, Any]) -> ResultSet:
+        """Execute a SELECT and return its decoded rows."""
+        result: ResultSet = await _execute_rows(self.name, self._pack_query(ir))
+        return result
+
+    def _pack_query(self, ir: dict[str, Any]) -> bytes:
         if not self._connected:
             raise RuntimeError(
                 f"Database '{self.name}' not connected. Call connect() first."
             )
-
-        ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
-        result_bytes: bytes = await _execute(self.name, ir_bytes)
-        return result_bytes
+        packed: bytes = msgpack.packb(ir, default=_msgpack_encoder)
+        return packed
 
     async def __aenter__(self) -> AsyncDatabase:
         """Context manager entry."""

@@ -6,16 +6,21 @@ Oxyde is designed for high performance through its Rust core. This guide covers 
 
 ```mermaid
 graph LR
-    Python["Python Layer<br/>Pydantic Models<br/>QuerySet"] -->|"msgpack"| Rust["Rust Core<br/>SQL Gen<br/>Connection Pool"]
+    Python["Python Layer<br/>Pydantic Models<br/>QuerySet"] -->|"MessagePack query IR"| Rust["Rust Core<br/>SQL Gen<br/>Connection Pool"]
+    Rust -->|"Native SELECT rows"| Python
     Rust -->|"sqlx"| DB["Database<br/>PostgreSQL 18+"]
 ```
 
-Key performance characteristics:
+The Python layer sends a compact MessagePack query IR. Rust uses
+sea-query to build SQL and sqlx to reuse connections and fetch rows
+without holding the Python GIL.
 
-- **MessagePack protocol**: Compact binary payloads
-- **Rust SQL generation**: sea-query for fast SQL building
-- **Native async**: sqlx releases Python GIL during I/O
-- **Connection pooling**: Efficient connection reuse
+Model reads and projections use Rust to build dictionaries, tuples, or
+single-column lists directly. Dictionary rows share one key object per
+column without interning it. The core creates typed Python values before
+Pydantic validates model rows.
+Joins also reuse the related rows that share a primary key. Clients that
+return only MessagePack use the compatible Python result adapter.
 
 ## Query Optimization
 

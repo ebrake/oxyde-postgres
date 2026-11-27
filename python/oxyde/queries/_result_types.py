@@ -1,6 +1,6 @@
 """Restore Python values from the driver's column-wise MessagePack tags."""
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -32,8 +32,26 @@ _ADAPTERS: dict[str, TypeAdapter[list[Any]]] = {
 _RESULT_KINDS = frozenset(_ADAPTERS)
 
 
-def convert_column(kind: str, values: list[Any]) -> list[Any]:
+def convert_column(
+    kind: str, values: list[Any], *, standard_tz: bool = False
+) -> list[Any]:
     """Convert a column in batch and preserve values Python cannot represent."""
+    converted = _convert_column(kind, values)
+    if standard_tz and kind in ("datetime", "datetime[]", "time", "time[]"):
+        return [_with_standard_timezone(value) for value in converted]
+    return converted
+
+
+def _with_standard_timezone(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_with_standard_timezone(item) for item in value]
+    if isinstance(value, (datetime, time)) and type(value.tzinfo) is not timezone:
+        if (offset := value.utcoffset()) is not None:
+            return value.replace(tzinfo=timezone(offset))
+    return value
+
+
+def _convert_column(kind: str, values: list[Any]) -> list[Any]:
     if kind not in _RESULT_KINDS:
         raise ValueError(f"Unknown result kind: {kind!r}")
 
@@ -43,7 +61,7 @@ def convert_column(kind: str, values: list[Any]) -> list[Any]:
     except ValidationError:
         if kind.endswith("[]"):
             return [
-                convert_column(kind[:-2], value) if isinstance(value, list) else value
+                _convert_column(kind[:-2], value) if isinstance(value, list) else value
                 for value in values
             ]
         converted = []
@@ -66,10 +84,14 @@ def convert_column(kind: str, values: list[Any]) -> list[Any]:
         return converted
 
 
-def convert_rows(rows: list[list[Any]], kinds: list[str | None]) -> None:
+def convert_rows(
+    rows: list[list[Any]], kinds: list[str | None], *, standard_tz: bool = False
+) -> None:
     """Convert the tagged columns in place."""
     for index, kind in enumerate(kinds):
         if kind is not None:
-            values = convert_column(kind, [row[index] for row in rows])
+            values = convert_column(
+                kind, [row[index] for row in rows], standard_tz=standard_tz
+            )
             for row, value in zip(rows, values):
                 row[index] = value

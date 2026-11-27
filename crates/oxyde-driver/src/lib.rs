@@ -149,15 +149,16 @@ pub use transaction::api::{
 
 // Query / statement execution
 pub use execute::query::{
-    execute_mutation_returning, execute_mutation_returning_in_transaction, execute_query_columnar,
-    execute_query_columnar_dedup, execute_query_columnar_dedup_in_transaction,
-    execute_query_columnar_in_transaction, execute_statement, execute_statement_in_transaction,
+    execute_mutation_returning, execute_mutation_returning_in_transaction, execute_query_cells,
+    execute_query_cells_in_transaction, execute_query_columnar, execute_query_columnar_dedup,
+    execute_query_columnar_dedup_in_transaction, execute_query_columnar_in_transaction,
+    execute_statement, execute_statement_in_transaction,
 };
 
-// Encoder types and msgpack write helpers
+// Result cells and encoders
 pub use convert::encoder::{
     write_array_len, write_json_value, write_map_len, write_rmpv_value, write_str, write_u64,
-    RelationInfo, ResultEncoding, ResultOptions,
+    RelationInfo, RelationRows, ResultEncoding, ResultOptions, RowSet,
 };
 
 pub use convert::{ArrayItem, ArrayValues, Cell, PgNumeric, PgTemporal};

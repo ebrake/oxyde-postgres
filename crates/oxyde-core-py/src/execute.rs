@@ -5,15 +5,17 @@ use std::{borrow::Cow, collections::HashMap, time::Instant};
 use crate::convert::{
     backend_to_dialect, json_to_py, value_to_py, values_to_py, values_to_py_tagged,
 };
+use crate::result_rows::ResultRows;
 use crate::types::{encode_insert_result, encode_mutation_result};
 use oxyde_codec::{AggregateOp, ColumnTypeSpec, QueryIR};
 use oxyde_driver::{
     execute_insert_returning, execute_insert_returning_in_transaction, execute_mutation_returning,
-    execute_mutation_returning_in_transaction, execute_query_columnar,
-    execute_query_columnar_dedup, execute_query_columnar_dedup_in_transaction,
-    execute_query_columnar_in_transaction, execute_statement, execute_statement_in_transaction,
-    explain_query, pool_backend as driver_pool_backend, ExplainFormat, ExplainOptions,
-    RelationInfo, ResultEncoding, ResultOptions,
+    execute_mutation_returning_in_transaction, execute_query_cells,
+    execute_query_cells_in_transaction, execute_query_columnar, execute_query_columnar_dedup,
+    execute_query_columnar_dedup_in_transaction, execute_query_columnar_in_transaction,
+    execute_statement, execute_statement_in_transaction, explain_query,
+    pool_backend as driver_pool_backend, ExplainFormat, ExplainOptions, RelationInfo,
+    ResultEncoding, ResultOptions,
 };
 use oxyde_sql::utils::identifier::{grouped_projection, output_label, resolve_column};
 use oxyde_sql::utils::{
@@ -47,11 +49,14 @@ fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
     // Joined columns are typed by their `alias.column` reference, not by
     // their result label, which a base column of the same name may share.
     let column_types = ir.column_types.as_ref();
+    let text_columns = ir
+        .text_columns
+        .as_ref()
+        .filter(|_| ir.result_kinds == Some(true));
     ir.joins.as_ref().map(|joins| {
         joins
             .iter()
-            .enumerate()
-            .map(|(join_index, join)| {
+            .map(|join| {
                 let pk_column = join.pk_column_name();
                 // The encoder reports an out-of-range index if the pk is missing.
                 let pk_index = join
@@ -79,27 +84,9 @@ fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
                         .iter()
                         .enumerate()
                         .filter_map(|(index, c)| {
-                            let keeps_text = ir.result_kinds == Some(true)
-                                && union_branches(ir).all(|branch| {
-                                    let Some(other) = branch
-                                        .joins
-                                        .as_ref()
-                                        .and_then(|joins| joins.get(join_index))
-                                    else {
-                                        return false;
-                                    };
-                                    let Some(column) = other.columns.get(index) else {
-                                        return false;
-                                    };
-                                    other.result_prefix == join.result_prefix
-                                        && column.field == c.field
-                                        && branch.text_columns.as_ref().is_some_and(|text| {
-                                            text.contains(&format!(
-                                                "{}.{}",
-                                                other.alias, column.column
-                                            ))
-                                        })
-                                });
+                            let keeps_text = text_columns.is_some_and(|text| {
+                                text.contains(&format!("{}.{}", join.alias, c.column))
+                            });
                             keeps_text.then_some(index)
                         })
                         .collect(),
@@ -187,6 +174,11 @@ fn decode_column_types(ir: &QueryIR) -> Option<Cow<'_, HashMap<String, ColumnTyp
 }
 
 /// Result-only overrides keyed by the SQL output label.
+///
+/// In a UNION, the first branch supplies the output labels and any wire-text
+/// requirements. Decoding can fall back to the actual PostgreSQL result type.
+/// Other overrides fall back to runtime typing when the branches disagree on
+/// the encoding or position of a label.
 fn result_encodings(ir: &QueryIR) -> HashMap<String, ResultEncoding> {
     if ir.result_kinds != Some(true) || ir.count == Some(true) || ir.exists == Some(true) {
         return HashMap::new();
@@ -200,6 +192,9 @@ fn result_encodings(ir: &QueryIR) -> HashMap<String, ResultEncoding> {
         let other = branch_result_encodings(branch);
         let other_labels = projection_labels(branch);
         for (label, encoding) in &mut encodings {
+            if *encoding == ResultEncoding::Wire {
+                continue;
+            }
             let position = |labels: &[Option<String>]| {
                 labels.iter().position(|name| name.as_ref() == Some(label))
             };
@@ -584,6 +579,79 @@ pub(crate) fn execute_in_transaction<'py>(
     })
 }
 
+/// Execute a SELECT or Raw IR and return its decoded result rows.
+#[pyfunction]
+pub(crate) fn execute_rows<'py>(
+    py: Python<'py>,
+    pool_name: String,
+    ir_bytes: &Bound<'py, PyBytes>,
+) -> PyResult<Bound<'py, PyAny>> {
+    execute_rows_impl(py, pool_name, None, ir_bytes)
+}
+
+/// Execute a SELECT or Raw IR on a transaction connection.
+#[pyfunction]
+pub(crate) fn execute_rows_in_transaction<'py>(
+    py: Python<'py>,
+    pool_name: String,
+    tx_id: u64,
+    ir_bytes: &Bound<'py, PyBytes>,
+) -> PyResult<Bound<'py, PyAny>> {
+    execute_rows_impl(py, pool_name, Some(tx_id), ir_bytes)
+}
+
+fn execute_rows_impl<'py>(
+    py: Python<'py>,
+    pool_name: String,
+    tx_id: Option<u64>,
+    ir_bytes: &Bound<'py, PyBytes>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let ir_data = ir_bytes.as_bytes().to_vec();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let total_start = Instant::now();
+        let ir = decode_ir(&ir_data)?;
+        if !matches!(
+            ir.op,
+            oxyde_codec::Operation::Select | oxyde_codec::Operation::Raw
+        ) {
+            return Err(PyValueError::new_err(
+                "execute_rows requires a SELECT or Raw operation",
+            ));
+        }
+        let backend = driver_pool_backend(&pool_name)
+            .await
+            .map_err(|err| crate::errors::driver_err(&err))?;
+        let (sql, params) = build_sql(&ir, backend_to_dialect(backend))
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+        let exec_start = Instant::now();
+        let column_types = decode_column_types(&ir);
+        let encodings = result_encodings(&ir);
+        let relations = relations_for(&ir).unwrap_or_default();
+        let options = ResultOptions {
+            emit_kinds: ir.result_kinds.unwrap_or(false),
+            encodings: Some(&encodings),
+        };
+        let types = column_types.as_deref();
+        let result = if let Some(tx_id) = tx_id {
+            execute_query_cells_in_transaction(tx_id, &sql, &params, types, &relations, options)
+                .await
+        } else {
+            execute_query_cells(&pool_name, &sql, &params, types, &relations, options).await
+        }
+        .map_err(|err| crate::errors::driver_err(&err))?;
+        if is_profiling_enabled() {
+            eprintln!(
+                "[OXYDE_PROFILE] SELECT native ({} rows): exec={} µs, total={} µs",
+                result.rows.len(),
+                exec_start.elapsed().as_micros(),
+                total_start.elapsed().as_micros(),
+            );
+        }
+        Ok(ResultRows(result))
+    })
+}
+
 /// Render SQL from IR without executing (requires pool for dialect detection) → Coroutine[(str, list)].
 #[pyfunction]
 pub(crate) fn render_sql<'py>(
@@ -776,6 +844,43 @@ mod tests {
     }
 
     #[test]
+    fn union_join_wire_columns_follow_the_first_branch() {
+        let branch = QueryIR {
+            joins: Some(vec![JoinSpec {
+                path: "author".into(),
+                alias: "author".into(),
+                parent: None,
+                table: "authors".into(),
+                source_column: "author_id".into(),
+                target_column: "id".into(),
+                pk_column: None,
+                result_prefix: "author".into(),
+                columns: vec![
+                    JoinColumn {
+                        field: "id".into(),
+                        column: "id".into(),
+                    },
+                    JoinColumn {
+                        field: "token".into(),
+                        column: "token".into(),
+                    },
+                ],
+            }]),
+            result_kinds: Some(true),
+            ..Default::default()
+        };
+        let mut ir = branch.clone();
+        ir.text_columns = Some(["author.token".into()].into_iter().collect());
+        ir.union_all = Some(true);
+        ir.union_query = Some(Box::new(branch));
+
+        assert_eq!(
+            relations_for(&ir).unwrap()[0].text_columns,
+            [1].into_iter().collect()
+        );
+    }
+
+    #[test]
     fn relation_identity_uses_the_primary_key_when_joining_an_alternate_key() {
         let ir = QueryIR {
             joins: Some(vec![JoinSpec {
@@ -860,6 +965,33 @@ mod tests {
             Some(ResultEncoding::Decimal)
         ));
         assert!(!encodings.contains_key("amount"));
+    }
+
+    #[test]
+    fn union_wire_columns_follow_the_first_branch() {
+        let wire = QueryIR {
+            cols: Some(vec!["label".into()]),
+            result_kinds: Some(true),
+            text_columns: Some(["label".into()].into_iter().collect()),
+            ..Default::default()
+        };
+        let native = QueryIR {
+            cols: Some(vec!["token".into()]),
+            result_kinds: Some(true),
+            ..Default::default()
+        };
+        let mut ir = wire.clone();
+        ir.union_all = Some(true);
+        ir.union_query = Some(Box::new(native.clone()));
+        assert_eq!(result_encodings(&ir)["label"], ResultEncoding::Wire);
+
+        let mut ir = native;
+        ir.union_all = Some(true);
+        ir.union_query = Some(Box::new(wire));
+        assert_ne!(
+            result_encodings(&ir).get("token"),
+            Some(&ResultEncoding::Wire)
+        );
     }
 
     #[test]

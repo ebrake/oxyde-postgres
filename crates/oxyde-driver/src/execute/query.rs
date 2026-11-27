@@ -7,7 +7,9 @@ use std::time::Instant;
 use tracing::debug;
 
 use crate::bind::bind_postgres;
-use crate::convert::encoder::{encode_stream_mutation_returning, RelationInfo, ResultOptions};
+use crate::convert::encoder::{
+    collect_rows, encode_stream_mutation_returning, RelationInfo, ResultOptions, RowSet,
+};
 use crate::convert::postgres::PgEncoder;
 use crate::error::{DriverError, Result};
 use crate::execute::traits::{ConnExec, PoolExec};
@@ -78,6 +80,52 @@ pub async fn execute_query_columnar_dedup<'a>(
     let pool = handle.clone_pool();
     pool.query_columnar_dedup(sql, params, col_types, relations, options.into())
         .await
+}
+
+/// Execute a SELECT and collect decoded cells for native row materialization.
+pub async fn execute_query_cells(
+    pool_name: &str,
+    sql: &str,
+    params: &[Value],
+    col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    relations: &[RelationInfo],
+    options: ResultOptions<'_>,
+) -> Result<RowSet> {
+    let handle = registry().get(pool_name).await?;
+    let DbPool::Postgres(pool) = handle.clone_pool();
+    let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
+    collect_rows::<PgEncoder, _>(query.fetch(&pool), col_types, relations, options)
+        .await
+        .map_err(|err| DriverError::db("Query failed", err))
+}
+
+/// Execute a SELECT and collect decoded cells on the transaction's connection.
+pub async fn execute_query_cells_in_transaction(
+    tx_id: u64,
+    sql: &str,
+    params: &[Value],
+    col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    relations: &[RelationInfo],
+    options: ResultOptions<'_>,
+) -> Result<RowSet> {
+    let arc = transaction_registry()
+        .get(tx_id)
+        .await
+        .ok_or(DriverError::TransactionNotFound(tx_id))?;
+    let mut tx = arc.lock().await;
+    if !tx.is_active() {
+        return Err(DriverError::TransactionClosed(tx_id));
+    }
+    tx.update_activity();
+
+    let DbTx::Postgres(conn) = tx
+        .tx
+        .as_mut()
+        .ok_or(DriverError::TransactionClosed(tx_id))?;
+    let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
+    collect_rows::<PgEncoder, _>(query.fetch(&mut **conn), col_types, relations, options)
+        .await
+        .map_err(|err| DriverError::db("Query failed", err))
 }
 
 /// Execute a mutation with RETURNING clause, return pre-encoded msgpack map.

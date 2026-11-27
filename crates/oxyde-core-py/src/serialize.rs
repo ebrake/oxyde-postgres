@@ -2,14 +2,10 @@
 
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{
-    PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyString, PyTime, PyType,
-};
+use pyo3::types::{PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyString, PyTime};
 use uuid::Uuid;
 
-static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+use crate::convert::{DECIMAL_TYPE, UUID_TYPE};
 
 /// A value the core can write without calling the Python serializer.
 enum NativeKind {

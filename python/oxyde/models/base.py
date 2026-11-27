@@ -68,6 +68,8 @@ import typing as typing_module
 import warnings
 from collections.abc import Collection, Iterable, Mapping
 from contextvars import ContextVar
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from functools import wraps
 from inspect import Parameter, signature
 from typing import (
@@ -82,6 +84,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+from uuid import UUID
 
 from pydantic import (
     AliasChoices,
@@ -124,10 +127,22 @@ from oxyde.models.utils import (
     _extract_constraints,
     _extract_inner_constraints,
     _LoadedFieldsSet,
+    _requires_json_text,
     _unpack_annotated,
     _unwrap_annotated_optional,
     _unwrap_optional,
 )
+
+# Only these annotations opt in to each tagged result type on model reads.
+_NATIVE_MODEL_TYPES: dict[str, tuple[type, ...]] = {
+    "uuid": (UUID,),
+    "decimal": (Decimal, int, float),
+    "date_time": (datetime,),
+    "date_time_utc": (datetime,),
+    "date": (date,),
+    "time": (time,),
+    "timedelta": (timedelta,),
+}
 
 
 def _pk_is_set(value: Any) -> bool:
@@ -598,22 +613,40 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
 
         column_types: dict[str, dict] = {}
         text_columns: set[str] = set()
+        model_wire_columns: set[str] = set()
         column_db_types: dict[str, str] = {}
         bind_types: dict[str, dict] = {}
         reverse_map: dict[str, str] = {}
+        model_fields = cls.model_fields
         for field_name, meta in cls._db_meta.field_metadata.items():
             # Virtual relation fields and FK model fields (author: Author)
             # have no column of their own, nor a reverse mapping
             if not is_column_field(meta):
                 continue
             python_type = meta.python_type
-            if get_origin(python_type) is list:
-                items = get_args(python_type)
-                if items:
-                    python_type, _ = _unwrap_annotated_optional(items[0])
+            is_list = get_origin(python_type) is list
+            if is_list and (items := get_args(python_type)):
+                python_type, _ = _unwrap_annotated_optional(items[0])
             if python_type is str:
                 text_columns.add(meta.db_column)
             spec = column_type_for_meta(meta)
+            kind = spec["kind"] if spec is not None else "unknown"
+            is_array = kind == "array"
+            if is_array and spec is not None:
+                kind = spec["item"]["kind"]
+            native_types = _NATIVE_MODEL_TYPES.get(kind)
+            if kind == "unknown" or (
+                native_types is not None
+                and (
+                    is_array != is_list
+                    or not any(python_type is native for native in native_types)
+                    or (
+                        (field_info := model_fields.get(field_name)) is not None
+                        and _requires_json_text(field_info)
+                    )
+                )
+            ):
+                model_wire_columns.add(meta.db_column)
             if spec is not None:
                 column_types[meta.db_column] = spec
             elif (hint := bind_type_for_meta(meta)) is not None:
@@ -627,6 +660,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
 
         cls._db_meta.column_types = column_types if column_types else None
         cls._db_meta.text_columns = frozenset(text_columns)
+        cls._db_meta.model_wire_columns = frozenset(text_columns | model_wire_columns)
         cls._db_meta.column_db_types = column_db_types or None
         cls._db_meta.bind_types = bind_types or None
         cls._db_meta.reverse_column_map = reverse_map

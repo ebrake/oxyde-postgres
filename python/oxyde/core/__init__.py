@@ -11,7 +11,7 @@ The Rust core provides:
 
 Architecture:
     Python Query → IR dict → msgpack bytes → Rust → SQL → Database
-    Database → Rust → msgpack bytes → Python dict/models
+    Database → Rust → native rows → Python dict/models
 
 Pool Functions:
     init_pool(name, url, settings): Create connection pool in Rust registry.
@@ -22,6 +22,8 @@ Pool Functions:
 Execution Functions:
     execute(pool_name, ir_bytes): Execute query, return msgpack result.
     execute_in_transaction(pool_name, tx_id, ir_bytes): Execute in transaction.
+    execute_rows(pool_name, ir_bytes): Execute a SELECT and return decoded rows.
+    execute_rows_in_transaction(pool_name, tx_id, ir_bytes): Read in transaction.
 
 Transaction Functions:
     begin_transaction(pool_name) → tx_id: Start transaction.
@@ -53,6 +55,8 @@ from .wrapper import (
     create_savepoint,
     execute,
     execute_in_transaction,
+    execute_rows,
+    execute_rows_in_transaction,
     explain_query,
     init_pool,
     init_pool_overwrite,
@@ -73,6 +77,8 @@ from .wrapper import (
 __all__ = [
     "execute",
     "execute_in_transaction",
+    "execute_rows",
+    "execute_rows_in_transaction",
     "init_pool",
     "init_pool_overwrite",
     "close_pool",

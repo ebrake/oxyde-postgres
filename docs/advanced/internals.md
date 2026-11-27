@@ -24,11 +24,15 @@ graph TD
 
     Sqlx -->|"query"| Database[(PostgreSQL 18+)]
     Database -->|"rows"| Sqlx
-    Sqlx --> Encode["oxyde-driver<br/>(encode to msgpack)"]
-    Encode -->|"MessagePack bytes"| MP_IN["msgpack.unpackb()"]
+    Sqlx --> Cells["oxyde-driver<br/>(decode cells)"]
+    Cells --> Native["ResultRows"]
+    Cells --> Encode["MessagePack encoder"]
 
     subgraph Python2["Python Layer"]
-        MP_IN --> Pydantic["Pydantic validation"]
+        Native --> Rows["dicts, tuples or column values"]
+        Encode --> Adapter["MessagePack result adapter"]
+        Adapter --> Rows
+        Rows --> Pydantic["Pydantic validation"]
         Pydantic --> Instances["Model instances"]
     end
 ```
@@ -200,7 +204,9 @@ impl Migration {
 
 **Location**: `crates/oxyde-core-py/src/`
 
-Modules: `execute.rs` (query execution), `pool.rs` (pool management), `migration.rs` (migration helpers), `convert.rs` (type conversion), `types.rs`.
+Query execution lives in `execute.rs`. The `result_rows.rs` and `convert.rs`
+modules materialize SELECT results and convert cells to Python objects.
+The pool and migration bindings live in `pool.rs` and `migration.rs`.
 
 Exposed functions:
 
@@ -213,6 +219,10 @@ fn init_pool<'py>(py: Python<'py>, name: String, url: String,
 // Query execution (execute.rs)
 #[pyfunction]
 fn execute<'py>(py: Python<'py>, pool_name: String,
+    ir_bytes: &Bound<'py, PyBytes>) -> PyResult<Bound<'py, PyAny>>
+
+#[pyfunction]
+fn execute_rows<'py>(py: Python<'py>, pool_name: String,
     ir_bytes: &Bound<'py, PyBytes>) -> PyResult<Bound<'py, PyAny>>
 
 // Transactions (execute.rs)
@@ -237,18 +247,30 @@ sequenceDiagram
     P->>P: Query._build_filter_tree()
     P->>P: query.to_ir() → dict
     P->>P: msgpack.packb(ir) → bytes
-    P->>R: execute(pool_name, ir_bytes)
-    Note over R: GIL released
+    P->>R: execute_rows(pool_name, ir_bytes)
+    Note over R: Decode on Tokio without the GIL
     R->>R: oxyde-codec: deserialize IR
     R->>R: oxyde-sql: build_sql()
     R->>DB: sqlx execute
     DB-->>R: rows
-    R->>R: oxyde-driver: encode to msgpack
-    R-->>P: msgpack bytes
-    Note over P: GIL re-acquired
-    P->>P: msgpack.unpackb(result_bytes)
-    P->>P: Pydantic validate → Model instances
+    R->>R: Decode cells and deduplicate joined rows
+    R-->>P: ResultRows
+    P->>R: dicts(keys), tuples(indices), or column(index)
+    R-->>P: Python objects
+    P->>P: Validate model rows with Pydantic
 ```
+
+Pools and transactions expose `execute_rows()` for model and projected
+SELECT reads. Rust stores joined rows once per primary key and returns
+integer references to the unique rows. Python validates each related row
+once before attaching it to the models that reference it.
+
+Clients that implement `execute()` can continue returning MessagePack.
+The adapter reads tagged and legacy payloads and restores native values
+from column kinds when available. `fetch_msgpack()`, `execute_raw()`,
+terminal aggregates, counts, existence checks, migrations, and mutation
+`RETURNING` use the bytes path. Its encoder writes decoded cells as the
+driver streams them.
 
 ### IR Format Example
 

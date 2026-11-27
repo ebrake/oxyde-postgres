@@ -76,6 +76,7 @@ from oxyde.models.serializers import _get_virtual_fields
 
 if TYPE_CHECKING:
     from oxyde.models.base import Model
+    from oxyde.queries._result_set import ResultSet
     from oxyde.queries.select import Query
 
 
@@ -112,6 +113,16 @@ class SupportsExecute(Protocol):
     """Protocol for objects that can execute queries."""
 
     async def execute(self, ir: dict[str, Any]) -> bytes: ...
+
+
+class SupportsExecuteRows(Protocol):
+    """Optional capability for clients that deliver decoded SELECT rows.
+
+    Native rows require `execute_rows` at the same or an earlier position than
+    `execute` in the method resolution order and a class-bound `execute`.
+    """
+
+    async def execute_rows(self, ir: dict[str, Any]) -> ResultSet: ...
 
 
 # TypeVar for query builders (covariant for subclassing)

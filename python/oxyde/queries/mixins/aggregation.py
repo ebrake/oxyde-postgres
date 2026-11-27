@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.models.lookups import _resolve_related_field
+from oxyde.queries._result_set import _unpack_result
 from oxyde.queries._result_types import convert_column
 from oxyde.queries.aggregates import Avg, Max, Min, Sum
 from oxyde.queries.base import SupportsExecute, _resolve_execution_client
 from oxyde.queries.expressions import _is_scalar_annotation
-from oxyde.queries.mixins.execution import _unpack_result
 from oxyde.queries.q import Q
 
 if TYPE_CHECKING:

@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- The Rust core builds Python rows for model reads, joins, prefetches, and
+  projected SELECTs. Clients use `execute_rows()` in place of MessagePack when
+  it appears at the same or an earlier position than `execute()` in the method
+  resolution order and `execute()` is the class-bound method.
+- Before, plain, and wrap validators on native-typed model fields now receive
+  values such as `datetime`, `Decimal`, `UUID`, and `timedelta` on SELECT reads.
+  Aware datetimes and times use `datetime.timezone`, and the native read
+  path preserves exact timedelta microseconds. Fields that expect wire
+  strings, including fields validated with Pydantic's `Json`, and mutation
+  `RETURNING` retain their existing inputs.
+- Aggregate annotations on model reads, such as
+  `annotate(total=Sum("price")).all()`, return native Python values such as
+  `Decimal`, `datetime`, and `timedelta`, matching `values()`.
+- UNION results preserve the first operand's wire-text columns, such as a
+  `str` field stored in a UUID column, in model reads, `values()`, and
+  `values_list()` even when later operands project differently typed fields
+  at the same positions. When PostgreSQL widens a column, both native and
+  MessagePack reads decode it using the returned type and preserve the
+  first operand's wire-text requirement.
+- The bundled Rust core ABI is now 3.
+
+Median query latency across seven alternating release-build runs on
+PostgreSQL 18.6 with 1,000 rows and six columns.
+
+| Operation | Before | After | Reduction |
+| :--- | ---: | ---: | ---: |
+| `all()` | 2,158.8 µs | 1,917.2 µs | 11.2% |
+| `values()` | 1,893.5 µs | 1,354.0 µs | 28.5% |
+| `fetch_msgpack()` | 999.9 µs | 926.8 µs | 7.3% |
+
 ## 0.5.0 — Bundled Rust core and PostgreSQL 19 features
 
 - `oxyde-postgres` now bundles the Rust core as `oxyde._oxyde_core` so the
