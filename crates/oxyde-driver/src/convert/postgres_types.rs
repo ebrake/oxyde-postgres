@@ -6,10 +6,10 @@ use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::{
     error::BoxDynError,
     postgres::{
-        types::PgTimeTz, PgHasArrayType, PgTypeInfo, PgTypeKind, PgValueFormat, PgValueRef,
-        Postgres,
+        types::{Oid, PgTimeTz},
+        PgHasArrayType, PgTypeInfo, PgValueFormat, PgValueRef, Postgres,
     },
-    Decode, Type, TypeInfo,
+    Decode, Type,
 };
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
@@ -17,26 +17,34 @@ const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
 
 pub(super) type PgChronoTimeTz = PgTimeTz<NaiveTime, FixedOffset>;
 
+// Built-in catalog OIDs from PostgreSQL's `pg_type.dat`. SQLx names types it
+// does not know (such as `oid8`) via `regtype::text`, which qualifies the name
+// as `pg_catalog.oid8` when `search_path` shadows it, so dispatch by OID.
+pub(super) const OID: Oid = Oid(26);
+pub(super) const OID_ARRAY: Oid = Oid(1028);
+pub(super) const OID8: Oid = Oid(6437);
+pub(super) const OID8_ARRAY: Oid = Oid(6442);
+
 #[derive(Clone, Copy)]
 pub(super) struct PgOid8(pub u64);
 
 impl Type<Postgres> for PgOid8 {
     fn type_info() -> PgTypeInfo {
-        PgTypeInfo::with_name("oid8")
+        PgTypeInfo::with_oid(OID8)
     }
 
     fn compatible(ty: &PgTypeInfo) -> bool {
-        ty.name() == "oid8" && matches!(ty.kind(), PgTypeKind::Simple)
+        ty.oid() == Some(OID8)
     }
 }
 
 impl PgHasArrayType for PgOid8 {
     fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::array_of("oid8")
+        PgTypeInfo::with_oid(OID8_ARRAY)
     }
 
     fn array_compatible(ty: &PgTypeInfo) -> bool {
-        matches!(ty.kind(), PgTypeKind::Array(element) if Self::compatible(element))
+        ty.oid() == Some(OID8_ARRAY)
     }
 }
 

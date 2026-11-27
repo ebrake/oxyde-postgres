@@ -24,7 +24,7 @@ from pydantic import TypeAdapter
 from oxyde._msgpack import msgpack
 from oxyde.core import ir
 from oxyde.core.types import serialize_value
-from oxyde.exceptions import ManagerError
+from oxyde.exceptions import ManagerError, UnsupportedServerVersionError
 from oxyde.models.db_schema import (
     _PRIVATE_DEFAULTS,
     _changed_private_containers,
@@ -350,7 +350,7 @@ class MutationMixin(Generic[TModel]):
         """Execute mutation query with error handling."""
         try:
             result = await query.execute(client)
-        except ManagerError:
+        except ManagerError, UnsupportedServerVersionError:
             raise
         except Exception as exc:
             translated = _translate_core_error(exc)
@@ -421,6 +421,7 @@ class MutationMixin(Generic[TModel]):
         in_place: bool,
         upsert: bool = False,
         update_fields: set[str] | None = None,
+        conflict_select: list[str] | None = None,
     ) -> tuple[TModel, bool]:
         """Insert an instance and report whether a new row was created."""
         exec_client = await _resolve_execution_client(using, client)
@@ -437,7 +438,11 @@ class MutationMixin(Generic[TModel]):
             raise ManagerError("create() requires at least one value")
         query = InsertQuery(self.model_class).values(**payload)
         inserted_alias: str | None = None
-        if upsert:
+        if conflict_select is not None:
+            query = query.on_conflict_do_select(conflict_select)
+            assert query._on_conflict is not None
+            inserted_alias = query._on_conflict["inserted_alias"]
+        elif upsert:
             assert pk_field is not None
             if update_fields is None:
                 excluded = [field for field in payload if field != pk_field]
@@ -457,6 +462,8 @@ class MutationMixin(Generic[TModel]):
         inserted = inserted_alias is None
         hydrated = None
         rows = result.get("rows")
+        if conflict_select is not None and not rows:
+            raise ManagerError("get_or_create_atomic() did not return a row")
         inserted_ids = result.get("inserted_ids", [])
         with _track_private_assignments() as (assigned, snapshots):
             if rows:

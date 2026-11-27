@@ -75,6 +75,31 @@ class InsertQuery:
         update_columns = _map_values_to_columns(
             self.model_class, dict.fromkeys(update_fields)
         )
+        clone._on_conflict = {
+            "columns": [pk_column],
+            "action": "update",
+            "inserted_alias": self._inserted_alias(),
+        }
+        if update_columns:
+            clone._on_conflict["update_columns"] = list(update_columns)
+        if values:
+            clone._on_conflict["update_values"] = dict(values)
+        return clone
+
+    def on_conflict_do_select(self, fields: str | Iterable[str]) -> InsertQuery:
+        """Return the existing row on conflict (PostgreSQL 19+)."""
+        if isinstance(fields, str):
+            fields = [fields]
+        clone = self._clone()
+        columns = _map_values_to_columns(self.model_class, dict.fromkeys(fields))
+        clone._on_conflict = {
+            "columns": list(columns),
+            "action": "select",
+            "inserted_alias": self._inserted_alias(),
+        }
+        return clone
+
+    def _inserted_alias(self) -> str:
         table_columns = {
             meta.db_column
             for meta in self.model_class._db_meta.field_metadata.values()
@@ -85,16 +110,7 @@ class InsertQuery:
         while alias in table_columns:
             suffix += 1
             alias = f"{_INSERTED_ALIAS}_{suffix}"
-        clone._on_conflict = {
-            "columns": [pk_column],
-            "action": "update",
-            "inserted_alias": alias,
-        }
-        if update_columns:
-            clone._on_conflict["update_columns"] = list(update_columns)
-        if values:
-            clone._on_conflict["update_values"] = dict(values)
-        return clone
+        return alias
 
     def on_conflict_do_nothing(self) -> InsertQuery:
         """Skip the insert when the primary key already exists."""

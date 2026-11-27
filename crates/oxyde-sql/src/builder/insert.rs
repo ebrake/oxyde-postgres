@@ -2,8 +2,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use oxyde_codec::{ConflictAction, QueryIR};
-use sea_query::{Alias, Expr, PostgresQueryBuilder, Query, SimpleExpr, TableRef, Value};
+use oxyde_codec::{ConflictAction, OnConflict, QueryIR};
+use sea_query::{
+    Alias, Expr, InsertStatement, PostgresQueryBuilder, Query, SimpleExpr, TableRef, Value,
+};
 
 use crate::error::{QueryError, Result};
 use crate::utils::{
@@ -11,23 +13,25 @@ use crate::utils::{
 };
 use crate::Dialect;
 
-/// Alias for the INSERT target of an `ON CONFLICT DO UPDATE`.
+/// Alias for the INSERT target of `ON CONFLICT DO UPDATE` or `DO SELECT`.
 ///
 /// Aliasing hides the table name, so a table named `excluded` cannot shadow
 /// PostgreSQL's proposed row in the generated `"excluded"."col"` assignments.
 const TARGET_ALIAS: &str = "__oxyde_target";
 
-/// Alias for the pre-update row in `RETURNING WITH (OLD AS ...)`.
+/// Alias for the existing row in `RETURNING WITH (OLD AS ...)`.
 const OLD_ALIAS: &str = "__oxyde_old";
 
 /// Build INSERT query from QueryIR
 pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value>)> {
     let table = TableIdent(ir.table.clone());
     let mut query = Query::insert();
-    let upsert = ir
-        .on_conflict
-        .as_ref()
-        .is_some_and(|conflict| matches!(conflict.action, ConflictAction::Update));
+    let upsert = ir.on_conflict.as_ref().is_some_and(|conflict| {
+        matches!(
+            conflict.action,
+            ConflictAction::Update | ConflictAction::Select
+        )
+    });
     if upsert {
         query.into_table(TableRef::from(table).alias(Alias::new(TARGET_ALIAS)));
     } else {
@@ -77,13 +81,12 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
     if let Some(on_conflict) = &ir.on_conflict {
         match dialect {
             Dialect::Postgres => {
-                let target_cols: Vec<ColumnIdent> = on_conflict
-                    .columns
-                    .iter()
-                    .map(|c| ColumnIdent(c.clone()))
-                    .collect();
+                let target_cols = on_conflict.columns.iter().cloned().map(ColumnIdent);
 
                 match on_conflict.action {
+                    ConflictAction::Select => {
+                        return build_conflict_select(ir, on_conflict, &query)
+                    }
                     ConflictAction::Nothing => {
                         query.on_conflict(
                             sea_query::OnConflict::columns(target_cols)
@@ -165,13 +168,7 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
             let pk = ir.pk_column.as_deref().ok_or_else(|| {
                 QueryError::InvalidQuery("ON CONFLICT insert outcome requires pk_column".into())
             })?;
-            let pk = pk.replace('"', "\"\"");
-            let inserted_alias = inserted_alias.replace('"', "\"\"");
-            // The target is aliased (see TARGET_ALIAS), so its real name is out of
-            // scope here and cannot collide with OLD_ALIAS.
-            let returning = format!(
-                r#"WITH (OLD AS "{OLD_ALIAS}") *, ("{OLD_ALIAS}"."{pk}" IS NULL) AS "{inserted_alias}""#
-            );
+            let returning = insert_outcome_returning(pk, inserted_alias);
             query.returning(Query::returning().exprs([Expr::cust(returning)]));
         } else {
             query.returning_all();
@@ -185,4 +182,69 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
     };
 
     Ok((sql, values.0))
+}
+
+fn build_conflict_select(
+    ir: &QueryIR,
+    conflict: &OnConflict,
+    query: &InsertStatement,
+) -> Result<(String, Vec<Value>)> {
+    let Some(values) = ir.values.as_ref().filter(|_| ir.bulk_values.is_none()) else {
+        return Err(QueryError::InvalidQuery(
+            "ON CONFLICT DO SELECT requires a single insert row".into(),
+        ));
+    };
+    if conflict.columns.is_empty() {
+        return Err(QueryError::InvalidQuery(
+            "ON CONFLICT DO SELECT requires conflict columns".into(),
+        ));
+    }
+    for column in &conflict.columns {
+        if !values.contains_key(column) {
+            return Err(QueryError::InvalidQuery(format!(
+                "ON CONFLICT DO SELECT column '{column}' must be supplied in the insert row"
+            )));
+        }
+    }
+    if ir.returning != Some(true) {
+        return Err(QueryError::InvalidQuery(
+            "ON CONFLICT DO SELECT requires returning=true".into(),
+        ));
+    }
+    let pk = ir
+        .pk_column
+        .as_deref()
+        .filter(|pk| !pk.is_empty())
+        .ok_or_else(|| {
+            QueryError::InvalidQuery("ON CONFLICT DO SELECT requires pk_column".into())
+        })?;
+    let inserted_alias = conflict
+        .inserted_alias
+        .as_deref()
+        .filter(|alias| !alias.is_empty())
+        .ok_or_else(|| {
+            QueryError::InvalidQuery("ON CONFLICT DO SELECT requires inserted_alias".into())
+        })?;
+
+    // SeaQuery cannot render DO SELECT yet. The tail adds no bind parameters.
+    let (sql, values) = query.build(PostgresQueryBuilder);
+    let columns = conflict
+        .columns
+        .iter()
+        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let returning = insert_outcome_returning(pk, inserted_alias);
+    Ok((
+        format!("{sql} ON CONFLICT ({columns}) DO SELECT RETURNING {returning}"),
+        values.0,
+    ))
+}
+
+fn insert_outcome_returning(pk: &str, inserted_alias: &str) -> String {
+    let pk = pk.replace('"', "\"\"");
+    let inserted_alias = inserted_alias.replace('"', "\"\"");
+    format!(
+        r#"WITH (OLD AS "{OLD_ALIAS}") *, ("{OLD_ALIAS}"."{pk}" IS NULL) AS "{inserted_alias}""#
+    )
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import nullcontext
 
 import pytest
@@ -9,9 +10,11 @@ import pytest
 from oxyde import F, Field, Model, atomic
 from oxyde.exceptions import (
     IntegrityError,
+    ManagerError,
     MultipleObjectsReturned,
     NotFoundError,
     UniqueViolationError,
+    UnsupportedServerVersionError,
 )
 from oxyde.queries import Count, execute_raw
 from oxyde.queries.insert import InsertQuery
@@ -496,6 +499,88 @@ class TestGet:
         assert created is True
         assert author.name == "New Author"
         assert author.email == "new@test.com"
+
+
+@pytest.mark.requires_pg19
+class TestGetOrCreateAtomic:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "in_transaction", [False, True], ids=["pool", "transaction"]
+    )
+    async def test_create_and_find(self, db, in_transaction):
+        context = atomic(using=db.name) if in_transaction else nullcontext()
+        async with context:
+            author, created = await Author.objects.get_or_create_atomic(
+                conflict=["email"],
+                email="atomic@test.com",
+                defaults={"name": "New"},
+                using=db.name,
+            )
+            existing, created_again = await Author.objects.get_or_create_atomic(
+                conflict=["email"],
+                email="atomic@test.com",
+                defaults={"name": "Other"},
+                using=db.name,
+            )
+        assert created is True
+        assert created_again is False
+        assert author.id is not None
+        assert existing.id == author.id
+        assert author.name == existing.name == "New"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_attempts_return_the_same_row(self, db):
+        async def attempt():
+            return await Author.objects.get_or_create_atomic(
+                conflict=["email"],
+                email="concurrent@test.com",
+                name="Concurrent",
+                using=db.name,
+            )
+
+        (first, first_created), (second, second_created) = await asyncio.gather(
+            attempt(), attempt()
+        )
+        assert sorted([first_created, second_created]) == [False, True]
+        assert first.id is not None and first.id == second.id
+
+    @pytest.mark.asyncio
+    async def test_trigger_suppression_raises(self, db):
+        await execute_raw(
+            """CREATE FUNCTION skip_named_row() RETURNS trigger LANGUAGE plpgsql AS $$
+               BEGIN
+                 IF NEW.name = 'skip' THEN RETURN NULL; END IF;
+                 RETURN NEW;
+               END $$""",
+            using=db.name,
+        )
+        await execute_raw(
+            "CREATE TRIGGER skip_insert BEFORE INSERT ON authors "
+            "FOR EACH ROW EXECUTE FUNCTION skip_named_row()",
+            using=db.name,
+        )
+        with pytest.raises(ManagerError, match="did not return a row"):
+            await Author.objects.get_or_create_atomic(
+                conflict=["email"], email="skipped@test.com", name="skip", using=db.name
+            )
+
+
+@pytest.mark.requires_pre_pg19
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_transaction", [False, True], ids=["pool", "transaction"])
+async def test_get_or_create_atomic_requires_postgres_19(db, in_transaction):
+    context = atomic(using=db.name) if in_transaction else nullcontext()
+    async with context:
+        with pytest.raises(
+            UnsupportedServerVersionError,
+            match="ON CONFLICT DO SELECT requires PostgreSQL 19",
+        ):
+            await Author.objects.get_or_create_atomic(
+                conflict=["email"], email="atomic@test.com", name="New", using=db.name
+            )
+        assert not await Author.objects.filter(email="atomic@test.com").exists(
+            using=db.name
+        )
 
 
 class TestUpdateOrCreate:

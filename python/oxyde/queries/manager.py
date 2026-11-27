@@ -22,7 +22,7 @@ Example:
 
 from __future__ import annotations
 
-from collections.abc import Coroutine, Iterable
+from collections.abc import Coroutine, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, overload
 
 from oxyde.exceptions import IntegrityError, ManagerError, NotFoundError
@@ -245,6 +245,49 @@ class QueryManager(Generic[TModel]):
             except IntegrityError:
                 obj = await self.get(using=using, client=client, **filters)
                 return obj, False
+
+    async def get_or_create_atomic(
+        self,
+        *,
+        conflict: str | Sequence[str],
+        defaults: dict[str, Any] | None = None,
+        using: str | None = None,
+        client: SupportsExecute | None = None,
+        **values: Any,
+    ) -> tuple[TModel, bool]:
+        """Insert or return the conflicting row in one statement on PostgreSQL 19+.
+
+        ``conflict`` is a field name or a sequence of field names. They must be
+        the columns of a unique constraint or of a non-partial unique index over
+        plain columns. ``values`` accepts declared field names, not lookups.
+        ``defaults`` overrides matching keys in the proposed row. Defaults and
+        sequences can be evaluated even when the row already exists.
+
+        ``pre_save`` runs before the attempt. ``post_save`` runs on creation.
+        """
+        fields = [conflict] if isinstance(conflict, str) else list(conflict)
+        if not fields:
+            raise ManagerError(
+                "get_or_create_atomic() requires at least one conflict field"
+            )
+        declared = self.model_class._db_meta.field_metadata
+        if any("__" in key and key not in declared for key in values):
+            raise ManagerError(
+                "get_or_create_atomic() only accepts direct field values"
+            )
+
+        instance = self.model_class(**(values | (defaults or {})))
+        await instance.pre_save(is_create=True, update_fields=None)
+        instance, created = await self._query()._insert_instance(
+            instance,
+            using=using,
+            client=client,
+            in_place=False,
+            conflict_select=fields,
+        )
+        if created:
+            await instance.post_save(is_create=True, update_fields=None)
+        return instance, created
 
     async def exists(
         self,

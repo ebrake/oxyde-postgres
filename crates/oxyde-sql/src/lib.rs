@@ -40,7 +40,7 @@
 //! - Row-level locking (FOR UPDATE/FOR SHARE)
 //! - UNION / UNION ALL
 
-use oxyde_codec::{Operation, QueryIR};
+use oxyde_codec::{ConflictAction, Operation, QueryIR};
 use sea_query::Value;
 
 // Module declarations
@@ -73,6 +73,20 @@ pub enum Dialect {
 #[must_use]
 pub fn emits_returning(ir: &QueryIR, dialect: Dialect) -> bool {
     ir.returning.unwrap_or(false) && matches!(dialect, Dialect::Postgres)
+}
+
+/// Minimum PostgreSQL version for SQL generated from this query, if feature-specific.
+#[must_use]
+pub fn required_server_version(ir: &QueryIR) -> Option<(i32, &'static str)> {
+    if ir.op == Operation::Insert
+        && ir
+            .on_conflict
+            .as_ref()
+            .is_some_and(|conflict| conflict.action == ConflictAction::Select)
+    {
+        return Some((190_000, "ON CONFLICT DO SELECT"));
+    }
+    None
 }
 
 /// Build SQL from QueryIR
@@ -761,6 +775,92 @@ mod tests {
         assert!(sql.ends_with(
             r#"RETURNING WITH (OLD AS "__oxyde_old") *, ("__oxyde_old"."user""id" IS NULL) AS "was""inserted""#
         ));
+    }
+
+    fn conflict_select_ir() -> QueryIR {
+        QueryIR {
+            op: Operation::Insert,
+            table: "__oxyde_old".into(),
+            values: Some(HashMap::from([(
+                "user\"email".into(),
+                rmpv_str("alice@example.com"),
+            )])),
+            pk_column: Some("user\"id".into()),
+            on_conflict: Some(OnConflict {
+                columns: vec!["user\"email".into()],
+                action: ConflictAction::Select,
+                update_columns: None,
+                update_values: None,
+                inserted_alias: Some("was\"inserted".into()),
+            }),
+            returning: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_on_conflict_select_returns_insert_outcome() {
+        let ir = conflict_select_ir();
+        assert_eq!(
+            required_server_version(&ir),
+            Some((190_000, "ON CONFLICT DO SELECT"))
+        );
+        let (sql, params) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            concat!(
+                r#"INSERT INTO "__oxyde_old" AS "__oxyde_target" ("user""email") VALUES ($1) "#,
+                r#"ON CONFLICT ("user""email") DO SELECT "#,
+                r#"RETURNING WITH (OLD AS "__oxyde_old") *, ("__oxyde_old"."user""id" IS NULL) "#,
+                r#"AS "was""inserted""#,
+            )
+        );
+        assert_eq!(params, vec![Value::from("alice@example.com")]);
+    }
+
+    #[test]
+    fn test_on_conflict_select_validates_insert_shape() {
+        let mut bulk = conflict_select_ir();
+        bulk.bulk_values = Some(vec![bulk.values.take().unwrap()]);
+
+        let mut missing_column = conflict_select_ir();
+        missing_column
+            .on_conflict
+            .as_mut()
+            .unwrap()
+            .columns
+            .push("missing".into());
+
+        let mut empty_columns = conflict_select_ir();
+        empty_columns.on_conflict.as_mut().unwrap().columns.clear();
+
+        let mut missing_alias = conflict_select_ir();
+        missing_alias.on_conflict.as_mut().unwrap().inserted_alias = None;
+
+        let no_pk = QueryIR {
+            pk_column: None,
+            ..conflict_select_ir()
+        };
+        let no_returning = QueryIR {
+            returning: Some(false),
+            ..conflict_select_ir()
+        };
+        for (ir, expected) in [
+            (bulk, "requires a single insert row"),
+            (missing_column, "column 'missing'"),
+            (empty_columns, "requires conflict columns"),
+            (missing_alias, "requires inserted_alias"),
+            (no_pk, "requires pk_column"),
+            (no_returning, "requires returning=true"),
+        ] {
+            assert!(
+                matches!(
+                    build_sql(&ir, Dialect::Postgres),
+                    Err(QueryError::InvalidQuery(message)) if message.contains(expected)
+                ),
+                "expected ON CONFLICT DO SELECT error containing {expected:?}"
+            );
+        }
     }
 
     #[test]

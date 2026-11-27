@@ -787,6 +787,113 @@ class TestManagerBulkUpdate:
         assert affected == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflict", [("email",), "email"])
+@pytest.mark.parametrize("inserted", [True, False])
+async def test_get_or_create_atomic_ir_and_hooks(inserted, conflict):
+    calls = []
+
+    class AtomicAccount(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        email: str = Field(db_column="address", db_unique=True)
+        name: str = Field(db_column="__oxyde_inserted")
+
+        class Meta:
+            is_table = True
+
+        async def pre_save(self, *, is_create, update_fields=None):
+            calls.append(("pre", is_create, update_fields, self.id))
+
+        async def post_save(self, *, is_create, update_fields=None):
+            calls.append(("post", is_create, update_fields, self.id))
+
+    stub = StubExecuteClient([
+        {
+            "columns": ["id", "address", "__oxyde_inserted", "__oxyde_inserted_1"],
+            "rows": [[42, "alice@example.com", "Stored", inserted]],
+        }
+    ])
+    account, created = await AtomicAccount.objects.get_or_create_atomic(
+        conflict=conflict,
+        email="alice@example.com",
+        defaults={"name": "Alice"},
+        client=stub,
+    )
+    assert created is inserted
+    assert (account.id, account.email, account.name) == (42, "alice@example.com", "Stored")
+    (ir,) = stub.calls
+    assert ir["op"] == "insert"
+    assert ir["returning"] is True
+    assert ir["values"] == {"address": "alice@example.com", "__oxyde_inserted": "Alice"}
+    assert ir["on_conflict"] == {
+        "action": "select",
+        "columns": ["address"],
+        "inserted_alias": "__oxyde_inserted_1",
+    }
+    expected = [("pre", True, None, None)]
+    if inserted:
+        expected.append(("post", True, None, 42))
+    assert calls == expected
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_atomic_rejects_lookups():
+    stub = StubExecuteClient([])
+    with pytest.raises(ManagerError, match="only accepts direct field values"):
+        await OxydeTestModel.objects.get_or_create_atomic(
+            conflict=["email"], email__iexact="alice@example.com", client=stub
+        )
+    assert stub.calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_atomic_requires_conflict_fields():
+    calls = []
+
+    class AtomicNoConflict(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        email: str = Field(db_unique=True)
+
+        class Meta:
+            is_table = True
+
+        async def pre_save(self, *, is_create, update_fields=None):
+            calls.append("pre")
+
+    stub = StubExecuteClient([])
+    with pytest.raises(ManagerError, match="at least one conflict field"):
+        await AtomicNoConflict.objects.get_or_create_atomic(
+            conflict=[], email="alice@example.com", client=stub
+        )
+    assert stub.calls == []
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_atomic_accepts_declared_double_underscore_field():
+    class AtomicExternal(Model):
+        id: int | None = Field(default=None, db_pk=True)
+        external__id: str = Field(db_unique=True)
+
+        class Meta:
+            is_table = True
+
+    stub = StubExecuteClient([
+        {
+            "columns": ["id", "external__id", "__oxyde_inserted"],
+            "rows": [[7, "ext-1", True]],
+        }
+    ])
+    obj, created = await AtomicExternal.objects.get_or_create_atomic(
+        conflict="external__id", external__id="ext-1", client=stub
+    )
+    assert created is True
+    assert (obj.id, obj.external__id) == (7, "ext-1")
+    (ir,) = stub.calls
+    assert ir["values"] == {"external__id": "ext-1"}
+    assert ir["on_conflict"]["columns"] == ["external__id"]
+
+
 class TestManagerGetOrCreate:
     """Test QueryManager.get_or_create() method."""
 
