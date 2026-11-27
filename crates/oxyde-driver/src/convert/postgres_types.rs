@@ -5,14 +5,49 @@ use std::marker::PhantomData;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::{
     error::BoxDynError,
-    postgres::{types::PgTimeTz, PgHasArrayType, PgTypeInfo, PgValueFormat, PgValueRef, Postgres},
-    Decode, Type,
+    postgres::{
+        types::PgTimeTz, PgHasArrayType, PgTypeInfo, PgTypeKind, PgValueFormat, PgValueRef,
+        Postgres,
+    },
+    Decode, Type, TypeInfo,
 };
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
 
 pub(super) type PgChronoTimeTz = PgTimeTz<NaiveTime, FixedOffset>;
+
+#[derive(Clone, Copy)]
+pub(super) struct PgOid8(pub u64);
+
+impl Type<Postgres> for PgOid8 {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("oid8")
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        ty.name() == "oid8" && matches!(ty.kind(), PgTypeKind::Simple)
+    }
+}
+
+impl PgHasArrayType for PgOid8 {
+    fn array_type_info() -> PgTypeInfo {
+        PgTypeInfo::array_of("oid8")
+    }
+
+    fn array_compatible(ty: &PgTypeInfo) -> bool {
+        matches!(ty.kind(), PgTypeKind::Array(element) if Self::compatible(element))
+    }
+}
+
+impl Decode<'_, Postgres> for PgOid8 {
+    fn decode(value: PgValueRef<'_>) -> Result<Self, BoxDynError> {
+        Ok(Self(match value.format() {
+            PgValueFormat::Binary => u64::from_be_bytes(value.as_bytes()?.try_into()?),
+            PgValueFormat::Text => value.as_str()?.parse()?,
+        }))
+    }
+}
 
 pub(super) struct PgTemporal<T>(pub String, PhantomData<T>);
 
