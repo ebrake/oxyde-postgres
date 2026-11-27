@@ -176,8 +176,7 @@ pub fn build_insert(ir: &QueryIR, dialect: Dialect) -> Result<(String, Vec<Value
         } else {
             query.returning_all();
         }
-    } else {
-        let pk = ir.pk_column.as_deref().unwrap_or("id");
+    } else if let Some(pk) = ir.pk_column.as_deref() {
         query.returning_col(ColumnIdent(pk.to_string()));
     }
 

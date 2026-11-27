@@ -200,7 +200,11 @@ class _DatabaseSchemas:
                 (AliasPath(name), None)
             ]
             has_collision = False
+            link = self.model._db_meta.fk_links.get(name)
             for path in aliases:
+                if link is not None and name == link[1] and path == [link[0], link[2]]:
+                    # A row cannot supply the virtual relation as an alias source.
+                    continue
                 head = cast(str, path[0])
                 sentinel = None
                 if head != name and head in fields:

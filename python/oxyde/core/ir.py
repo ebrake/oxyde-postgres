@@ -262,7 +262,7 @@ def build_insert_ir(
         column_types: ColumnTypeSpec dicts for typed parameter binding.
         model: Model name for validation
         returning: Whether to return inserted rows
-        pk_column: Primary key column name (defaults to "id" if not specified)
+        pk_column: Primary key column to return when full rows are not requested
         on_conflict: Optional conflict target and action
     """
     if not values and not bulk_values:

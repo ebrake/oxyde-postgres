@@ -36,6 +36,7 @@ from oxyde.models.serializers import (
     _dump_insert_data,
     _dump_update_data,
     _normalize_instance,
+    _prepare_fk_columns,
 )
 from oxyde.models.utils import _unpack_annotated, _unwrap_optional
 from oxyde.queries.base import (
@@ -102,12 +103,7 @@ def _refresh_in_place(
     Defaults and factory values (e.g. ``PrivateAttr(default_factory=uuid4)``)
     are never assigned through ``__setattr__``, so local state survives.
     """
-    instance.__dict__.update(hydrated.__dict__)
-    object.__setattr__(
-        instance,
-        "__pydantic_fields_set__",
-        instance.model_fields_set | hydrated.model_fields_set,
-    )
+    instance._refresh_db_fields(hydrated)
 
     if hydrated.__pydantic_private__ is not None:
         private = dict(instance.__pydantic_private__ or {})
@@ -428,6 +424,7 @@ class MutationMixin(Generic[TModel]):
     ) -> tuple[TModel, bool]:
         """Insert an instance and report whether a new row was created."""
         exec_client = await _resolve_execution_client(using, client)
+        _prepare_fk_columns(instance, None)
         payload = _dump_insert_data(instance)
         pk_field = self._primary_key_field()
         if upsert:
@@ -484,8 +481,8 @@ class MutationMixin(Generic[TModel]):
                 and inserted_ids
                 and inserted_ids[0] is not None
             ):
-                row_dict = _dump_db_fields(instance)
-                row_dict[pk_field] = inserted_ids[0]
+                # Only the submitted columns and returned key were persisted.
+                row_dict = {**payload, pk_field: inserted_ids[0]}
                 hydrated = _validate_db_row(
                     self.model_class, row_dict, track_private=in_place
                 )
@@ -508,6 +505,9 @@ class MutationMixin(Generic[TModel]):
                 )
             else:
                 instance = hydrated
+        elif not upsert and not inserted_ids and result.get("affected") == 1:
+            instance.model_fields_set.update(payload)
+            instance._mark_pk_persisted()
 
         return instance, inserted
 
@@ -558,6 +558,7 @@ class MutationMixin(Generic[TModel]):
         for batch in batches:
             payloads = []
             for instance in batch:
+                _prepare_fk_columns(instance, None)
                 payload = _dump_insert_data(instance)
                 if not payload:
                     raise ManagerError("bulk_create() encountered an empty payload")
@@ -565,36 +566,43 @@ class MutationMixin(Generic[TModel]):
 
             query = InsertQuery(self.model_class).bulk_values(payloads)
             result = await self._run_mutation(query, exec_client)
+            ids = result.get("inserted_ids", [])
+            count = len(batch)
+            # Confirmed inserts also make defaulted non-PK target values usable.
+            all_inserted = result.get("affected") == count
+            if all_inserted:
+                for instance, payload in zip(batch, payloads):
+                    instance.model_fields_set.update(payload.keys() - {pk_field})
             if pk_field is None or pk_adapter is None:
                 continue
 
-            ids = result.get("inserted_ids", [])
-            count = len(batch)
             if len(ids) == count and all(key is not None for key in ids):
                 keys = [pk_adapter.validate_python(key) for key in ids]
-                for instance, key in zip(batch, keys):
+                for instance, key, payload in zip(batch, keys, payloads):
                     setattr(instance, pk_field, key)
+                    instance.model_fields_set.update(payload)
                 continue
 
             submitted = [
-                (instance, msgpack.packb(serialize_value(payload[pk_field])))
+                (instance, payload, msgpack.packb(serialize_value(payload[pk_field])))
                 for instance, payload in zip(batch, payloads)
                 if payload.get(pk_field) is not None
             ]
-            if not ids and result.get("affected") == count:
+            if not ids and all_inserted:
                 # Some clients only report a row count.
-                for instance, _ in submitted:
+                for instance in batch:
                     instance._mark_pk_persisted()
             else:
-                sent = Counter(key for _, key in submitted)
+                sent = Counter(key for _, _, key in submitted)
                 returned = Counter(
                     msgpack.packb(serialize_value(key))
                     for key in ids
                     if key is not None
                 )
-                for instance, key in submitted:
+                for instance, payload, key in submitted:
                     if sent[key] == returned[key] == 1:
                         instance._mark_pk_persisted()
+                        instance.model_fields_set.update(payload)
 
             if len(submitted) != count:
                 warnings.warn(
@@ -638,6 +646,9 @@ class MutationMixin(Generic[TModel]):
         fields_list = list(fields)
         if not fields_list:
             raise ManagerError("bulk_update() requires at least one field")
+        columns = dict.fromkeys(
+            self.model_class._resolve_update_columns(fields_list, implicit=False)
+        )
 
         pk_field = self._primary_key_field()
         if not pk_field:
@@ -649,22 +660,25 @@ class MutationMixin(Generic[TModel]):
 
         # Build bulk_update payload
         bulk_entries: list[dict[str, Any]] = []
+        written: list[tuple[TModel, dict[str, Any]]] = []
         for obj in objects_list:
             pk_value = getattr(obj, pk_field)
             if pk_value is None:
                 continue
 
+            _prepare_fk_columns(obj, columns)
             all_values = _dump_db_fields(obj)
 
             # Extract requested fields and map to db_column names
             values = {
                 field_name: _serialize_value_for_ir(all_values[field_name])
-                for field_name in fields_list
+                for field_name in columns
                 if field_name in all_values
             }
             mapped_values = _map_values_to_columns(self.model_class, values)
 
             if mapped_values:
+                written.append((obj, values))
                 bulk_entries.append(
                     {
                         "filters": {pk_column: pk_value},
@@ -686,4 +700,8 @@ class MutationMixin(Generic[TModel]):
 
         result_bytes = await exec_client.execute(update_ir)
         result = msgpack.unpackb(result_bytes, raw=False)
-        return int(result.get("affected", 0))
+        affected = int(result.get("affected", 0))
+        if affected == len(bulk_entries):
+            for obj, values in written:
+                obj.model_fields_set.update(values)
+        return affected

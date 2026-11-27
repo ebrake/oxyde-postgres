@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Passing or assigning a related instance copies its key to the foreign-key
+  column once the key has been loaded, saved, or supplied explicitly.
+  Client-generated keys such as `default_factory=uuid4` only fill the FK
+  after the related object is saved. A required FK raises a validation error
+  during construction when the related object's key is still a default.
+- `bulk_update(posts, ["author"])` writes the scalar value from `author_id`.
+- An explicit FK column, including `None`, takes precedence at construction
+  and in copy updates. A relation-only copy update sets the FK column to the
+  new key, or to `None` when the key is unavailable. Writes to an empty FK
+  column raise `ValueError` if the assigned object has no available key.
+  `save()` keeps the assigned relation when it matches the returned FK.
+- Required FK columns can resolve keys from nested dictionaries or JSON via
+  pydantic-core's alias path. With instances in `model_validate()` input or an
+  initializer after `Model` in the MRO that lacks `**kwargs`, supply the
+  required FK column explicitly.
+- PostgreSQL `create()` and `bulk_create()` now support models with no primary
+  key. The affected-row count confirms which submitted fields were persisted
+  when the full insert succeeds.
+
 ## 0.4.0 — Typed PostgreSQL query results
 
 - **Breaking.** `values()`, `values_list()`, `fetch_all()`, and `fetch_rows()`

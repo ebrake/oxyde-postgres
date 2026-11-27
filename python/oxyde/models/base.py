@@ -66,8 +66,10 @@ from __future__ import annotations
 import sys
 import typing as typing_module
 import warnings
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
 from contextvars import ContextVar
+from functools import wraps
+from inspect import Parameter, signature
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -113,7 +115,10 @@ from oxyde.models.metadata import (
     is_column_field,
 )
 from oxyde.models.registry import finalize_pending, register_table
-from oxyde.models.serializers import _dump_update_data
+from oxyde.models.serializers import (
+    _dump_update_data,
+    _prepare_fk_columns,
+)
 from oxyde.models.utils import (
     _AggregateFieldsSet,
     _extract_constraints,
@@ -127,6 +132,16 @@ from oxyde.models.utils import (
 
 def _pk_is_set(value: Any) -> bool:
     return value is not None and value is not PydanticUndefined
+
+
+def _related_key(related: Model, target_field: str) -> Any:
+    """Return an available FK target value from an individual row."""
+    fields_set = related.model_fields_set
+    if not isinstance(fields_set, _AggregateFieldsSet) and target_field in fields_set:
+        value = getattr(related, target_field, None)
+        if _pk_is_set(value):
+            return value
+    return None
 
 
 # While set, Model.__setattr__ records (instance, name) for each private
@@ -263,7 +278,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         validate_by_alias=True,
         validate_by_name=True,
     )
-    _db_meta: ClassVar[ModelMeta]
+    _db_meta: ClassVar[ModelMeta] = ModelMeta()
     # Parametrized by Self so `User.objects.first()` infers `User | None`
     # on every subclass without the generated stubs.
     objects: ClassVar[QueryManager[Self]]
@@ -271,38 +286,108 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
     __pending_fk_fields__: ClassVar[list[tuple[str, Any, Any]]] = []
     __fk_fields_resolved__: ClassVar[bool] = False
 
+    if not TYPE_CHECKING:
+
+        def __init__(self, /, **data: Any) -> None:
+            cls = type(self)
+            supplied = None
+            if cls._db_meta.fk_links:
+                supplied = data.keys() & cls._db_meta.fk_links.keys()
+                cls._inject_fk_columns(data)
+            super().__init__(**data)
+            if supplied:
+                self._reconcile_fk_columns(supplied)
+
+        # Keep pydantic-core's normal model validator for database rows.
+        setattr(__init__, "__pydantic_base_init__", True)
+
+    @classmethod
+    def _inject_fk_columns(
+        cls,
+        data: dict[str, Any],
+        fields_set: set[str] | None = None,
+    ) -> None:
+        for name, (relation, column, target_field) in cls._db_meta.fk_links.items():
+            if name != relation or column in data:
+                continue
+            related = data.get(relation)
+            if isinstance(related, Model):
+                key = _related_key(related, target_field)
+                if key is not None:
+                    data[column] = key
+                    if fields_set is not None:
+                        fields_set.add(column)
+
+    def _reconcile_fk_columns(
+        self, supplied: Collection[str], *, copy_update: bool = False
+    ) -> None:
+        values = self.__dict__
+        for name, (relation, column, target_field) in type(
+            self
+        )._db_meta.fk_links.items():
+            if name != relation:
+                continue
+            related = values.get(relation)
+            if column in supplied:
+                if isinstance(related, Model):
+                    key = _related_key(related, target_field)
+                    if key is None or key != values.get(column):
+                        values[relation] = None
+            elif copy_update and relation in supplied:
+                values[column] = (
+                    _related_key(related, target_field)
+                    if isinstance(related, Model)
+                    else None
+                )
+                self.__pydantic_fields_set__.add(column)
+
     @classmethod
     def model_construct(
         cls, _fields_set: set[str] | None = None, **values: Any
     ) -> Self:
+        supplied_fk_fields = values.keys() & cls._db_meta.fk_links.keys()
+        if cls._db_meta.fk_links:
+            if _fields_set is not None:
+                _fields_set = _fields_set.copy()
+            cls._inject_fk_columns(values, _fields_set)
+
         pk_field = cls._db_meta.pk_field if cls._is_table else None
         field = cls.model_fields.get(pk_field) if pk_field is not None else None
+        supplied = True
         if (
-            not isinstance(field, OxydeFieldInfo)
-            or not field.db_pk
-            or field.is_required()
+            pk_field is not None
+            and isinstance(field, OxydeFieldInfo)
+            and field.db_pk
+            and not field.is_required()
         ):
-            return super().model_construct(_fields_set, **values)
-
-        assert pk_field is not None
-        if _fields_set is not None:
-            supplied = pk_field in _fields_set
-        elif pk_field in values or field.alias in values:
-            supplied = True
-        else:
-            alias = field.validation_alias
-            choices = alias.choices if isinstance(alias, AliasChoices) else [alias]
-            supplied = any(
-                choice in values
-                if isinstance(choice, str)
-                else isinstance(choice, AliasPath)
-                and choice.search_dict_for_path(values) is not PydanticUndefined
-                for choice in choices
-            )
+            if _fields_set is not None:
+                supplied = pk_field in _fields_set
+            elif pk_field in values or field.alias in values:
+                supplied = True
+            else:
+                alias = field.validation_alias
+                choices = alias.choices if isinstance(alias, AliasChoices) else [alias]
+                supplied = any(
+                    choice in values
+                    if isinstance(choice, str)
+                    else isinstance(choice, AliasPath)
+                    and choice.search_dict_for_path(values) is not PydanticUndefined
+                    for choice in choices
+                )
 
         instance = super().model_construct(_fields_set, **values)
-        if not supplied:
+        if pk_field is not None and not supplied:
             instance.__pydantic_fields_set__.discard(pk_field)
+        if supplied_fk_fields:
+            instance._reconcile_fk_columns(supplied_fk_fields)
+        return instance
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        instance = super().model_copy(update=update, deep=deep)
+        if update and type(self)._db_meta.fk_links:
+            instance._reconcile_fk_columns(update.keys(), copy_update=True)
         return instance
 
     @classmethod
@@ -357,9 +442,51 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         if assigned is not None and name in type(self).__private_attributes__:
             assigned.append((self, name))
         super().__setattr__(name, value)
+        link = type(self)._db_meta.fk_links.get(name)
+        if link is None:
+            return
+
+        relation, column, target_field = link
+        related = self.__dict__.get(relation)
+        if isinstance(related, Model):
+            key = _related_key(related, target_field)
+            if name == relation:
+                self.__dict__[column] = key
+                self.__pydantic_fields_set__.add(column)
+            elif key is None or key != self.__dict__.get(column):
+                self.__dict__[relation] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+
+        if cls.__init__ is Model.__init__:
+            initializer = super().__init__
+            if not getattr(initializer, "__pydantic_base_init__", False):
+                # Pydantic inspects the initializer after this hook. Preserve a
+                # custom initializer that follows Model in the MRO.
+                try:
+                    takes_kwargs = any(
+                        p.kind == Parameter.VAR_KEYWORD
+                        for p in signature(initializer).parameters.values()
+                    )
+                except TypeError, ValueError:
+                    takes_kwargs = False
+                if takes_kwargs:
+
+                    @wraps(initializer)
+                    def init_with_fk(self: Model, /, *args: Any, **data: Any) -> None:
+                        model = type(self)
+                        supplied = None
+                        if model._db_meta.fk_links:
+                            supplied = data.keys() & model._db_meta.fk_links.keys()
+                            model._inject_fk_columns(data)
+                        initializer(self, *args, **data)
+                        if supplied:
+                            self._reconcile_fk_columns(supplied)
+
+                    setattr(cls, "__init__", init_with_fk)
+                else:
+                    setattr(cls, "__init__", initializer)
 
         module = sys.modules.get(cls.__module__)
         if module is not None:
@@ -598,6 +725,9 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                     fk_column_type,
                     Field(
                         default=fk_default,
+                        validation_alias=AliasChoices(
+                            fk_column_name, AliasPath(field_name, target_field_name)
+                        ),
                         db_nullable=db_nullable,
                         db_unique=db_unique,
                         db_nulls_distinct=db_nulls_distinct,
@@ -635,6 +765,8 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
     def _parse_field_tags(cls) -> None:
         """Parse Annotated field tags and store them in metadata."""
         cls._db_meta.field_metadata = {}
+        cls._db_meta.fk_links = {}
+        cls._db_meta.virtual_fields = frozenset()
         if not cls._is_table:
             return
 
@@ -809,6 +941,17 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             )
             cls._db_meta.field_metadata[field_name] = column_meta
 
+        for relation, meta in cls._db_meta.field_metadata.items():
+            if (fk := meta.foreign_key) is not None:
+                column = fk.column_name
+                link = (relation, column, fk.target_field)
+                cls._db_meta.fk_links[relation] = cls._db_meta.fk_links[column] = link
+        cls._db_meta.virtual_fields = frozenset(
+            name
+            for name, meta in cls._db_meta.field_metadata.items()
+            if not is_column_field(meta)
+        )
+
     @classmethod
     def get_table_name(cls) -> str:
         """Get the table name for this model."""
@@ -882,27 +1025,49 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
         if pk_field and _pk_is_set(getattr(self, pk_field, PydanticUndefined)):
             self.__pydantic_fields_set__.add(pk_field)
 
-    def _resolve_update_columns(self, names: set[str], *, implicit: bool) -> set[str]:
-        metadata = type(self)._db_meta.field_metadata
-        fields: set[str] = set()
+    def _refresh_db_fields(self, hydrated: Model) -> None:
+        """Apply returned fields and reconcile locally loaded relations."""
+        values = self.__dict__
+        loaded = hydrated.model_fields_set
+        virtual_fields = type(self)._db_meta.virtual_fields
+        if virtual_fields <= loaded:
+            values.update(hydrated.__dict__)
+        else:
+            unloaded = virtual_fields - loaded
+            values.update(
+                (name, value)
+                for name, value in hydrated.__dict__.items()
+                if name not in unloaded
+            )
+        object.__setattr__(
+            self,
+            "__pydantic_fields_set__",
+            self.model_fields_set | loaded,
+        )
+        self._reconcile_fk_columns(loaded)
+
+    @classmethod
+    def _resolve_update_columns(
+        cls, names: Collection[str], *, implicit: bool
+    ) -> Iterable[str]:
+        metadata = cls._db_meta.field_metadata
         for name in names:
             meta = metadata.get(name)
             if meta is None:
-                fields.add(name)
+                yield name
             elif meta.extra.get("reverse_fk") or meta.extra.get("m2m"):
                 if not implicit:
                     raise FieldError(
                         f"'{name}' is a virtual relation field and cannot "
-                        f"be used in update_fields"
+                        "be updated directly"
                     )
             elif meta.foreign_key is not None:
                 column = meta.foreign_key.column_name
                 # JOIN hydration can populate the relation without loading its FK.
                 if not implicit or column in names:
-                    fields.add(column)
+                    yield column
             else:
-                fields.add(name)
-        return fields
+                yield name
 
     async def save(
         self,
@@ -956,10 +1121,15 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
                 msg = f"Invalid update_fields for {model_class.__name__}: {inv}"
                 raise FieldError(msg)
 
-            fields = self._resolve_update_columns(update_fields_set, implicit=False)
+            fields = set(
+                model_class._resolve_update_columns(update_fields_set, implicit=False)
+            )
         elif partial:
-            fields = self._resolve_update_columns(
-                self.model_fields_set & model_class.model_fields.keys(), implicit=True
+            fields = set(
+                model_class._resolve_update_columns(
+                    self.model_fields_set & model_class.model_fields.keys(),
+                    implicit=True,
+                )
             )
 
         inserted = False
@@ -968,6 +1138,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             if fields is None:
                 fields = set(model_class.model_fields)
             fields.discard(pk_field)
+            _prepare_fk_columns(self, fields)
             values = _dump_update_data(self, fields)
             if not values:
                 # Call post_save even if no values to update (for consistency)
@@ -982,11 +1153,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             if not rows:
                 cls_name = self.__class__.__name__
                 raise NotFoundError(f"{cls_name} with {pk_field}={pk_value} not found")
-            self.__dict__.update(rows[0].__dict__)
-            if partial:
-                object.__setattr__(
-                    self, "__pydantic_fields_set__", set(self.model_fields_set)
-                )
+            self._refresh_db_fields(rows[0])
         else:
             try:
                 _, inserted = await manager._query()._insert_instance(

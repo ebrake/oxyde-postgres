@@ -400,20 +400,23 @@ pub(crate) fn execute<'py>(
                 result
             }
             oxyde_codec::Operation::Insert => {
-                // fall through to execute_insert_returning (last_insert_id()).
                 // Routing is decided by IR intent + dialect, never by SQL text.
                 if emits_returning(&ir, dialect) {
                     execute_mutation_returning(&pool_name, &sql, &params, ir.column_types.as_ref())
                         .await
                         .map_err(|e| crate::errors::driver_err(&e))?
-                } else {
-                    // Bulk insert: return only PKs
-                    let pk_column = ir.pk_column.as_deref();
+                } else if let Some(pk_column) = ir.pk_column.as_deref() {
                     let ids = execute_insert_returning(&pool_name, &sql, &params, pk_column)
                         .await
                         .map_err(|e| crate::errors::driver_err(&e))?;
 
                     encode_insert_result(ids.len(), &ids)
+                } else {
+                    let affected = execute_statement(&pool_name, &sql, &params)
+                        .await
+                        .map_err(|e| crate::errors::driver_err(&e))?;
+
+                    encode_mutation_result(affected)
                 }
             }
             oxyde_codec::Operation::Update | oxyde_codec::Operation::Delete => {
@@ -533,14 +536,19 @@ pub(crate) fn execute_in_transaction<'py>(
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
-                } else {
-                    let pk_column = ir.pk_column.as_deref();
+                } else if let Some(pk_column) = ir.pk_column.as_deref() {
                     let ids =
                         execute_insert_returning_in_transaction(tx_id, &sql, &params, pk_column)
                             .await
                             .map_err(|e| crate::errors::driver_err(&e))?;
 
                     encode_insert_result(ids.len(), &ids)
+                } else {
+                    let affected = execute_statement_in_transaction(tx_id, &sql, &params)
+                        .await
+                        .map_err(|e| crate::errors::driver_err(&e))?;
+
+                    encode_mutation_result(affected)
                 }
             }
             oxyde_codec::Operation::Update | oxyde_codec::Operation::Delete => {

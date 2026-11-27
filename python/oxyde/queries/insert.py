@@ -166,7 +166,7 @@ class InsertQuery:
             if not self._values:
                 raise ValueError("INSERT query requires at least one column/value pair")
 
-            # Single insert: use RETURNING * to get all fields (including db defaults)
+            # Fetch the complete inserted row for models with a primary key.
             return ir.build_insert_ir(
                 table=table_name,
                 values=self._serialize_values(self._values),
@@ -174,7 +174,7 @@ class InsertQuery:
                 bind_types=bind_types,
                 model=_model_key(self.model_class),
                 pk_column=pk_column,
-                returning=True,
+                returning=pk_column is not None,
                 on_conflict=on_conflict,
             )
 

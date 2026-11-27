@@ -31,6 +31,91 @@ from .conftest import (
 
 
 @pytest.mark.asyncio
+async def test_create_post_with_related_author(db):
+    author = await create_author(db)
+    post = await Post.objects.create(title="New post", author=author, using=db.name)
+    stored = await Post.objects.get(id=post.id, using=db.name)
+    assert stored.author_id == author.id
+
+
+@pytest.mark.asyncio
+async def test_save_related_author_by_relation_name(db):
+    post = await Post.objects.get(id=1, using=db.name)
+    author = await Author.objects.get(id=2, using=db.name)
+    post.author = author
+    await post.save(update_fields=["author"], using=db.name)
+    assert post.author is author
+    assert post.author_id == author.id
+    stored = await Post.objects.get(id=post.id, using=db.name)
+    assert stored.author_id == author.id
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_related_authors_by_relation_name(db):
+    first = await Post.objects.filter(id=1).join("author").get(using=db.name)
+    second = await Post.objects.filter(id=3).join("author").get(using=db.name)
+    first.author, second.author = second.author, first.author
+
+    affected = await Post.objects.bulk_update(
+        [first, second], ["author"], using=db.name
+    )
+    assert affected == 2
+    assert (await Post.objects.get(id=first.id, using=db.name)).author_id == 2
+    assert (await Post.objects.get(id=second.id, using=db.name)).author_id == 1
+
+
+@pytest.mark.asyncio
+async def test_save_related_author_after_assignment(db):
+    author = Author(name="New author", email="new-author@example.com")
+    post = Post(title="New post")
+    post.author = author
+    await author.save(using=db.name)
+    await post.save(using=db.name)
+
+    assert post.author is author
+    assert post.author_id == author.id
+    stored = await Post.objects.get(id=post.id, using=db.name)
+    assert stored.author_id == author.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_transaction", [False, True], ids=["pool", "transaction"])
+async def test_create_and_bulk_create_without_primary_key(db, in_transaction):
+    class Publisher(Model):
+        name: str
+        code: str = Field(default="publisher", db_unique=True)
+
+        class Meta:
+            is_table = True
+            table_name = "publishers"
+
+    await execute_raw(
+        "CREATE TABLE publishers (name text NOT NULL, code text NOT NULL UNIQUE)",
+        using=db.name,
+    )
+
+    first = Publisher(name="First")
+    second = Publisher(name="Second", code="second")
+    context = atomic(using=db.name) if in_transaction else nullcontext()
+    async with context:
+        created = await Publisher.objects.bulk_create([first, second], using=db.name)
+        single = await Publisher.objects.create(
+            instance=Publisher(name="Single", code="single"), using=db.name
+        )
+
+    assert created == [first, second]
+    assert "code" in first.model_fields_set
+    assert (single.name, single.code) == ("Single", "single")
+    assert await execute_raw(
+        "SELECT name, code FROM publishers ORDER BY name", using=db.name
+    ) == [
+        {"name": "First", "code": "publisher"},
+        {"name": "Second", "code": "second"},
+        {"name": "Single", "code": "single"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_json_aliases_round_trip_through_select_join_and_writes(db):
     await execute_raw(
         """INSERT INTO alias_collisions (row_pk, external_ref, name, document)
@@ -204,7 +289,7 @@ class TestCreate:
         assert post.title == "Default Test"
         assert post.body == ""
         assert post.views == 0
-        assert post.published == False
+        assert post.published is False
 
     @pytest.mark.asyncio
     async def test_create_sends_default_factory_pk(self, db):
@@ -233,9 +318,7 @@ class TestCreate:
         """Constraint violations are classified by the driver (sqlx ErrorKind),
         so all dialects raise UniqueViolationError — a subclass of
         IntegrityError — without any error-message matching."""
-        await Author.objects.create(
-            name="Dup", email="dup@test.com", using=db.name
-        )
+        await Author.objects.create(name="Dup", email="dup@test.com", using=db.name)
         with pytest.raises(UniqueViolationError) as exc_info:
             await Author.objects.create(
                 name="Dup2", email="dup@test.com", using=db.name
@@ -721,9 +804,7 @@ class TestComputedField:
 
     @pytest.mark.asyncio
     async def test_create_with_computed_field(self, db):
-        product = await Product.objects.create(
-            price=10.0, quantity=3, using=db.name
-        )
+        product = await Product.objects.create(price=10.0, quantity=3, using=db.name)
         assert product.id is not None
         assert product.price == 10.0
         assert product.quantity == 3

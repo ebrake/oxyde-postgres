@@ -1,8 +1,5 @@
 //! INSERT RETURNING execution (pool and transaction paths).
 
-// rows_affected()/last_insert_id() are u64 by sqlx API; real values fit i64.
-#![allow(clippy::cast_possible_wrap)]
-
 use sea_query::Value;
 use sqlx::postgres::PgRow;
 use tracing::debug;
@@ -44,9 +41,8 @@ pub async fn execute_insert_returning(
     pool_name: &str,
     sql: &str,
     params: &[Value],
-    pk_column: Option<&str>,
+    pk_col: &str,
 ) -> Result<Vec<rmpv::Value>> {
-    let pk_col = pk_column.unwrap_or("id");
     debug!(
         "Executing INSERT RETURNING on '{}': {} ({} params, pk={})",
         pool_name,
@@ -82,9 +78,8 @@ pub async fn execute_insert_returning_in_transaction(
     tx_id: u64,
     sql: &str,
     params: &[Value],
-    pk_column: Option<&str>,
+    pk_col: &str,
 ) -> Result<Vec<rmpv::Value>> {
-    let pk_col = pk_column.unwrap_or("id");
     let registry = transaction_registry();
     let arc = registry
         .get(tx_id)
