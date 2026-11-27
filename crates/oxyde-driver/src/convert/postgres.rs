@@ -1,32 +1,31 @@
 //! PostgreSQL CellEncoder implementation.
 //!
-//! Encodes PostgreSQL row cells directly to msgpack bytes, dispatched by
-//! `ColumnTypeSpec`. Error-handling per arm (nil vs string-fallback) is
-//! ported verbatim from the legacy string-hint implementation.
+//! Decodes PostgreSQL cells using the column spec or runtime type.
+
+use std::borrow::Cow;
 
 use bigdecimal::{BigDecimal, RoundingMode, ToPrimitive};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use oxyde_codec::ColumnTypeSpec;
-use rust_decimal::Decimal;
 use sqlx::{
     error::BoxDynError,
     postgres::{types::Oid, PgHasArrayType, PgRow, PgTypeInfo, PgTypeKind, PgValueRef, Postgres},
     Column, Decode, Row, Type, TypeInfo,
 };
-use uuid::Uuid;
 
-use super::encoder::{
-    write_array_len, write_bin, write_bool, write_f64, write_i64, write_json_value, write_nil,
-    write_str, write_u64, CellEncoder, ColumnMeta, ResultEncoding,
-};
-
-use super::postgres_types::{
-    PgChronoTimeTz, PgNumeric, PgOid8, PgTemporal, OID, OID8, OID8_ARRAY, OID_ARRAY,
-};
+use super::cell::{numeric_cell, ArrayValues, Cell, PgChronoTimeTz, PgNumeric, PgTemporal};
+use super::encoder::{CellEncoder, ColumnMeta, ResultEncoding};
+use super::postgres_types::{PgOid8, OID, OID8, OID8_ARRAY, OID_ARRAY};
 
 pub struct PgEncoder;
 
+// Catalog OIDs let common signed integers skip the size-probing fallback.
+const INT2: Oid = Oid(21);
+const INT4: Oid = Oid(23);
+const INT8: Oid = Oid(20);
+
 #[derive(Debug, Clone)]
+#[repr(transparent)]
 struct PgEnumText(String);
 
 impl Type<Postgres> for PgEnumText {
@@ -72,203 +71,82 @@ impl CellEncoder for PgEncoder {
         pg_result_kind(col.spec.as_ref(), &col.db_type)
     }
 
-    fn encode_cell(
-        buf: &mut Vec<u8>,
-        row: &PgRow,
-        idx: usize,
-        col: &ColumnMeta,
-    ) -> Option<&'static str> {
+    #[inline]
+    fn decode_cell(row: &PgRow, idx: usize, col: &ColumnMeta) -> (Cell, Option<&'static str>) {
         if col.result_encoding == Some(ResultEncoding::Runtime) {
-            Self::encode_by_db_type(buf, row, idx, &col.db_type);
-            return None;
+            return (decode_by_db_type(row, idx, &col.db_type), None);
         }
         if let Some(encoding) = col.result_encoding.filter(|encoding| {
             col.db_type == "NUMERIC" && !matches!(encoding, ResultEncoding::Wire)
         }) {
-            return encode_aggregate_numeric(buf, row, idx, encoding);
-        } else if !col
+            return decode_aggregate_numeric(row, idx, encoding);
+        }
+        let cell = col
             .spec
             .as_ref()
-            .is_some_and(|spec| Self::try_encode_by_spec(buf, row, idx, spec))
-        {
-            Self::encode_by_db_type(buf, row, idx, &col.db_type);
-        }
-        None
+            .and_then(|spec| decode_by_spec(row, idx, spec))
+            .unwrap_or_else(|| decode_by_db_type(row, idx, &col.db_type));
+        (cell, None)
     }
+}
 
-    fn try_encode_by_spec(
-        buf: &mut Vec<u8>,
-        row: &PgRow,
-        idx: usize,
-        spec: &ColumnTypeSpec,
-    ) -> bool {
-        match spec {
-            ColumnTypeSpec::BigInteger => {
-                encode_pg_int(buf, row, idx);
-                true
-            }
-            ColumnTypeSpec::Text | ColumnTypeSpec::String { .. } => {
-                match row.try_get::<Option<String>, _>(idx) {
-                    Ok(Some(v)) => write_str(buf, &v),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => write_nil(buf),
-                }
-                true
-            }
-            ColumnTypeSpec::Enum { .. } => {
-                match row.try_get::<Option<PgEnumText>, _>(idx) {
-                    Ok(Some(v)) => write_str(buf, &v.0),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => write_nil(buf),
-                }
-                true
-            }
-            ColumnTypeSpec::Double => {
-                match row.try_get::<Option<f64>, _>(idx) {
-                    Ok(Some(v)) => write_f64(buf, v),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => fallback_str(buf, row, idx),
-                }
-                true
-            }
-            ColumnTypeSpec::Boolean => {
-                match row.try_get::<Option<bool>, _>(idx) {
-                    Ok(Some(v)) => write_bool(buf, v),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => fallback_str(buf, row, idx),
-                }
-                true
-            }
-            ColumnTypeSpec::Blob => {
-                match row.try_get::<Option<Vec<u8>>, _>(idx) {
-                    Ok(Some(v)) => write_bin(buf, &v),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => fallback_str(buf, row, idx),
-                }
-                true
-            }
-            ColumnTypeSpec::DateTime => {
-                if row.columns()[idx].type_info().name() == "TIMESTAMPTZ" {
-                    encode_pg_temporal::<DateTime<Utc>>(buf, row, idx);
-                } else {
-                    encode_pg_temporal::<NaiveDateTime>(buf, row, idx);
-                }
-                true
-            }
-            ColumnTypeSpec::DateTimeUtc => {
-                encode_pg_temporal::<DateTime<Utc>>(buf, row, idx);
-                true
-            }
-            ColumnTypeSpec::Date => {
-                encode_pg_temporal::<NaiveDate>(buf, row, idx);
-                true
-            }
-            ColumnTypeSpec::Time => {
-                encode_pg_time(
-                    buf,
-                    row,
-                    idx,
-                    row.columns()[idx].type_info().name() == "TIMETZ",
-                );
-                true
-            }
-            ColumnTypeSpec::Uuid => {
-                match row.try_get::<Option<Uuid>, _>(idx) {
-                    Ok(Some(v)) => write_str(buf, &v.to_string()),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => fallback_str(buf, row, idx),
-                }
-                true
-            }
-            ColumnTypeSpec::Decimal { .. } => {
-                encode_pg_numeric(buf, row, idx);
-                true
-            }
-            ColumnTypeSpec::Timedelta => {
-                match row.try_get::<Option<i64>, _>(idx) {
-                    Ok(Some(v)) => write_f64(buf, v as f64 / 1_000_000.0),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => write_nil(buf),
-                }
-                true
-            }
-            ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => {
-                match row.try_get::<Option<serde_json::Value>, _>(idx) {
-                    Ok(Some(v)) => write_json_value(buf, &v),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => fallback_str(buf, row, idx),
-                }
-                true
-            }
-            ColumnTypeSpec::Array { item } => {
-                encode_pg_array(buf, row, idx, item);
-                true
-            }
-            ColumnTypeSpec::Unknown => false,
+#[inline]
+fn decode_by_spec(row: &PgRow, idx: usize, spec: &ColumnTypeSpec) -> Option<Cell> {
+    Some(match spec {
+        ColumnTypeSpec::BigInteger => decode_pg_int(row, idx),
+        ColumnTypeSpec::Text | ColumnTypeSpec::String { .. } => fallback_str(row, idx),
+        ColumnTypeSpec::Enum { .. } => {
+            try_cell(row, idx, |v: PgEnumText| Cell::Str(v.0)).unwrap_or(Cell::Null)
         }
+        ColumnTypeSpec::Double => decode_or_text(row, idx, Cell::Float),
+        ColumnTypeSpec::Boolean => decode_or_text(row, idx, Cell::Bool),
+        ColumnTypeSpec::Blob => decode_or_text(row, idx, Cell::Bytes),
+        ColumnTypeSpec::DateTime if row.columns()[idx].type_info().name() != "TIMESTAMPTZ" => {
+            decode_or_text::<PgTemporal<NaiveDateTime>>(row, idx, Cell::from)
+        }
+        ColumnTypeSpec::DateTime | ColumnTypeSpec::DateTimeUtc => {
+            decode_or_text::<PgTemporal<DateTime<Utc>>>(row, idx, Cell::from)
+        }
+        ColumnTypeSpec::Date => decode_or_text::<PgTemporal<NaiveDate>>(row, idx, Cell::from),
+        ColumnTypeSpec::Time => {
+            decode_pg_time(row, idx, row.columns()[idx].type_info().name() == "TIMETZ")
+        }
+        ColumnTypeSpec::Uuid => decode_or_text(row, idx, Cell::Uuid),
+        ColumnTypeSpec::Decimal { .. } => decode_or_text(row, idx, |value| numeric_cell(&value)),
+        ColumnTypeSpec::Timedelta => try_cell(row, idx, Cell::Duration).unwrap_or(Cell::Null),
+        ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => decode_or_text(row, idx, Cell::Json),
+        ColumnTypeSpec::Array { item } => decode_pg_array(row, idx, item),
+        ColumnTypeSpec::Unknown => return None,
+    })
+}
+
+fn decode_by_db_type(row: &PgRow, idx: usize, db_type: &str) -> Cell {
+    // oid8's display name depends on search_path; dispatch it by catalog OID.
+    match row.columns()[idx].type_info().oid() {
+        Some(OID8) => return decode_pg_int(row, idx),
+        Some(OID8_ARRAY) => return decode_pg_array(row, idx, &ColumnTypeSpec::BigInteger),
+        _ => {}
     }
-
-    fn encode_by_db_type(buf: &mut Vec<u8>, row: &PgRow, idx: usize, db_type: &str) {
-        // oid8's display name depends on search_path; dispatch it by catalog OID.
-        match row.columns()[idx].type_info().oid() {
-            Some(OID8) => return encode_pg_int(buf, row, idx),
-            Some(OID8_ARRAY) => {
-                return encode_pg_array(buf, row, idx, &ColumnTypeSpec::BigInteger);
-            }
-            _ => {}
+    if let Some(item) = pg_array_item(db_type) {
+        return decode_pg_array(row, idx, &item);
+    }
+    match db_type {
+        "BOOL" | "BOOLEAN" => decode_or_text(row, idx, Cell::Bool),
+        "OID" => decode_pg_int(row, idx),
+        name if name.contains("INT") => decode_pg_int(row, idx),
+        "FLOAT4" => decode_or_text(row, idx, |v: f32| Cell::Float(f64::from(v))),
+        name if name.contains("FLOAT") || name.contains("DOUBLE") || name.contains("REAL") => {
+            decode_or_text(row, idx, Cell::Float)
         }
-        if let Some(item) = pg_array_item(db_type) {
-            encode_pg_array(buf, row, idx, &item);
-            return;
-        }
-        match db_type {
-            "BOOL" | "BOOLEAN" => match row.try_get::<Option<bool>, _>(idx) {
-                Ok(Some(v)) => write_bool(buf, v),
-                Ok(None) => write_nil(buf),
-                Err(_) => fallback_str(buf, row, idx),
-            },
-            "OID" => encode_pg_int(buf, row, idx),
-            name if name.contains("INT") => encode_pg_int(buf, row, idx),
-            "FLOAT4" => match row.try_get::<Option<f32>, _>(idx) {
-                Ok(Some(v)) => write_f64(buf, f64::from(v)),
-                Ok(None) => write_nil(buf),
-                Err(_) => fallback_str(buf, row, idx),
-            },
-            name if name.contains("FLOAT") || name.contains("DOUBLE") || name.contains("REAL") => {
-                match row.try_get::<Option<f64>, _>(idx) {
-                    Ok(Some(v)) => write_f64(buf, v),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => fallback_str(buf, row, idx),
-                }
-            }
-            "NUMERIC" | "DECIMAL" => encode_pg_numeric(buf, row, idx),
-            "UUID" => match row.try_get::<Option<Uuid>, _>(idx) {
-                Ok(Some(v)) => write_str(buf, &v.to_string()),
-                Ok(None) => write_nil(buf),
-                Err(_) => fallback_str(buf, row, idx),
-            },
-            name if name == "JSON" || name == "JSONB" => {
-                match row.try_get::<Option<serde_json::Value>, _>(idx) {
-                    Ok(Some(v)) => write_json_value(buf, &v),
-                    Ok(None) => write_nil(buf),
-                    Err(_) => fallback_str(buf, row, idx),
-                }
-            }
-            "TIMESTAMPTZ" => encode_pg_temporal::<DateTime<Utc>>(buf, row, idx),
-            "TIMESTAMP" => encode_pg_temporal::<NaiveDateTime>(buf, row, idx),
-            "DATE" => encode_pg_temporal::<NaiveDate>(buf, row, idx),
-            "TIME" | "TIMETZ" => encode_pg_time(buf, row, idx, db_type == "TIMETZ"),
-            "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(idx) {
-                Ok(Some(v)) => write_bin(buf, &v),
-                Ok(None) => write_nil(buf),
-                Err(_) => fallback_str(buf, row, idx),
-            },
-            _ => match row.try_get::<Option<String>, _>(idx) {
-                Ok(Some(v)) => write_str(buf, &v),
-                Ok(None) => write_nil(buf),
-                Err(_) => fallback_str(buf, row, idx),
-            },
-        }
+        "NUMERIC" | "DECIMAL" => decode_or_text(row, idx, |value| numeric_cell(&value)),
+        "UUID" => decode_or_text(row, idx, Cell::Uuid),
+        "JSON" | "JSONB" => decode_or_text(row, idx, Cell::Json),
+        "TIMESTAMPTZ" => decode_or_text::<PgTemporal<DateTime<Utc>>>(row, idx, Cell::from),
+        "TIMESTAMP" => decode_or_text::<PgTemporal<NaiveDateTime>>(row, idx, Cell::from),
+        "DATE" => decode_or_text::<PgTemporal<NaiveDate>>(row, idx, Cell::from),
+        "TIME" | "TIMETZ" => decode_pg_time(row, idx, db_type == "TIMETZ"),
+        "BYTEA" => decode_or_text(row, idx, Cell::Bytes),
+        _ => fallback_str(row, idx),
     }
 }
 
@@ -334,318 +212,164 @@ fn pg_array_kind(item: &ColumnTypeSpec, db_type: &str) -> Option<&'static str> {
     }
 }
 
-fn write_pg_temporal<T>(buf: &mut Vec<u8>, value: &PgTemporal<T>) {
-    write_str(buf, &value.0);
-}
-
-fn encode_pg_temporal<T>(buf: &mut Vec<u8>, row: &PgRow, idx: usize)
-where
-    PgTemporal<T>: Type<Postgres> + for<'r> Decode<'r, Postgres>,
-{
-    match row.try_get::<Option<PgTemporal<T>>, _>(idx) {
-        Ok(Some(value)) => write_pg_temporal(buf, &value),
-        Ok(None) => write_nil(buf),
-        Err(_) => fallback_str(buf, row, idx),
-    }
-}
-
-fn encode_pg_time(buf: &mut Vec<u8>, row: &PgRow, idx: usize, with_offset: bool) {
+fn decode_pg_time(row: &PgRow, idx: usize, with_offset: bool) -> Cell {
     if with_offset {
-        encode_pg_temporal::<PgChronoTimeTz>(buf, row, idx);
+        decode_or_text::<PgTemporal<PgChronoTimeTz>>(row, idx, Cell::from)
     } else {
-        encode_pg_temporal::<NaiveTime>(buf, row, idx);
+        decode_or_text::<PgTemporal<NaiveTime>>(row, idx, Cell::from)
     }
 }
 
-fn write_pg_numeric(buf: &mut Vec<u8>, value: &PgNumeric<Decimal>) {
-    match value {
-        PgNumeric::Finite(value) => write_str(buf, &value.to_string()),
-        PgNumeric::Special(text) => write_str(buf, text),
-    }
-}
-
-fn encode_pg_numeric(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
-    match row.try_get::<Option<PgNumeric<Decimal>>, _>(idx) {
-        Ok(Some(value)) => write_pg_numeric(buf, &value),
-        Ok(None) => write_nil(buf),
-        Err(_) => fallback_str(buf, row, idx),
-    }
-}
-
-fn encode_aggregate_numeric(
-    buf: &mut Vec<u8>,
+fn decode_aggregate_numeric(
     row: &PgRow,
     idx: usize,
     encoding: ResultEncoding,
-) -> Option<&'static str> {
+) -> (Cell, Option<&'static str>) {
     let value = match row.try_get::<Option<PgNumeric<BigDecimal>>, _>(idx) {
         Ok(Some(PgNumeric::Finite(value))) => value,
         Ok(Some(PgNumeric::Special(text))) => {
-            write_str(buf, text);
-            return Some("decimal");
+            return (Cell::DecimalText(Cow::Borrowed(text)), Some("decimal"));
         }
-        Ok(None) => {
-            write_nil(buf);
-            return None;
-        }
-        Err(_) => {
-            fallback_str(buf, row, idx);
-            return None;
-        }
+        Ok(None) => return (Cell::Null, None),
+        Err(_) => return (fallback_str(row, idx), None),
     };
-    match encoding {
+    let cell = match encoding {
         ResultEncoding::IntegerSum => {
             if let Some(value) = value.to_i64() {
-                write_i64(buf, value);
+                Cell::Int(value)
             } else {
-                write_str(buf, &value.to_string());
-                return Some("decimal");
+                return (Cell::DecimalText(value.to_string().into()), Some("decimal"));
             }
         }
         ResultEncoding::DurationMicros => {
             // A Python timedelta has whole microseconds, rounded half to even.
-            if let Some(micros) = value.with_scale_round(0, RoundingMode::HalfEven).to_i128() {
-                write_str(buf, &duration_iso(micros));
-            } else {
-                write_str(buf, &value.to_string());
+            match value.with_scale_round(0, RoundingMode::HalfEven).to_i128() {
+                Some(micros) => Cell::DurationAggregate(micros),
+                None => Cell::Str(value.to_string()),
             }
         }
-        ResultEncoding::Float => {
-            if let Some(value) = value.to_f64() {
-                write_f64(buf, value);
-            } else {
-                write_str(buf, &value.to_string());
-            }
-        }
-        ResultEncoding::Decimal => write_str(buf, &value.to_string()),
+        ResultEncoding::Float => match value.to_f64() {
+            Some(value) => Cell::Float(value),
+            None => Cell::Str(value.to_string()),
+        },
+        ResultEncoding::Decimal => Cell::DecimalText(value.to_string().into()),
         ResultEncoding::Wire | ResultEncoding::Runtime => {
             unreachable!("these encodings do not specialize the numeric result");
         }
-    }
-    None
-}
-
-fn duration_iso(micros: i128) -> String {
-    let sign = if micros < 0 { "-" } else { "" };
-    let micros = micros.unsigned_abs();
-    let seconds = micros / 1_000_000;
-    let days = seconds / 86_400;
-    let seconds = seconds % 86_400;
-    let fraction = micros % 1_000_000;
-    format!("{sign}P{days}DT{seconds}.{fraction:06}S")
-}
-
-fn encode_pg_int(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
-    let value = match row.columns()[idx].type_info().oid() {
-        Some(OID) => row
-            .try_get::<Option<Oid>, _>(idx)
-            .map(|v| v.map(|oid| u64::from(oid.0))),
-        Some(OID8) => row
-            .try_get::<Option<PgOid8>, _>(idx)
-            .map(|v| v.map(|oid| oid.0)),
-        _ => return encode_pg_signed_int(buf, row, idx),
     };
-    match value {
-        Ok(Some(v)) => write_u64(buf, v),
-        Ok(None) => write_nil(buf),
-        Err(_) => fallback_str(buf, row, idx),
+    (cell, None)
+}
+
+fn decode_pg_int(row: &PgRow, idx: usize) -> Cell {
+    match row.columns()[idx].type_info().oid() {
+        Some(OID) => decode_or_text(row, idx, |oid: Oid| Cell::UInt(u64::from(oid.0))),
+        Some(OID8) => decode_or_text(row, idx, |oid: PgOid8| Cell::UInt(oid.0)),
+        Some(INT2) => decode_or_text(row, idx, |v: i16| Cell::Int(i64::from(v))),
+        Some(INT4) => decode_or_text(row, idx, |v: i32| Cell::Int(i64::from(v))),
+        Some(INT8) => decode_or_text(row, idx, Cell::Int),
+        _ => try_cell(row, idx, Cell::Int)
+            .or_else(|_| try_cell(row, idx, |v: i32| Cell::Int(i64::from(v))))
+            .or_else(|_| try_cell(row, idx, |v: i16| Cell::Int(i64::from(v))))
+            .unwrap_or_else(|_| fallback_str(row, idx)),
     }
 }
 
-fn encode_pg_signed_int(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
-    match row.try_get::<Option<i64>, _>(idx) {
-        Ok(Some(v)) => write_i64(buf, v),
-        Ok(None) => write_nil(buf),
-        Err(_) => match row.try_get::<Option<i32>, _>(idx) {
-            Ok(Some(v)) => write_i64(buf, i64::from(v)),
-            Ok(None) => write_nil(buf),
-            Err(_) => match row.try_get::<Option<i16>, _>(idx) {
-                Ok(Some(v)) => write_i64(buf, i64::from(v)),
-                Ok(None) => write_nil(buf),
-                Err(_) => fallback_str(buf, row, idx),
-            },
-        },
-    }
-}
-
-fn fallback_str(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
-    match row.try_get::<Option<String>, _>(idx) {
-        Ok(Some(v)) => write_str(buf, &v),
-        Ok(None) | Err(_) => write_nil(buf),
-    }
-}
-
-/// Encode a native PostgreSQL array column to a msgpack array, dispatched by
-/// the element spec. Uses `Vec<Option<T>>` to handle NULL elements.
-fn encode_pg_array(buf: &mut Vec<u8>, row: &PgRow, idx: usize, item: &ColumnTypeSpec) {
-    match item {
-        ColumnTypeSpec::BigInteger => {
-            match row.columns()[idx].type_info().oid() {
-                Some(OID_ARRAY) => {
-                    return encode_pg_array_opt::<Oid>(buf, row, idx, |b, v| {
-                        write_u64(b, u64::from(v.0));
-                    })
-                }
-                Some(OID8_ARRAY) => {
-                    return encode_pg_array_opt::<PgOid8>(buf, row, idx, |b, v| write_u64(b, v.0))
-                }
-                _ => {}
-            }
-            // Try i64 (BIGINT[]), then i32 (INTEGER[]), then i16 (SMALLINT[]).
-            if !try_encode_pg_array_opt::<i64>(buf, row, idx, write_i64)
-                && !try_encode_pg_array_opt::<i32>(buf, row, idx, |b, v| {
-                    write_i64(b, i64::from(v));
-                })
-            {
-                encode_pg_array_opt::<i16>(buf, row, idx, |b, v| write_i64(b, i64::from(v)));
-            }
-        }
-        ColumnTypeSpec::Timedelta => {
-            encode_pg_array_opt::<i64>(buf, row, idx, |b, v| write_f64(b, v as f64 / 1_000_000.0));
-        }
-        ColumnTypeSpec::Double => {
-            if !try_encode_pg_array_opt::<f64>(buf, row, idx, write_f64) {
-                encode_pg_array_opt::<f32>(buf, row, idx, |b, v| write_f64(b, f64::from(v)));
-            }
-        }
-        ColumnTypeSpec::Boolean => {
-            encode_pg_array_opt::<bool>(buf, row, idx, write_bool);
-        }
-        ColumnTypeSpec::Text | ColumnTypeSpec::String { .. } => {
-            encode_pg_array_ref::<String>(buf, row, idx, |b, v| write_str(b, v));
-        }
-        ColumnTypeSpec::Enum { .. } => {
-            encode_pg_array_ref::<PgEnumText>(buf, row, idx, |b, v| write_str(b, &v.0));
-        }
-        ColumnTypeSpec::Uuid => {
-            encode_pg_array_ref::<Uuid>(buf, row, idx, |b, v| {
-                write_str(b, &v.to_string());
-            });
-        }
-        ColumnTypeSpec::Decimal { .. } => {
-            encode_pg_array_ref::<PgNumeric<Decimal>>(buf, row, idx, write_pg_numeric);
-        }
-        ColumnTypeSpec::DateTime if row.columns()[idx].type_info().name() == "TIMESTAMPTZ[]" => {
-            encode_pg_array_ref::<PgTemporal<DateTime<Utc>>>(buf, row, idx, write_pg_temporal);
-        }
-        ColumnTypeSpec::DateTime => {
-            encode_pg_array_ref::<PgTemporal<NaiveDateTime>>(buf, row, idx, write_pg_temporal);
-        }
-        ColumnTypeSpec::DateTimeUtc => {
-            encode_pg_array_ref::<PgTemporal<DateTime<Utc>>>(buf, row, idx, write_pg_temporal);
-        }
-        ColumnTypeSpec::Date => {
-            encode_pg_array_ref::<PgTemporal<NaiveDate>>(buf, row, idx, write_pg_temporal);
-        }
-        ColumnTypeSpec::Time if row.columns()[idx].type_info().name() == "TIMETZ[]" => {
-            encode_pg_array_ref::<PgTemporal<PgChronoTimeTz>>(buf, row, idx, write_pg_temporal);
-        }
-        ColumnTypeSpec::Time => {
-            encode_pg_array_ref::<PgTemporal<NaiveTime>>(buf, row, idx, write_pg_temporal);
-        }
-        ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => {
-            encode_pg_array_ref::<serde_json::Value>(buf, row, idx, write_json_value);
-        }
-        ColumnTypeSpec::Blob => {
-            encode_pg_array_ref::<Vec<u8>>(buf, row, idx, |b, v| write_bin(b, v));
-        }
-        // Unknown / nested element types — JSON array fallback.
-        ColumnTypeSpec::Unknown | ColumnTypeSpec::Array { .. } => {
-            match row.try_get::<Option<serde_json::Value>, _>(idx) {
-                Ok(Some(v)) => write_json_value(buf, &v),
-                Ok(None) => write_nil(buf),
-                Err(_) => fallback_str(buf, row, idx),
-            }
-        }
-    }
-}
-
-/// Try to encode `Vec<Option<T>>` where T is Copy. Returns false on type mismatch.
-fn try_encode_pg_array_opt<T>(
-    buf: &mut Vec<u8>,
+#[inline]
+fn try_cell<T>(
     row: &PgRow,
     idx: usize,
-    write_fn: impl Fn(&mut Vec<u8>, T),
-) -> bool
+    into_cell: impl FnOnce(T) -> Cell,
+) -> Result<Cell, sqlx::Error>
 where
-    T: sqlx::Type<sqlx::Postgres> + for<'r> sqlx::Decode<'r, sqlx::Postgres> + Copy,
-    Vec<Option<T>>: sqlx::Type<sqlx::Postgres> + for<'r> sqlx::Decode<'r, sqlx::Postgres>,
+    T: Type<Postgres> + for<'r> Decode<'r, Postgres>,
 {
-    match row.try_get::<Option<Vec<Option<T>>>, _>(idx) {
-        Ok(Some(v)) => {
-            write_array_len(buf, v.len() as u32);
-            for item in &v {
-                match item {
-                    Some(val) => write_fn(buf, *val),
-                    None => write_nil(buf),
-                }
-            }
-            true
-        }
-        Ok(None) => {
-            write_nil(buf);
-            true
-        }
-        Err(_) => false,
-    }
+    row.try_get::<Option<T>, _>(idx)
+        .map(|value| value.map_or(Cell::Null, into_cell))
 }
 
-/// Helper: encode `Vec<Option<T>>` where T is Copy (i64, f64, bool).
-/// Handles NULL elements within arrays.
-fn encode_pg_array_opt<T>(
-    buf: &mut Vec<u8>,
-    row: &PgRow,
-    idx: usize,
-    write_fn: impl Fn(&mut Vec<u8>, T),
-) where
-    T: sqlx::Type<sqlx::Postgres> + for<'r> sqlx::Decode<'r, sqlx::Postgres> + Copy,
-    Vec<Option<T>>: sqlx::Type<sqlx::Postgres> + for<'r> sqlx::Decode<'r, sqlx::Postgres>,
+#[inline]
+fn decode_or_text<T>(row: &PgRow, idx: usize, into_cell: impl FnOnce(T) -> Cell) -> Cell
+where
+    T: Type<Postgres> + for<'r> Decode<'r, Postgres>,
 {
-    match row.try_get::<Option<Vec<Option<T>>>, _>(idx) {
-        Ok(Some(v)) => {
-            write_array_len(buf, v.len() as u32);
-            for item in &v {
-                match item {
-                    Some(val) => write_fn(buf, *val),
-                    None => write_nil(buf),
-                }
-            }
-        }
-        Ok(None) => write_nil(buf),
-        Err(_) => write_nil(buf),
-    }
+    try_cell(row, idx, into_cell).unwrap_or_else(|_| fallback_str(row, idx))
 }
 
-/// Helper: encode `Vec<Option<T>>` where T is not Copy (String, Uuid, etc.).
-/// Handles NULL elements within arrays.
-fn encode_pg_array_ref<T>(
-    buf: &mut Vec<u8>,
+fn fallback_str(row: &PgRow, idx: usize) -> Cell {
+    try_cell(row, idx, Cell::Str).unwrap_or(Cell::Null)
+}
+
+/// Decode a PostgreSQL array, retaining NULL elements.
+fn decode_pg_array(row: &PgRow, idx: usize, item: &ColumnTypeSpec) -> Cell {
+    let typed = match item {
+        ColumnTypeSpec::BigInteger => match row.columns()[idx].type_info().oid() {
+            Some(OID_ARRAY) => typed_array(row, idx, |values| {
+                ArrayValues::U32(map_array(values, |v: Oid| v.0))
+            }),
+            Some(OID8_ARRAY) => typed_array(row, idx, |values| {
+                ArrayValues::U64(map_array(values, |v: PgOid8| v.0))
+            }),
+            _ => typed_array(row, idx, ArrayValues::I64)
+                .or_else(|_| typed_array(row, idx, ArrayValues::I32))
+                .or_else(|_| typed_array(row, idx, ArrayValues::I16)),
+        },
+        ColumnTypeSpec::Timedelta => typed_array(row, idx, ArrayValues::Duration),
+        ColumnTypeSpec::Double => typed_array(row, idx, ArrayValues::F64)
+            .or_else(|_| typed_array(row, idx, ArrayValues::F32)),
+        ColumnTypeSpec::Boolean => typed_array(row, idx, ArrayValues::Bool),
+        ColumnTypeSpec::Text | ColumnTypeSpec::String { .. } => {
+            typed_array(row, idx, ArrayValues::Str)
+        }
+        ColumnTypeSpec::Enum { .. } => typed_array(row, idx, |values| {
+            ArrayValues::Str(map_array(values, |v: PgEnumText| v.0))
+        }),
+        ColumnTypeSpec::Uuid => typed_array(row, idx, ArrayValues::Uuid),
+        ColumnTypeSpec::Decimal { .. } => typed_array(row, idx, ArrayValues::Decimal),
+        ColumnTypeSpec::DateTime if row.columns()[idx].type_info().name() != "TIMESTAMPTZ[]" => {
+            typed_array(row, idx, ArrayValues::DateTime)
+        }
+        ColumnTypeSpec::DateTime | ColumnTypeSpec::DateTimeUtc => {
+            typed_array(row, idx, ArrayValues::DateTimeUtc)
+        }
+        ColumnTypeSpec::Date => typed_array(row, idx, ArrayValues::Date),
+        ColumnTypeSpec::Time if row.columns()[idx].type_info().name() == "TIMETZ[]" => {
+            typed_array(row, idx, ArrayValues::TimeTz)
+        }
+        ColumnTypeSpec::Time => typed_array(row, idx, ArrayValues::Time),
+        ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => {
+            typed_array(row, idx, ArrayValues::Json)
+        }
+        ColumnTypeSpec::Blob => typed_array(row, idx, ArrayValues::Bytes),
+        // Unknown / nested element types use the JSON fallback.
+        ColumnTypeSpec::Unknown | ColumnTypeSpec::Array { .. } => {
+            return decode_or_text(row, idx, Cell::Json);
+        }
+    };
+    typed.unwrap_or(Cell::Null)
+}
+
+fn typed_array<T>(
     row: &PgRow,
     idx: usize,
-    write_fn: impl Fn(&mut Vec<u8>, &T),
-) where
-    T: sqlx::Type<sqlx::Postgres> + for<'r> sqlx::Decode<'r, sqlx::Postgres>,
-    Vec<Option<T>>: sqlx::Type<sqlx::Postgres> + for<'r> sqlx::Decode<'r, sqlx::Postgres>,
+    into_values: impl FnOnce(Vec<Option<T>>) -> ArrayValues,
+) -> Result<Cell, sqlx::Error>
+where
+    Vec<Option<T>>: Type<Postgres> + for<'r> Decode<'r, Postgres>,
 {
-    match row.try_get::<Option<Vec<Option<T>>>, _>(idx) {
-        Ok(Some(v)) => {
-            write_array_len(buf, v.len() as u32);
-            for item in &v {
-                match item {
-                    Some(val) => write_fn(buf, val),
-                    None => write_nil(buf),
-                }
-            }
-        }
-        Ok(None) => write_nil(buf),
-        Err(_) => write_nil(buf),
-    }
+    try_cell(row, idx, |values| {
+        Cell::Array(Box::new(into_values(values)))
+    })
+}
+
+/// Unwrap decoded newtypes in place when their nullable layouts match.
+fn map_array<T, U>(values: Vec<Option<T>>, unwrap: impl Fn(T) -> U) -> Vec<Option<U>> {
+    values.into_iter().map(|value| value.map(&unwrap)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::convert::encoder::{encode_stream, RelationInfo, ResultOptions};
+    use crate::convert::encoder::{encode_stream, write_cell, RelationInfo, ResultOptions};
     use rmpv::Value;
     use std::collections::{BTreeSet, HashMap};
 
@@ -788,12 +512,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
-    async fn postgres_native_arrays_and_numeric_aggregate_encodings() {
-        let url = std::env::var("OXYDE_TEST_POSTGRES_URL").unwrap();
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        let sql = "
+    const NATIVE_ARRAYS_AND_NUMERIC_AGGREGATES: &str = "
             SELECT ARRAY[1::int2, NULL] AS smalls, ARRAY[2::int4] AS ints,
                    ARRAY[3::int8] AS bigs, ARRAY[1.25::float4] AS reals,
                    ARRAY[2.5::float8] AS doubles, ARRAY[true] AS flags,
@@ -803,6 +522,219 @@ mod tests {
             FROM (VALUES (7::numeric), (9223372036854775808::numeric)) AS totals(total)
             ORDER BY total
         ";
+
+    #[test]
+    fn newtype_array_maps_reuse_the_source_buffer() {
+        fn assert_in_place<T, U: std::fmt::Debug + PartialEq>(
+            mut values: Vec<Option<T>>,
+            unwrap: impl Fn(T) -> U,
+            expected: U,
+        ) {
+            values.reserve(7);
+            let ptr = values.as_ptr().cast::<()>();
+            let capacity = values.capacity();
+            let mapped = map_array(values, unwrap);
+            assert_eq!(mapped.as_ptr().cast::<()>(), ptr);
+            assert_eq!(mapped.capacity(), capacity);
+            assert_eq!(mapped, [Some(expected), None]);
+        }
+
+        assert_in_place(vec![Some(Oid(u32::MAX)), None], |v| v.0, u32::MAX);
+        assert_in_place(vec![Some(PgOid8(u64::MAX)), None], |v| v.0, u64::MAX);
+        assert_in_place(
+            vec![Some(PgEnumText("ready".into())), None],
+            |v| v.0,
+            String::from("ready"),
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn postgres_native_arrays_use_typed_storage() {
+        use ColumnTypeSpec as Spec;
+
+        let url = std::env::var("OXYDE_TEST_POSTGRES_URL").unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let row = sqlx::query(
+            r#"SELECT ARRAY[1::int2, NULL] AS smalls, ARRAY[2::int4] AS ints,
+                      ARRAY[3::int8] AS bigs, ARRAY[1.25::float4] AS reals,
+                      ARRAY[2.5::float8] AS doubles, ARRAY[true] AS flags,
+                      ARRAY['4294967295'::oid, NULL] AS oids,
+                      ARRAY['a'::text, NULL] AS texts, ARRAY['b'::varchar] AS varchars,
+                      ARRAY[decode('00ff', 'hex'), NULL] AS blobs,
+                      ARRAY[12.34::numeric, 'NaN', NULL] AS decimals,
+                      ARRAY['{"ok":true}'::jsonb, 'null', NULL] AS objects,
+                      ARRAY['2026-11-26 13:04:05'::timestamp, 'infinity', NULL] AS stamps,
+                      ARRAY['2026-11-26 13:04:05+00'::timestamptz, 'infinity', NULL] AS utc_stamps,
+                      ARRAY['2026-11-26'::date, 'infinity', NULL] AS dates,
+                      ARRAY['13:04:05'::time, '24:00:00', NULL] AS times,
+                      ARRAY['12:30:00+02'::timetz, '24:00:00+00', NULL] AS offset_times,
+                      ARRAY[1500000::int8, NULL] AS durations,
+                      ARRAY['11111111-2222-4333-8444-555555555555'::uuid, NULL] AS uuids"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let specs = HashMap::from(
+            [
+                ("blobs", Spec::Blob),
+                ("objects", Spec::JsonBinary),
+                ("durations", Spec::Timedelta),
+            ]
+            .map(|(name, item)| {
+                (
+                    name.into(),
+                    Spec::Array {
+                        item: Box::new(item),
+                    },
+                )
+            }),
+        );
+        let cases = [
+            (ArrayValues::I16(vec![]), vec![Value::from(1), Value::Nil]),
+            (ArrayValues::I32(vec![]), vec![Value::from(2)]),
+            (ArrayValues::I64(vec![]), vec![Value::from(3)]),
+            (ArrayValues::F32(vec![]), vec![Value::F64(1.25)]),
+            (ArrayValues::F64(vec![]), vec![Value::F64(2.5)]),
+            (ArrayValues::Bool(vec![]), vec![Value::from(true)]),
+            (
+                ArrayValues::U32(vec![]),
+                vec![Value::from(u32::MAX), Value::Nil],
+            ),
+            (ArrayValues::Str(vec![]), vec![Value::from("a"), Value::Nil]),
+            (ArrayValues::Str(vec![]), vec![Value::from("b")]),
+            (
+                ArrayValues::Bytes(vec![]),
+                vec![Value::Binary(vec![0, 255]), Value::Nil],
+            ),
+            (
+                ArrayValues::Decimal(vec![]),
+                vec![Value::from("12.34"), Value::from("NaN"), Value::Nil],
+            ),
+            (
+                ArrayValues::Json(vec![]),
+                vec![
+                    Value::Map(vec![(Value::from("ok"), Value::from(true))]),
+                    Value::Nil,
+                    Value::Nil,
+                ],
+            ),
+            (
+                ArrayValues::DateTime(vec![]),
+                vec![
+                    Value::from("2026-11-26T13:04:05"),
+                    Value::from("infinity"),
+                    Value::Nil,
+                ],
+            ),
+            (
+                ArrayValues::DateTimeUtc(vec![]),
+                vec![
+                    Value::from("2026-11-26T13:04:05+00:00"),
+                    Value::from("infinity"),
+                    Value::Nil,
+                ],
+            ),
+            (
+                ArrayValues::Date(vec![]),
+                vec![
+                    Value::from("2026-11-26"),
+                    Value::from("infinity"),
+                    Value::Nil,
+                ],
+            ),
+            (
+                ArrayValues::Time(vec![]),
+                vec![Value::from("13:04:05"), Value::from("24:00:00"), Value::Nil],
+            ),
+            (
+                ArrayValues::TimeTz(vec![]),
+                vec![
+                    Value::from("12:30:00+02:00"),
+                    Value::from("24:00:00+00:00"),
+                    Value::Nil,
+                ],
+            ),
+            (
+                ArrayValues::Duration(vec![]),
+                vec![Value::F64(1.5), Value::Nil],
+            ),
+            (
+                ArrayValues::Uuid(vec![]),
+                vec![
+                    Value::from("11111111-2222-4333-8444-555555555555"),
+                    Value::Nil,
+                ],
+            ),
+        ];
+        let columns = PgEncoder::extract_columns(&row, Some(&specs));
+        assert_eq!(columns.len(), cases.len());
+        for (idx, (column, (variant, expected))) in columns.iter().zip(cases).enumerate() {
+            let (cell, _) = PgEncoder::decode_cell(&row, idx, column);
+            let Cell::Array(values) = &cell else {
+                panic!("{} decoded as {cell:?}", column.name);
+            };
+            assert_eq!(
+                std::mem::discriminant(values.as_ref()),
+                std::mem::discriminant(&variant),
+                "{} decoded as {values:?}",
+                column.name,
+            );
+            let mut bytes = Vec::new();
+            write_cell(&mut bytes, &cell);
+            assert_eq!(
+                rmp_serde::from_slice::<Value>(&bytes).unwrap(),
+                Value::Array(expected),
+                "{}",
+                column.name
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn postgres_enum_array_uses_typed_storage() {
+        use sqlx::{Connection, Executor};
+
+        let url = std::env::var("OXYDE_TEST_POSTGRES_URL").unwrap();
+        let mut conn = sqlx::PgConnection::connect(&url).await.unwrap();
+        let mut tx = conn.begin().await.unwrap();
+        tx.execute("CREATE TYPE oxyde_array_status AS ENUM ('ready', 'done')")
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT ARRAY['ready'::oxyde_array_status, NULL, 'done'] AS items")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let specs = HashMap::from([(
+            "items".into(),
+            ColumnTypeSpec::Array {
+                item: Box::new(ColumnTypeSpec::Enum {
+                    name: "oxyde_array_status".into(),
+                    values: vec!["ready".into(), "done".into()],
+                }),
+            },
+        )]);
+        let columns = PgEncoder::extract_columns(&row, Some(&specs));
+        let (cell, _) = PgEncoder::decode_cell(&row, 0, &columns[0]);
+        assert!(
+            matches!(&cell, Cell::Array(values) if matches!(values.as_ref(), ArrayValues::Str(_))),
+            "{cell:?}"
+        );
+        let mut bytes = Vec::new();
+        write_cell(&mut bytes, &cell);
+        assert_eq!(
+            rmp_serde::from_slice::<Value>(&bytes).unwrap(),
+            Value::Array(vec![Value::from("ready"), Value::Nil, Value::from("done")]),
+        );
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn postgres_native_arrays_and_numeric_aggregate_encodings() {
+        let url = std::env::var("OXYDE_TEST_POSTGRES_URL").unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
         let encodings = HashMap::from([
             ("total".into(), ResultEncoding::IntegerSum),
             ("small_total".into(), ResultEncoding::IntegerSum),
@@ -811,7 +743,7 @@ mod tests {
             ("price".into(), ResultEncoding::Decimal),
         ]);
         let (bytes, count) = encode_stream::<PgEncoder, _>(
-            sqlx::query(sql).fetch(&pool),
+            sqlx::query(NATIVE_ARRAYS_AND_NUMERIC_AGGREGATES).fetch(&pool),
             None,
             None,
             ResultOptions {
@@ -864,10 +796,20 @@ mod tests {
 
     #[test]
     fn duration_iso_keeps_adjacent_large_values_and_negatives() {
-        assert_eq!(duration_iso(1 << 53), "P104249DT85654.740992S");
-        assert_eq!(duration_iso((1 << 53) + 1), "P104249DT85654.740993S");
-        assert_eq!(duration_iso(-((1 << 53) + 1)), "-P104249DT85654.740993S");
-        assert_eq!(duration_iso(-1), "-P0DT0.000001S");
+        for (micros, expected) in [
+            (1 << 53, "P104249DT85654.740992S"),
+            ((1 << 53) + 1, "P104249DT85654.740993S"),
+            (-((1 << 53) + 1), "-P104249DT85654.740993S"),
+            (-1, "-P0DT0.000001S"),
+        ] {
+            assert_eq!(
+                Cell::DurationAggregate(micros)
+                    .wire_text()
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
@@ -946,6 +888,12 @@ mod tests {
             ("missing".into(), Spec::BigInteger),
         ]);
         for types in [Some(&col_types), None] {
+            let columns = PgEncoder::extract_columns(&row, types);
+            let (cell, _) = PgEncoder::decode_cell(&row, 1, &columns[1]);
+            assert!(
+                matches!(&cell, Cell::Array(values) if matches!(values.as_ref(), ArrayValues::U64(_))),
+                "{cell:?}"
+            );
             let (bytes, count) =
                 encode_stream::<PgEncoder, _>(sqlx::query(sql).fetch(&mut *tx), types, None, true)
                     .await

@@ -160,6 +160,8 @@ pub use convert::encoder::{
     RelationInfo, ResultEncoding, ResultOptions,
 };
 
+pub use convert::{ArrayItem, ArrayValues, Cell, PgNumeric, PgTemporal};
+
 // INSERT RETURNING
 pub use execute::insert::{execute_insert_returning, execute_insert_returning_in_transaction};
 
