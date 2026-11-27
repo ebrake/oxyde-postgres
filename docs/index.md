@@ -124,7 +124,7 @@ async with transaction.atomic():
 
 | Database   | Min Version | Status | Notes |
 |------------|-------------|--------|-------|
-| PostgreSQL | 18+ | Full | RETURNING, UPSERT, FOR UPDATE/SHARE, JSONB, Arrays |
+| PostgreSQL | 18+ | Tested on 18 and 19 | RETURNING, UPSERT, FOR UPDATE/SHARE, JSONB, Arrays |
 
 
 ## Ecosystem

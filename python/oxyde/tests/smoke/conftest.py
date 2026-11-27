@@ -1,4 +1,4 @@
-"""Smoke test fixtures — real PostgreSQL 18 database."""
+"""Smoke test fixtures for a real PostgreSQL database."""
 from __future__ import annotations
 
 import uuid
@@ -10,7 +10,7 @@ from oxyde import AsyncDatabase, disconnect_all
 
 
 def _prepare_db(url: str) -> None:
-    """Create schema and seed data via psycopg2 on PostgreSQL 18."""
+    """Create schema and seed data via psycopg2."""
     conn = psycopg2.connect(url)
     cur = conn.cursor()
 

@@ -1,4 +1,4 @@
-"""PostgreSQL 18 integration fixtures with isolated schemas."""
+"""PostgreSQL integration fixtures with isolated schemas."""
 from __future__ import annotations
 
 import uuid

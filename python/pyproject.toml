@@ -112,6 +112,10 @@ testpaths = ["oxyde/tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "requires_pg19: requires PostgreSQL 19 or newer",
+    "requires_pre_pg19: requires PostgreSQL earlier than 19",
+]
 
 # Coverage configuration
 [tool.coverage.run]

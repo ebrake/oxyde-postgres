@@ -2,7 +2,7 @@
 
 Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.com/mr-fatalyst/oxyde): a type-safe, Pydantic-centric asynchronous ORM with a high-performance Rust core designed for clarity, speed, and reliability. It builds on Oxyde's great work and optimizes it for PostgreSQL with bug fixes and PostgreSQL-specific features.
 
-**Requires PostgreSQL 18+ and Python 3.15+.** The Rust core checks the server version when connecting. Both `postgres://` and `postgresql://` connection URLs are supported.
+**Requires PostgreSQL 18+ and Python 3.15+.** CI tests PostgreSQL 18 and 19. The Rust core checks the server version when connecting. Both `postgres://` and `postgresql://` connection URLs are supported.
 
 ## Features
 

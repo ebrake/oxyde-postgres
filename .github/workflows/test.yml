@@ -96,6 +96,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      postgres-19:
+        image: postgres:19-alpine
+        env:
+          POSTGRES_USER: oxyde
+          POSTGRES_PASSWORD: oxyde
+          POSTGRES_DB: oxyde
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U oxyde"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -113,9 +126,15 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --no-default-features
 
-      - name: PostgreSQL driver regressions
+      - name: PostgreSQL 18 driver regressions
         env:
           OXYDE_TEST_POSTGRES_URL: postgresql://oxyde:oxyde@localhost:5432/oxyde
+          OXYDE_TEST_OLD_POSTGRES_URL: postgresql://oxyde:oxyde@localhost:5433/oxyde
+        run: cargo test -p oxyde-driver --lib --tests -- --ignored
+
+      - name: PostgreSQL 19 driver regressions
+        env:
+          OXYDE_TEST_POSTGRES_URL: postgresql://oxyde:oxyde@localhost:5434/oxyde
           OXYDE_TEST_OLD_POSTGRES_URL: postgresql://oxyde:oxyde@localhost:5433/oxyde
         run: cargo test -p oxyde-driver --lib --tests -- --ignored
 
@@ -124,6 +143,11 @@ jobs:
     needs: [changes, lint]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        postgres: ["18", "19"]
+    env:
+      OXYDE_TEST_POSTGRES_IMAGE: postgres:${{ matrix.postgres }}-alpine
     steps:
       - uses: actions/checkout@v6.0.2
 
