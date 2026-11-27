@@ -10,17 +10,17 @@ use oxyde_codec::ColumnTypeSpec;
 use rust_decimal::Decimal;
 use sqlx::{
     error::BoxDynError,
-    postgres::{PgHasArrayType, PgRow, PgTypeInfo, PgTypeKind, PgValueRef, Postgres},
+    postgres::{types::Oid, PgHasArrayType, PgRow, PgTypeInfo, PgTypeKind, PgValueRef, Postgres},
     Column, Decode, Row, Type, TypeInfo,
 };
 use uuid::Uuid;
 
 use super::encoder::{
     write_array_len, write_bin, write_bool, write_f64, write_i64, write_json_value, write_nil,
-    write_str, CellEncoder, ColumnMeta, ResultEncoding,
+    write_str, write_u64, CellEncoder, ColumnMeta, ResultEncoding,
 };
 
-use super::postgres_types::{PgChronoTimeTz, PgNumeric, PgTemporal};
+use super::postgres_types::{PgChronoTimeTz, PgNumeric, PgOid8, PgTemporal};
 
 pub struct PgEncoder;
 
@@ -217,6 +217,7 @@ impl CellEncoder for PgEncoder {
                 Ok(None) => write_nil(buf),
                 Err(_) => fallback_str(buf, row, idx),
             },
+            "OID" | "OID8" => encode_pg_int(buf, row, idx),
             name if name.contains("INT") => encode_pg_int(buf, row, idx),
             "FLOAT4" => match row.try_get::<Option<f32>, _>(idx) {
                 Ok(Some(v)) => write_f64(buf, f64::from(v)),
@@ -274,7 +275,7 @@ fn pg_array_item(db_type: &str) -> Option<ColumnTypeSpec> {
         "TIMESTAMPTZ[]" => Spec::DateTimeUtc,
         "DATE[]" => Spec::Date,
         "TIME[]" | "TIMETZ[]" => Spec::Time,
-        "INT2[]" | "INT4[]" | "INT8[]" => Spec::BigInteger,
+        "INT2[]" | "INT4[]" | "INT8[]" | "OID[]" | "OID8[]" => Spec::BigInteger,
         "FLOAT4[]" | "FLOAT8[]" => Spec::Double,
         "BOOL[]" => Spec::Boolean,
         "TEXT[]" | "VARCHAR[]" => Spec::Text,
@@ -425,6 +426,23 @@ fn duration_iso(micros: i128) -> String {
 }
 
 fn encode_pg_int(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
+    let value = match row.columns()[idx].type_info().name() {
+        "OID" => row
+            .try_get::<Option<Oid>, _>(idx)
+            .map(|v| v.map(|oid| u64::from(oid.0))),
+        "oid8" => row
+            .try_get::<Option<PgOid8>, _>(idx)
+            .map(|v| v.map(|oid| oid.0)),
+        _ => return encode_pg_signed_int(buf, row, idx),
+    };
+    match value {
+        Ok(Some(v)) => write_u64(buf, v),
+        Ok(None) => write_nil(buf),
+        Err(_) => fallback_str(buf, row, idx),
+    }
+}
+
+fn encode_pg_signed_int(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
     match row.try_get::<Option<i64>, _>(idx) {
         Ok(Some(v)) => write_i64(buf, v),
         Ok(None) => write_nil(buf),
@@ -452,6 +470,17 @@ fn fallback_str(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
 fn encode_pg_array(buf: &mut Vec<u8>, row: &PgRow, idx: usize, item: &ColumnTypeSpec) {
     match item {
         ColumnTypeSpec::BigInteger => {
+            match row.columns()[idx].type_info().name() {
+                "OID[]" => {
+                    return encode_pg_array_opt::<Oid>(buf, row, idx, |b, v| {
+                        write_u64(b, u64::from(v.0));
+                    })
+                }
+                "oid8[]" => {
+                    return encode_pg_array_opt::<PgOid8>(buf, row, idx, |b, v| write_u64(b, v.0))
+                }
+                _ => {}
+            }
             // Try i64 (BIGINT[]), then i32 (INTEGER[]), then i16 (SMALLINT[]).
             if !try_encode_pg_array_opt::<i64>(buf, row, idx, write_i64)
                 && !try_encode_pg_array_opt::<i32>(buf, row, idx, |b, v| {
@@ -970,6 +999,26 @@ mod tests {
                 Value::F64(1.5),
             ),
         ];
+        let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int4")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let oid_cases = [
+            ("1::oid", Value::from(1u64)),
+            ("'4294967295'::oid", Value::from(u64::from(u32::MAX))),
+            ("NULL::oid", Value::Nil),
+        ];
+        let oid8_case =
+            (version >= 190_000).then(|| ("'18446744073709551615'::oid8", Value::from(u64::MAX)));
+        let cases = cases
+            .into_iter()
+            .map(|(spec, kind, literal, value)| (spec, Some(kind), literal, value))
+            .chain(
+                oid_cases
+                    .into_iter()
+                    .chain(oid8_case)
+                    .map(|(literal, value)| (Spec::BigInteger, None, literal, value)),
+            );
         for (spec, kind, literal, value) in cases {
             let sql = format!("SELECT {literal} AS scalar, ARRAY[{literal}, NULL] AS items");
             let col_types = HashMap::from([
@@ -982,7 +1031,7 @@ mod tests {
                 ),
             ]);
             for types in [Some(&col_types), None] {
-                if types.is_none() && kind == "timedelta" {
+                if types.is_none() && kind == Some("timedelta") {
                     continue;
                 }
                 let (bytes, count) = encode_stream::<PgEncoder, _>(
@@ -1004,7 +1053,10 @@ mod tests {
                             Value::Array(vec![value.clone(), Value::Nil])
                         ])]),
                         Value::Nil,
-                        Value::Array(vec![Value::from(kind), Value::from(format!("{kind}[]"))]),
+                        kind.map_or(Value::Nil, |kind| Value::Array(vec![
+                            Value::from(kind),
+                            Value::from(format!("{kind}[]"))
+                        ])),
                     ]
                 );
             }

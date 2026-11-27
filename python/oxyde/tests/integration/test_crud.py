@@ -30,6 +30,31 @@ from .conftest import (
 )
 
 
+@pytest.mark.requires_pg19
+@pytest.mark.asyncio
+async def test_oid8_result_preserves_unsigned_range(db):
+    class ObjectIdentifier(Model):
+        id: int = Field(db_pk=True)
+        object_id: int = Field(db_type="oid8")
+
+        class Meta:
+            is_table = True
+            table_name = "object_identifiers"
+
+    await execute_raw(
+        "CREATE TABLE object_identifiers (id bigint PRIMARY KEY, object_id oid8 NOT NULL)",
+        using=db.name,
+    )
+    value = 2**64 - 1
+    assert await execute_raw(
+        "INSERT INTO object_identifiers VALUES (1, '18446744073709551615'::oid8) "
+        "RETURNING object_id",
+        using=db.name,
+    ) == [{"object_id": value}]
+    obj = await ObjectIdentifier.objects.get(id=1, using=db.name)
+    assert obj.object_id == value
+
+
 @pytest.mark.asyncio
 async def test_create_post_with_related_author(db):
     author = await create_author(db)
