@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — Bundled Rust core and PostgreSQL 19 features
 
 - `oxyde-postgres` now bundles the Rust core as `oxyde._oxyde_core` so the
   extension and Python code always ship together. After upgrading, run
@@ -12,6 +12,7 @@
 - PostgreSQL 19 adds scan I/O statistics via `explain(analyze=True, io=True)`
   and single-statement `get_or_create_atomic()` via `ON CONFLICT DO SELECT`.
   Both features raise `UnsupportedServerVersionError` on PostgreSQL 18.
+- Many-to-many prefetch deduplicates target IDs in linear time.
 - The Rust core converts write values for `create()`, `bulk_create()`,
   `update()`, `bulk_update()`, and upserts. It handles strings, numbers,
   bytes, dates and times, UUIDs, and decimals directly. Expressions,
