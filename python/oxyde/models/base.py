@@ -582,6 +582,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
 
         if not is_table:
             cls._db_meta.field_metadata = {}
+            cls._db_meta.column_map = {}
             cls._db_meta.relations = {}
 
         if relation_descriptors and is_table:
@@ -765,6 +766,7 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
     def _parse_field_tags(cls) -> None:
         """Parse Annotated field tags and store them in metadata."""
         cls._db_meta.field_metadata = {}
+        cls._db_meta.column_map = {}
         cls._db_meta.fk_links = {}
         cls._db_meta.virtual_fields = frozenset()
         if not cls._is_table:
@@ -951,6 +953,11 @@ class Model(BaseModel, metaclass=OxydeModelMeta):
             for name, meta in cls._db_meta.field_metadata.items()
             if not is_column_field(meta)
         )
+        cls._db_meta.column_map = {
+            name: meta.db_column
+            for name, meta in cls._db_meta.field_metadata.items()
+            if meta.db_column != name
+        }
 
     @classmethod
     def get_table_name(cls) -> str:

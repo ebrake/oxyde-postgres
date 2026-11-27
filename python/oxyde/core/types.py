@@ -46,6 +46,10 @@ TYPE_REGISTRY: dict[type, TypeDescriptor] = {
     dict: TypeDescriptor("generic", lambda v: v),
 }
 
+# The core writes a value natively only while its type keeps the descriptor
+# recorded here; an application's replacement goes through serialize_value.
+_BUILTIN_TYPE_REGISTRY: dict[type, TypeDescriptor] = dict(TYPE_REGISTRY)
+
 
 def serialize_value(value: Any) -> Any:
     """Serialize a value for msgpack/IR using TYPE_REGISTRY.

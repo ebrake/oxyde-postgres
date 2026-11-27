@@ -29,6 +29,7 @@
 //! ## Query Execution
 //! - `execute(pool_name, ir_bytes)` → Coroutine[bytes]
 //! - `execute_in_transaction(pool_name, tx_id, ir_bytes)` → Coroutine[bytes]
+//! - `serialize_column_values(values, columns, fallback, registry, builtins, map_first=True)` → dict
 //!
 //! ## Transactions
 //! - `begin_transaction(pool_name)` → Coroutine[int]
@@ -80,6 +81,7 @@ mod errors;
 mod execute;
 mod migration;
 mod pool;
+mod serialize;
 mod types;
 
 use pyo3::prelude::*;
@@ -97,6 +99,7 @@ fn oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pool::close_pool, m)?)?;
     m.add_function(wrap_pyfunction!(pool::close_all_pools, m)?)?;
     m.add_function(wrap_pyfunction!(execute::execute, m)?)?;
+    m.add_function(wrap_pyfunction!(serialize::serialize_column_values, m)?)?;
     m.add_function(wrap_pyfunction!(pool::begin_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(pool::commit_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(pool::rollback_transaction, m)?)?;
