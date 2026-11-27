@@ -20,7 +20,9 @@ use super::encoder::{
     write_str, write_u64, CellEncoder, ColumnMeta, ResultEncoding,
 };
 
-use super::postgres_types::{PgChronoTimeTz, PgNumeric, PgOid8, PgTemporal};
+use super::postgres_types::{
+    PgChronoTimeTz, PgNumeric, PgOid8, PgTemporal, OID, OID8, OID8_ARRAY, OID_ARRAY,
+};
 
 pub struct PgEncoder;
 
@@ -207,6 +209,14 @@ impl CellEncoder for PgEncoder {
     }
 
     fn encode_by_db_type(buf: &mut Vec<u8>, row: &PgRow, idx: usize, db_type: &str) {
+        // oid8's display name depends on search_path; dispatch it by catalog OID.
+        match row.columns()[idx].type_info().oid() {
+            Some(OID8) => return encode_pg_int(buf, row, idx),
+            Some(OID8_ARRAY) => {
+                return encode_pg_array(buf, row, idx, &ColumnTypeSpec::BigInteger);
+            }
+            _ => {}
+        }
         if let Some(item) = pg_array_item(db_type) {
             encode_pg_array(buf, row, idx, &item);
             return;
@@ -217,7 +227,7 @@ impl CellEncoder for PgEncoder {
                 Ok(None) => write_nil(buf),
                 Err(_) => fallback_str(buf, row, idx),
             },
-            "OID" | "OID8" => encode_pg_int(buf, row, idx),
+            "OID" => encode_pg_int(buf, row, idx),
             name if name.contains("INT") => encode_pg_int(buf, row, idx),
             "FLOAT4" => match row.try_get::<Option<f32>, _>(idx) {
                 Ok(Some(v)) => write_f64(buf, f64::from(v)),
@@ -275,7 +285,7 @@ fn pg_array_item(db_type: &str) -> Option<ColumnTypeSpec> {
         "TIMESTAMPTZ[]" => Spec::DateTimeUtc,
         "DATE[]" => Spec::Date,
         "TIME[]" | "TIMETZ[]" => Spec::Time,
-        "INT2[]" | "INT4[]" | "INT8[]" | "OID[]" | "OID8[]" => Spec::BigInteger,
+        "INT2[]" | "INT4[]" | "INT8[]" | "OID[]" => Spec::BigInteger,
         "FLOAT4[]" | "FLOAT8[]" => Spec::Double,
         "BOOL[]" => Spec::Boolean,
         "TEXT[]" | "VARCHAR[]" => Spec::Text,
@@ -426,11 +436,11 @@ fn duration_iso(micros: i128) -> String {
 }
 
 fn encode_pg_int(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
-    let value = match row.columns()[idx].type_info().name() {
-        "OID" => row
+    let value = match row.columns()[idx].type_info().oid() {
+        Some(OID) => row
             .try_get::<Option<Oid>, _>(idx)
             .map(|v| v.map(|oid| u64::from(oid.0))),
-        "oid8" => row
+        Some(OID8) => row
             .try_get::<Option<PgOid8>, _>(idx)
             .map(|v| v.map(|oid| oid.0)),
         _ => return encode_pg_signed_int(buf, row, idx),
@@ -470,13 +480,13 @@ fn fallback_str(buf: &mut Vec<u8>, row: &PgRow, idx: usize) {
 fn encode_pg_array(buf: &mut Vec<u8>, row: &PgRow, idx: usize, item: &ColumnTypeSpec) {
     match item {
         ColumnTypeSpec::BigInteger => {
-            match row.columns()[idx].type_info().name() {
-                "OID[]" => {
+            match row.columns()[idx].type_info().oid() {
+                Some(OID_ARRAY) => {
                     return encode_pg_array_opt::<Oid>(buf, row, idx, |b, v| {
                         write_u64(b, u64::from(v.0));
                     })
                 }
-                "oid8[]" => {
+                Some(OID8_ARRAY) => {
                     return encode_pg_array_opt::<PgOid8>(buf, row, idx, |b, v| write_u64(b, v.0))
                 }
                 _ => {}
@@ -889,6 +899,71 @@ mod tests {
             Value::Array(vec![Value::Array(vec![Value::from("Infinity"); 3])])
         );
         assert_eq!(result[3], Value::Array(vec![Value::from("decimal"); 3]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn postgres_oid8_decodes_when_shadowed_in_search_path() {
+        use sqlx::{Connection, Executor};
+        use ColumnTypeSpec as Spec;
+
+        let url = std::env::var("OXYDE_TEST_POSTGRES_URL").unwrap();
+        // A fresh connection, so SQLx has not cached oid8 under its bare name.
+        let mut conn = sqlx::PgConnection::connect(&url).await.unwrap();
+        let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int4")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        if version < 190_000 {
+            return;
+        }
+
+        let mut tx = conn.begin().await.unwrap();
+        // pg_catalog is searched first unless listed, so put it after the shadow.
+        tx.execute(
+            "CREATE SCHEMA oxyde_oid8_shadow; \
+             CREATE DOMAIN oxyde_oid8_shadow.oid8 AS int8; \
+             SET LOCAL search_path = oxyde_oid8_shadow, pg_catalog",
+        )
+        .await
+        .unwrap();
+
+        let sql = "SELECT '18446744073709551615'::pg_catalog.oid8 AS scalar, \
+                   ARRAY['18446744073709551615'::pg_catalog.oid8, NULL] AS items, \
+                   NULL::pg_catalog.oid8 AS missing";
+        let row = sqlx::query(sql).fetch_one(&mut *tx).await.unwrap();
+        assert_eq!(row.columns()[0].type_info().name(), "pg_catalog.oid8");
+        assert_eq!(row.columns()[1].type_info().name(), "pg_catalog.oid8[]");
+
+        let col_types = HashMap::from([
+            ("scalar".into(), Spec::BigInteger),
+            (
+                "items".into(),
+                Spec::Array {
+                    item: Box::new(Spec::BigInteger),
+                },
+            ),
+            ("missing".into(), Spec::BigInteger),
+        ]);
+        for types in [Some(&col_types), None] {
+            let (bytes, count) =
+                encode_stream::<PgEncoder, _>(sqlx::query(sql).fetch(&mut *tx), types, None, true)
+                    .await
+                    .unwrap();
+            let result: Vec<Value> = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(
+                result[1],
+                Value::Array(vec![Value::Array(vec![
+                    Value::from(u64::MAX),
+                    Value::Array(vec![Value::from(u64::MAX), Value::Nil]),
+                    Value::Nil,
+                ])]),
+                "types: {types:?}"
+            );
+        }
+
+        tx.rollback().await.unwrap();
     }
 
     #[tokio::test]

@@ -279,6 +279,7 @@ pub enum LockType {
 pub enum ConflictAction {
     Nothing,
     Update,
+    Select,
 }
 
 /// ON CONFLICT specification for UPSERT

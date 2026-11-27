@@ -298,6 +298,30 @@ else:
     print("Found existing user")
 ```
 
+#### get_or_create_atomic()
+
+On PostgreSQL 19 and newer, use a single statement to insert a row or return the
+existing row for a unique key. The model must have a primary key. In `conflict`,
+specify the fields of a unique constraint or of a non-partial unique index over
+plain columns, and supply their values. A single field can be passed as a string.
+Partial unique indexes (for example `... WHERE deleted_at IS NULL`) and expression
+indexes cannot be used. The generated `ON CONFLICT (...)` target has no predicate
+or expression, so PostgreSQL cannot infer those indexes.
+
+```python
+user, created = await User.objects.get_or_create_atomic(
+    conflict=["email"],
+    email="alice@example.com",
+    defaults={"name": "Alice", "age": 30},
+)
+```
+
+The existing row is returned as stored. Defaults and sequences can still be
+evaluated during the insert attempt. `pre_save` runs for each attempt and
+`post_save` runs only when a new row is inserted. A trigger that suppresses the
+insert without returning a row causes `ManagerError`. PostgreSQL 18 raises
+`oxyde.exceptions.UnsupportedServerVersionError`.
+
 #### update_or_create()
 
 Get existing, update it, or create new:

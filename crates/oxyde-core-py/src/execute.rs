@@ -12,7 +12,8 @@ use oxyde_driver::{
     execute_mutation_returning_in_transaction, execute_query_columnar,
     execute_query_columnar_dedup, execute_query_columnar_dedup_in_transaction,
     execute_query_columnar_in_transaction, execute_statement, execute_statement_in_transaction,
-    explain_query, pool_backend as driver_pool_backend, ExplainFormat, ExplainOptions,
+    explain_query, pool_backend as driver_pool_backend, pool_server_version,
+    require_server_version, transaction_server_version, ExplainFormat, ExplainOptions,
     RelationInfo, ResultEncoding, ResultOptions,
 };
 use oxyde_sql::utils::identifier::{grouped_projection, output_label, resolve_column};
@@ -20,7 +21,7 @@ use oxyde_sql::utils::{
     value::{scalar_preserves_text, scalar_result_spec},
     ExprTypes,
 };
-use oxyde_sql::{build_sql, emits_returning, Dialect};
+use oxyde_sql::{build_sql, emits_returning, required_server_version, Dialect};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
@@ -37,6 +38,31 @@ fn decode_ir(bytes: &[u8]) -> PyResult<QueryIR> {
     ir.validate()
         .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
     Ok(ir)
+}
+
+async fn check_server_version(
+    pool_name: &str,
+    tx_id: Option<u64>,
+    required: i32,
+    feature: &'static str,
+) -> PyResult<()> {
+    let actual = match tx_id {
+        Some(id) => transaction_server_version(id).await,
+        None => pool_server_version(pool_name).await,
+    }
+    .map_err(|e| crate::errors::driver_err(&e))?;
+    require_server_version(actual, required, feature).map_err(|e| crate::errors::driver_err(&e))
+}
+
+async fn check_ir_server_version(
+    pool_name: &str,
+    tx_id: Option<u64>,
+    ir: &QueryIR,
+) -> PyResult<()> {
+    if let Some((required, feature)) = required_server_version(ir) {
+        check_server_version(pool_name, tx_id, required, feature).await?;
+    }
+    Ok(())
 }
 
 fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
@@ -346,6 +372,7 @@ pub(crate) fn execute<'py>(
 
         // Stages 1-2: Deserialize and validate IR
         let ir = decode_ir(&ir_data)?;
+        check_ir_server_version(&pool_name, None, &ir).await?;
 
         // Stage 3: Get backend/dialect
         let backend = driver_pool_backend(&pool_name)
@@ -485,6 +512,7 @@ pub(crate) fn execute_in_transaction<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let ir = decode_ir(&ir_data)?;
+        check_ir_server_version(&pool_name, Some(tx_id), &ir).await?;
 
         let backend = driver_pool_backend(&pool_name)
             .await
@@ -668,6 +696,7 @@ pub(crate) fn explain<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let ir = decode_ir(&ir_data)?;
         explain_options.validate().map_err(PyValueError::new_err)?;
+        check_ir_server_version(&pool_name, None, &ir).await?;
 
         let backend = driver_pool_backend(&pool_name)
             .await

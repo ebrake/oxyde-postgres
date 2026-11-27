@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- CI tests PostgreSQL 18 and 19.
+- PostgreSQL `oid` and `oid8` results, including array elements, decode as
+  Python integers and preserve their full unsigned range.
+- PostgreSQL 19 adds scan I/O statistics via `explain(analyze=True, io=True)`
+  and single-statement `get_or_create_atomic()` via `ON CONFLICT DO SELECT`.
+  Both features raise `UnsupportedServerVersionError` on PostgreSQL 18.
+
 ## 0.4.1 — Foreign-key assignment and inserts without primary keys
 
 - Passing or assigning a related instance copies its key to the foreign-key
