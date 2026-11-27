@@ -642,14 +642,9 @@ class ExecutionMixin(Generic[TModel]):
                 parent = self._resolve_join_parent(model, spec.parent_path)
                 if parent is None:
                     continue
-                if ref_pk is None:
-                    setattr(parent, spec.attr_name, None)
-                else:
-                    instance = instance_cache.get(ref_pk)
-                    if instance is not None:
-                        setattr(parent, spec.attr_name, instance)
-                    else:
-                        setattr(parent, spec.attr_name, None)
+                # JOINs populate the relation without assigning its FK column.
+                parent.__dict__[spec.attr_name] = instance_cache.get(ref_pk)
+                parent.__pydantic_fields_set__.add(spec.attr_name)
 
     def _resolve_join_parent(
         self,

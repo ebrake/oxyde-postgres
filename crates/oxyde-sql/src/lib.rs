@@ -68,8 +68,8 @@ pub enum Dialect {
 /// i.e. the caller asked for rows back (`ir.returning`).
 ///
 /// Execution routing must use this predicate, not the SQL text: identifiers
-/// may legally contain the word RETURNING, and INSERTs may later carry a
-/// pk-only `RETURNING "id"` clause that does not mean "return full rows".
+/// may legally contain the word RETURNING, and INSERTs can carry a
+/// pk-only RETURNING clause independently of this predicate.
 #[must_use]
 pub fn emits_returning(ir: &QueryIR, dialect: Dialect) -> bool {
     ir.returning.unwrap_or(false) && matches!(dialect, Dialect::Postgres)
@@ -840,6 +840,30 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_without_primary_key_omits_returning() {
+        let row = HashMap::from([("name".into(), rmpv_str("A"))]);
+        let mut ir = QueryIR {
+            op: Operation::Insert,
+            table: "publishers".into(),
+            values: Some(row.clone()),
+            returning: Some(false),
+            ..Default::default()
+        };
+
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(sql, r#"INSERT INTO "publishers" ("name") VALUES ($1)"#);
+
+        ir.values = None;
+        ir.returning = None;
+        ir.bulk_values = Some(vec![row.clone(), row]);
+        let (sql, _) = build_sql(&ir, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "publishers" ("name") VALUES ($1), ($2)"#
+        );
+    }
+
+    #[test]
     fn test_bulk_insert_uses_default_only_for_missing_columns() {
         let ir = QueryIR {
             op: Operation::Insert,
@@ -849,6 +873,7 @@ mod tests {
                 HashMap::from([("name".into(), rmpv_str("B")), ("note".into(), rmpv_null())]),
                 HashMap::from([("note".into(), rmpv_str("C"))]),
             ]),
+            pk_column: Some("id".into()),
             ..Default::default()
         };
 
@@ -924,6 +949,7 @@ mod tests {
                 ]),
             ]),
             bind_types: Some(HashMap::from([("status".into(), enum_spec())])),
+            pk_column: Some("id".into()),
             ..Default::default()
         };
 
@@ -1129,11 +1155,17 @@ mod tests {
     }
 
     /// Guard against predicate/builder desync. The contract:
-    /// - `RETURNING *` appears iff `emits_returning` says so;
-    ///   `RETURNING "<pk>"` (the driver reads generated PKs from rows);
+    /// Full rows follow the predicate; PK-only inserts need a declared key.
     #[test]
     fn test_emits_returning_matches_builder_output() {
         let ops: Vec<QueryIR> = vec![
+            QueryIR {
+                op: Operation::Insert,
+                table: "t".into(),
+                values: Some(HashMap::from([("name".into(), rmpv_str("a"))])),
+                pk_column: Some("id".into()),
+                ..Default::default()
+            },
             QueryIR {
                 op: Operation::Insert,
                 table: "t".into(),
@@ -1172,8 +1204,7 @@ mod tests {
                         dialect,
                         sql
                     );
-                    let pk_only_insert =
-                        ir.op == Operation::Insert && matches!(dialect, Dialect::Postgres);
+                    let pk_only_insert = ir.op == Operation::Insert && ir.pk_column.is_some();
                     assert_eq!(
                         full || pk_only_insert,
                         sql.contains("RETURNING"),

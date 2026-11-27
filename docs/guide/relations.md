@@ -37,6 +37,49 @@ post = await Post.objects.create(
 print(post.author_id)  # 1
 ```
 
+You can also pass a related instance or assign it directly.
+
+```python
+post = await Post.objects.create(title="Hello World", author=author)
+post.author = other_author
+await post.save()
+```
+
+`Post(...)`, `model_construct()`, and `model_copy(update=...)` can copy the
+related object's key to the FK column. Oxyde uses the target field and column
+configured by `db_fk` and `db_column` and records the copied column in
+`model_fields_set`. A key is available once it has been loaded, saved, or
+supplied explicitly. A client-generated key such as `default_factory=uuid4`
+only fills the FK after the related object is saved. This also applies to
+defaults on non-primary-key targets.
+
+A required FK needs an available key when you construct the model. Supply a
+related object with an available key or pass the FK column explicitly.
+Construction with a related object whose key is still a default raises a
+validation error. For synthesized FK columns, `model_validate()` and
+`model_validate_json()` use pydantic-core's alias path to read keys from nested
+dictionaries and JSON. With a model instance in `model_validate()` input,
+supply the required FK column explicitly. A base class after `Model` in the
+MRO whose `__init__` lacks `**kwargs` also requires the FK column to be passed
+explicitly.
+
+An explicit FK column, including `None`, takes precedence. Construction and
+copy updates keep a supplied or cached relation only if its available key
+matches the FK column. A copy update that supplies only the relation updates
+the FK column to the new key, or to `None` if the key is unavailable.
+Assigning `None` to `post.author` clears the loaded relation while retaining
+the FK value. Set `post.author_id = None` to unlink a nullable relation,
+including an assigned object that has yet to be saved. After `save()`, the
+assigned relation stays attached if it still matches the stored FK.
+
+If a write includes an empty FK column and the assigned related object has
+no available key, it raises `ValueError`. With a nullable FK or when assigning
+the relation to an already constructed model, you can save the related
+object after assigning it. The next save of the parent fills in the missing
+FK. An explicit update such as `post.save(update_fields=["title"])` only
+checks the columns it writes. Both `save(update_fields=["author"])` and
+`Post.objects.bulk_update(posts, ["author"])` write `author_id`.
+
 ### FK to Non-PK Field
 
 Reference a different field:
@@ -55,6 +98,10 @@ class Resource(Model):
 ```
 
 This creates column `tenant_uuid` referencing `Tenant.uuid`.
+
+On PostgreSQL, `create()` and `bulk_create()` can insert a model without a
+primary key. A successful insert makes its submitted unique key available
+as an FK target.
 
 ### ON DELETE Actions
 

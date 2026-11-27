@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import warnings
 from types import SimpleNamespace
 from uuid import UUID
@@ -23,9 +24,11 @@ from oxyde.exceptions import ManagerError
 from oxyde.models.db_schema import (
     _database_schemas,
     _dump_db_fields,
+    _outer_nodes,
     _validate_db_row,
     _validate_db_rows,
 )
+from oxyde.models.registry import register_table
 from oxyde.models.utils import _AggregateFieldsSet, _LoadedFieldsSet
 from oxyde.queries import Count
 from oxyde.queries.insert import InsertQuery
@@ -903,6 +906,83 @@ def test_custom_init_removes_temporary_validator_without_super(raise_error):
 
 def test_plain_models_keep_pydantic_base_init():
     assert HiddenKey.__pydantic_custom_init__ is False
+
+
+class HydrationAuthor(Model):
+    id: int = Field(db_pk=True)
+
+    class Meta:
+        is_table = True
+
+
+class HydrationPost(Model):
+    id: int = Field(db_pk=True)
+    author: HydrationAuthor | None = None
+
+    class Meta:
+        is_table = True
+
+
+def test_fk_model_keeps_constructor_signature_and_plain_db_schema():
+    assert HydrationPost.__pydantic_custom_init__ is False
+    assert str(inspect.signature(HydrationPost)) == (
+        f"(*, id: int, author: {HydrationAuthor.__module__}.HydrationAuthor | None = None, "
+        "author_id: int | None = None) -> None"
+    )
+    schemas = _database_schemas(HydrationPost)
+    schema = schemas._specialize(schemas.nodes, track_pk=False, track_private=False)
+    nodes = _outer_nodes(HydrationPost, dict(schema))
+    model = next(node for node in nodes if node["type"] == "model")
+    assert "post_init" not in model
+    assert all("validation_alias" not in field for field in nodes[-1]["fields"].values())
+
+
+def test_fk_alias_adds_no_db_initializer_wrapper():
+    class CustomInitFk(Model):
+        author: HydrationAuthor | None = None
+
+        def __init__(self, **data):
+            super().__init__(**data)
+
+        class Meta:
+            is_table = True
+
+    assert CustomInitFk.__pydantic_custom_init__ is True
+    schemas = _database_schemas(CustomInitFk)
+    schema = schemas._specialize(
+        schemas.nodes, track_pk=False, track_private=False, name_first=True
+    )
+    assert not schemas.colliding_aliases
+    assert all(
+        node["type"] != "function-before"
+        for node in _outer_nodes(CustomInitFk, dict(schema))
+    )
+
+
+@pytest.mark.asyncio
+async def test_join_hydration_does_not_assign_fk_fields(monkeypatch):
+    register_table(HydrationAuthor)
+    calls = []
+    original = Model.__setattr__
+
+    def record_assignment(self, name, value):
+        calls.append(name)
+        original(self, name, value)
+
+    monkeypatch.setattr(Model, "__setattr__", record_assignment)
+    stub = StubExecuteClient(
+        [
+            [
+                ["id"],
+                [[1], [2], [3]],
+                {"author": {"columns": ["id"], "data": {9: [9]}, "refs": [9, None, 9]}},
+            ]
+        ]
+    )
+    posts = await HydrationPost.objects.join("author").select("id").all(client=stub)
+    assert calls == []
+    assert [post.author.id if post.author else None for post in posts] == [9, None, 9]
+    assert all(post.model_fields_set == {"id", "author"} for post in posts)
 
 
 def test_plain_owned_validation_reuses_validator_without_recorder():

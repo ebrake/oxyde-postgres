@@ -15,7 +15,7 @@ Virtual Fields:
         comments: list[Comment] = Field(db_reverse_fk="post")  # Virtual
 
 Functions:
-    _get_virtual_fields(model_class) -> set[str]:
+    _get_virtual_fields(model_class) -> frozenset[str]:
         Return names of virtual (relation) fields.
 
     _dump_insert_data(instance) -> dict:
@@ -38,14 +38,13 @@ Functions:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic.fields import PydanticUndefined
 
 from oxyde.exceptions import ManagerError
 from oxyde.models.db_schema import _dump_db_fields
-from oxyde.models.metadata import is_column_field
 
 if TYPE_CHECKING:
     from oxyde.models.base import Model
@@ -54,7 +53,34 @@ if TYPE_CHECKING:
 TModel = TypeVar("TModel", bound="Model")
 
 
-def _get_virtual_fields(model_class: type[Model]) -> set[str]:
+def _prepare_fk_columns(instance: Model, columns: Collection[str] | None) -> None:
+    """Check and fill foreign keys for the columns being written."""
+    links = type(instance)._db_meta.fk_links
+    if not links:
+        return
+
+    from oxyde.models.base import Model, _related_key
+
+    values = instance.__dict__
+    for name, (relation, column, target_field) in links.items():
+        if (
+            name != relation
+            or (columns is not None and column not in columns)
+            or values.get(column) is not None
+        ):
+            continue
+        related = values.get(relation)
+        if isinstance(related, Model):
+            key = _related_key(related, target_field)
+            if key is None:
+                raise ValueError(
+                    f"Cannot write '{relation}': save the related object first"
+                )
+            values[column] = key
+            instance.__pydantic_fields_set__.add(column)
+
+
+def _get_virtual_fields(model_class: type[Model]) -> frozenset[str]:
     """Get field names that are virtual and don't correspond to database columns.
 
     Virtual fields include:
@@ -62,11 +88,7 @@ def _get_virtual_fields(model_class: type[Model]) -> set[str]:
     - db_m2m: many-to-many relations (e.g., tags: list[Tag])
     - FK model fields: (e.g., author: Author) — real column is author_id
     """
-    return {
-        name
-        for name, meta in model_class._db_meta.field_metadata.items()
-        if not is_column_field(meta)
-    }
+    return model_class._db_meta.virtual_fields
 
 
 def _dump_insert_data(instance: Model) -> dict[str, Any]:
@@ -82,9 +104,8 @@ def _dump_insert_data(instance: Model) -> dict[str, Any]:
     ``field=None`` reaches the database as NULL (e.g. to override a
     server-side default).
     """
-    excluded = (
-        _get_virtual_fields(type(instance))
-        | type(instance).model_computed_fields.keys()
+    excluded = type(instance).model_computed_fields.keys() | _get_virtual_fields(
+        type(instance)
     )
     pk_field = type(instance)._db_meta.pk_field
     pk_value = (
