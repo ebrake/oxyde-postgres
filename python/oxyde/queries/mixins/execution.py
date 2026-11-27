@@ -848,9 +848,11 @@ class ExecutionMixin(Generic[TModel]):
 
         # Collect target IDs from links using FK column names
         target_ids: list[Any] = []
+        seen_targets: set[Any] = set()
         for link in links:
             target_id = getattr(link, target_fk_column, None)
-            if target_id is not None and target_id not in target_ids:
+            if target_id is not None and target_id not in seen_targets:
+                seen_targets.add(target_id)
                 target_ids.append(target_id)
 
         # Query target model
