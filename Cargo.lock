@@ -1065,6 +1065,7 @@ dependencies = [
  "sqlx",
  "tikv-jemallocator",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

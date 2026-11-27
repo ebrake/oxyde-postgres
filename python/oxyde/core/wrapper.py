@@ -27,6 +27,9 @@ Functions Exported:
     Query execution:
         execute, execute_in_transaction
 
+    Write-value serialization:
+        serialize_column_values
+
     Transactions:
         begin_transaction, commit_transaction, rollback_transaction
         create_savepoint, rollback_to_savepoint, release_savepoint
@@ -66,6 +69,8 @@ _FUNCTION_REGISTRY: list[tuple[str, str, bool, bool]] = [
     # Query execution
     ("execute", "execute", True, False),
     ("execute_in_transaction", "execute_in_transaction", True, False),
+    # Write-value serialization
+    ("serialize_column_values", "serialize_column_values", False, False),
     # Transactions
     ("begin_transaction", "begin_transaction", True, False),
     ("commit_transaction", "commit_transaction", True, False),
@@ -192,6 +197,7 @@ migration_validate_schema = _exports["migration_validate_schema"]
 migration_validate_extension_name = _exports["migration_validate_extension_name"]
 migration_infer_name = _exports["migration_infer_name"]
 SchemaReplay = _exports["SchemaReplay"]
+serialize_column_values = _exports["serialize_column_values"]
 
 
 _EXPLAIN_IO_UNSUPPORTED = (
@@ -280,6 +286,7 @@ except ImportError:  # pragma: no cover - extension missing or older
 __all__ = [
     "execute",
     "execute_in_transaction",
+    "serialize_column_values",
     "init_pool",
     "init_pool_overwrite",
     "close_pool",

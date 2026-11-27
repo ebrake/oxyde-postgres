@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from enum import Enum
-from functools import cache
+from functools import cache, partial
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -44,9 +44,11 @@ from oxyde.queries.base import (
     _build_bind_types,
     _build_column_db_types,
     _build_column_types,
+    _field_columns,
     _map_values_to_columns,
     _model_key,
     _resolve_execution_client,
+    _serialize_column_values,
     _translate_core_error,
 )
 from oxyde.queries.expressions import (
@@ -281,28 +283,29 @@ class MutationMixin(Generic[TModel]):
             )
         """
         exec_client = await _resolve_execution_client(using, client)
-        column_types = _build_column_types(self.model_class)
-        values = _validate_enum_update_values(self.model_class, values)
-        mapped_values = _map_values_to_columns(self.model_class, values)
-        serialized_values = {
-            key: _serialize_value_for_ir(value, self.model_class)
-            for key, value in mapped_values.items()
-        }
+        model_class = self.model_class
+        column_types = _build_column_types(model_class)
+        values = _validate_enum_update_values(model_class, values)
+        serialized_values = _serialize_column_values(
+            values,
+            _field_columns(model_class),
+            partial(_serialize_value_for_ir, model_class=model_class),
+        )
 
         update_ir = ir.build_update_ir(
-            table=self.model_class.get_table_name(),
+            table=model_class.get_table_name(),
             values=serialized_values,
             filter_tree=self._build_filter_tree(),
             column_types=column_types,
-            bind_types=_build_bind_types(self.model_class),
-            column_db_types=_build_column_db_types(self.model_class),
-            model=_model_key(self.model_class),
+            bind_types=_build_bind_types(model_class),
+            column_db_types=_build_column_db_types(model_class),
+            model=_model_key(model_class),
             returning=returning,
         )
         result_bytes = await exec_client.execute(update_ir)
         result = msgpack.unpackb(result_bytes, raw=False)
         if returning:
-            return _decode_returning_models(self.model_class, result)
+            return _decode_returning_models(model_class, result)
         affected: int = result.get("affected", 0)
         return affected
 
@@ -666,6 +669,7 @@ class MutationMixin(Generic[TModel]):
         exec_client = await _resolve_execution_client(using, client)
 
         # Build bulk_update payload
+        column_map = _field_columns(self.model_class)
         bulk_entries: list[dict[str, Any]] = []
         written: list[tuple[TModel, dict[str, Any]]] = []
         for obj in objects_list:
@@ -678,11 +682,13 @@ class MutationMixin(Generic[TModel]):
 
             # Extract requested fields and map to db_column names
             values = {
-                field_name: _serialize_value_for_ir(all_values[field_name])
+                field_name: all_values[field_name]
                 for field_name in columns
                 if field_name in all_values
             }
-            mapped_values = _map_values_to_columns(self.model_class, values)
+            mapped_values = _serialize_column_values(
+                values, column_map, _serialize_value_for_ir, map_first=False
+            )
 
             if mapped_values:
                 written.append((obj, values))

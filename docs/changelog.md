@@ -8,6 +8,25 @@
 - PostgreSQL 19 adds scan I/O statistics via `explain(analyze=True, io=True)`
   and single-statement `get_or_create_atomic()` via `ON CONFLICT DO SELECT`.
   Both features raise `UnsupportedServerVersionError` on PostgreSQL 18.
+- The Rust core converts write values for `create()`, `bulk_create()`,
+  `update()`, `bulk_update()`, and upserts. It handles strings, numbers,
+  bytes, dates and times, UUIDs, and decimals directly. Expressions,
+  containers, enums, subclasses, and types whose `TYPE_REGISTRY` serializer an
+  application replaced still go through the Python serializer, so stored
+  values are unchanged. Upgrade both packages together, because writes need
+  the matching core.
+
+    Client-side time per operation with the previous write path (Before) and
+    the Rust core (After), median of seven runs, using a stub client that
+    MessagePack-encodes each query:
+
+    | Operation                                   |  Before |   After | Speedup |
+    | :------------------------------------------ | ------: | ------: | ------: |
+    | Build and encode a bulk INSERT (1,000 rows) | 4.16 ms | 1.29 ms |    3.2× |
+    | `bulk_create()` (1,000 rows)                | 6.65 ms | 3.68 ms |    1.8× |
+    | `create()` (one row)                        | 15.6 µs | 12.5 µs |    1.3× |
+    | Filtered `update()` (one integer field)     |  7.3 µs |  7.2 µs |    1.0× |
+    | Filtered `update()`, 41-field model         | 10.1 µs |  9.9 µs |    1.0× |
 
 ## 0.4.1 — Foreign-key assignment and inserts without primary keys
 

@@ -122,6 +122,8 @@ class ModelMeta:
     constraints: list[Check] = dataclass_field(default_factory=list)
     extensions: tuple[str, ...] = ()
     field_metadata: dict[str, ColumnMeta] = dataclass_field(default_factory=dict)
+    # field_name → db_column, only where they differ (any field, virtual too)
+    column_map: dict[str, str] = dataclass_field(default_factory=dict)
     # Both field names index the same (relation, column, target field) tuple.
     fk_links: dict[str, tuple[str, str, str]] = dataclass_field(default_factory=dict)
     virtual_fields: frozenset[str] = frozenset()

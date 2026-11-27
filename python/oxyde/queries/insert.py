@@ -13,7 +13,8 @@ Example (via Manager):
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from oxyde._msgpack import msgpack
@@ -23,9 +24,11 @@ from oxyde.queries.base import (
     SupportsExecute,
     _build_bind_types,
     _build_column_types,
+    _field_columns,
     _map_values_to_columns,
     _model_key,
     _primary_key_meta,
+    _serialize_column_values,
 )
 from oxyde.queries.expressions import _serialize_value_for_ir
 
@@ -127,28 +130,32 @@ class InsertQuery:
         except Exception:
             return None
 
-    def _serialize_values(self, values: dict[str, Any]) -> dict[str, Any]:
-        mapped = _map_values_to_columns(self.model_class, values)
-        return {
-            key: _serialize_value_for_ir(value, self.model_class)
-            for key, value in mapped.items()
-        }
+    @staticmethod
+    def _serialize_values(
+        values: dict[str, Any], columns: dict[str, str], fallback: Callable[[Any], Any]
+    ) -> dict[str, Any]:
+        return _serialize_column_values(values, columns, fallback)
 
     def to_ir(self) -> dict[str, Any]:
         """Convert to IR format."""
-        table_name = self.model_class.get_table_name()
+        model_class = self.model_class
+        table_name = model_class.get_table_name()
         pk_column = self._get_pk_column()
-        column_types = _build_column_types(self.model_class)
-        bind_types = _build_bind_types(self.model_class)
+        column_types = _build_column_types(model_class)
+        bind_types = _build_bind_types(model_class)
+        columns = _field_columns(model_class)
+        fallback = partial(_serialize_value_for_ir, model_class=model_class)
 
         on_conflict = self._on_conflict
         if on_conflict is not None and "update_values" in on_conflict:
-            explicit = self._serialize_values(on_conflict["update_values"])
+            explicit = self._serialize_values(
+                on_conflict["update_values"], columns, fallback
+            )
             overlap = explicit.keys() & on_conflict.get("update_columns", [])
             if overlap:
-                columns = ", ".join(sorted(overlap))
+                duplicate_columns = ", ".join(sorted(overlap))
                 raise ValueError(
-                    f"ON CONFLICT UPDATE has multiple assignments for: {columns}"
+                    f"ON CONFLICT UPDATE has multiple assignments for: {duplicate_columns}"
                 )
             on_conflict = {
                 **on_conflict,
@@ -159,7 +166,10 @@ class InsertQuery:
             if not self._bulk_values:
                 raise ValueError("Bulk INSERT requires at least one row")
 
-            serialized_bulk = [self._serialize_values(row) for row in self._bulk_values]
+            serialized_bulk = [
+                self._serialize_values(row, columns, fallback)
+                for row in self._bulk_values
+            ]
             if on_conflict is not None:
                 # The outcome flag needs full-row RETURNING, which bulk skips.
                 on_conflict = {
@@ -174,7 +184,7 @@ class InsertQuery:
                 bulk_values=serialized_bulk,
                 column_types=column_types,
                 bind_types=bind_types,
-                model=_model_key(self.model_class),
+                model=_model_key(model_class),
                 pk_column=pk_column,
                 on_conflict=on_conflict,
             )
@@ -185,10 +195,10 @@ class InsertQuery:
             # Fetch the complete inserted row for models with a primary key.
             return ir.build_insert_ir(
                 table=table_name,
-                values=self._serialize_values(self._values),
+                values=self._serialize_values(self._values, columns, fallback),
                 column_types=column_types,
                 bind_types=bind_types,
-                model=_model_key(self.model_class),
+                model=_model_key(model_class),
                 pk_column=pk_column,
                 returning=pk_column is not None,
                 on_conflict=on_conflict,

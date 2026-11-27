@@ -28,6 +28,12 @@ Helper Functions:
     _map_values_to_columns(model_class, values) -> dict:
         Convert field names to database column names in a dict.
 
+    _field_columns(model_class) -> dict:
+        Get the cached field-to-column renames.
+
+    _serialize_column_values(values, columns, fallback) -> dict:
+        Map field names and convert write values to IR objects.
+
     _resolve_execution_client(using, client) -> SupportsExecute:
         Resolve connection from using="alias" or client object.
         Checks active transaction first.
@@ -41,6 +47,7 @@ Caching:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -50,6 +57,7 @@ from typing import (
 )
 
 from oxyde.core import wrapper as _core
+from oxyde.core.types import _BUILTIN_TYPE_REGISTRY, TYPE_REGISTRY
 from oxyde.db.pool import AsyncDatabase
 from oxyde.db.registry import get_connection
 from oxyde.db.transaction import AsyncTransaction, get_active_transaction
@@ -169,6 +177,32 @@ def _map_values_to_columns(
     return {db_column_for(model_class, key): value for key, value in values.items()}
 
 
+def _field_columns(model_class: type[Model]) -> dict[str, str]:
+    """Get the cached field-to-column renames (other names are their column)."""
+    return model_class._db_meta.column_map
+
+
+def _serialize_column_values(
+    values: Mapping[str, Any],
+    columns: dict[str, str],
+    fallback: Callable[[Any], Any],
+    *,
+    map_first: bool = True,
+) -> dict[str, Any]:
+    """Map fields to columns and serialize their values for the write IR.
+
+    The core converts common scalars itself and calls ``fallback`` for the rest,
+    including any type whose TYPE_REGISTRY serializer was replaced.
+    """
+    if type(values) is not dict:
+        # Preserve overridden items() methods, as the old write path did.
+        values = dict(values.items())
+    serialized: dict[str, Any] = _core.serialize_column_values(
+        values, columns, fallback, TYPE_REGISTRY, _BUILTIN_TYPE_REGISTRY, map_first
+    )
+    return serialized
+
+
 async def _resolve_execution_client(
     using: str | None,
     client: SupportsExecute | None,
@@ -235,6 +269,8 @@ __all__ = [
     "_collect_model_columns",
     "_build_bind_types",
     "_map_values_to_columns",
+    "_field_columns",
+    "_serialize_column_values",
     "_resolve_execution_client",
     "_resolve_pool_name",
 ]
