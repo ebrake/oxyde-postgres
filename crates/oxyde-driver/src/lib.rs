@@ -72,6 +72,7 @@ mod execute;
 mod pool;
 mod settings;
 mod transaction;
+mod version;
 
 pub mod backend;
 mod bind;
@@ -138,14 +139,12 @@ pub use pool::{DatabaseBackend, DbPool};
 pub use settings::PoolSettings;
 
 // Pool API
-pub use pool::api::{
-    close_all_pools, close_pool, init_pool, init_pool_overwrite, pool_backend, pool_server_version,
-};
+pub use pool::api::{close_all_pools, close_pool, init_pool, init_pool_overwrite, pool_backend};
 
 // Transaction API
 pub use transaction::api::{
     begin_transaction, commit_transaction, create_savepoint, release_savepoint,
-    rollback_to_savepoint, rollback_transaction, transaction_server_version,
+    rollback_to_savepoint, rollback_transaction,
 };
 
 // Query / statement execution

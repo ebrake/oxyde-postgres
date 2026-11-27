@@ -258,10 +258,11 @@ class QueryManager(Generic[TModel]):
         """Insert or return the conflicting row in one statement on PostgreSQL 19+.
 
         ``conflict`` is a field name or a sequence of field names. They must be
-        the columns of a unique constraint or of a non-partial unique index over
-        plain columns. ``values`` accepts declared field names, not lookups.
-        ``defaults`` overrides matching keys in the proposed row. Defaults and
-        sequences can be evaluated even when the row already exists.
+        the columns of a non-deferrable unique constraint or of a non-partial
+        unique index over plain columns. ``values`` accepts declared field
+        names, not lookups. ``defaults`` overrides matching keys in the
+        proposed row. Defaults and sequences can be evaluated even when the row
+        already exists.
 
         ``pre_save`` runs before the attempt. ``post_save`` runs on creation.
         """

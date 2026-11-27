@@ -48,7 +48,6 @@ pub(crate) async fn begin_on_pool(pool: &DbPool) -> Result<DbTx> {
 
 pub(crate) struct TransactionInner {
     pub(crate) pool_name: String,
-    pub(crate) server_version_num: i32,
     /// `None` after commit/rollback. Dropping a `Some` rolls back via sqlx.
     pub(crate) tx: Option<DbTx>,
     pub(crate) created_at: Instant,

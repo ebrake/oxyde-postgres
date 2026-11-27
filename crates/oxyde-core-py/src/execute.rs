@@ -12,8 +12,7 @@ use oxyde_driver::{
     execute_mutation_returning_in_transaction, execute_query_columnar,
     execute_query_columnar_dedup, execute_query_columnar_dedup_in_transaction,
     execute_query_columnar_in_transaction, execute_statement, execute_statement_in_transaction,
-    explain_query, pool_backend as driver_pool_backend, pool_server_version,
-    require_server_version, transaction_server_version, ExplainFormat, ExplainOptions,
+    explain_query, pool_backend as driver_pool_backend, ExplainFormat, ExplainOptions,
     RelationInfo, ResultEncoding, ResultOptions,
 };
 use oxyde_sql::utils::identifier::{grouped_projection, output_label, resolve_column};
@@ -38,31 +37,6 @@ fn decode_ir(bytes: &[u8]) -> PyResult<QueryIR> {
     ir.validate()
         .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
     Ok(ir)
-}
-
-async fn check_server_version(
-    pool_name: &str,
-    tx_id: Option<u64>,
-    required: i32,
-    feature: &'static str,
-) -> PyResult<()> {
-    let actual = match tx_id {
-        Some(id) => transaction_server_version(id).await,
-        None => pool_server_version(pool_name).await,
-    }
-    .map_err(|e| crate::errors::driver_err(&e))?;
-    require_server_version(actual, required, feature).map_err(|e| crate::errors::driver_err(&e))
-}
-
-async fn check_ir_server_version(
-    pool_name: &str,
-    tx_id: Option<u64>,
-    ir: &QueryIR,
-) -> PyResult<()> {
-    if let Some((required, feature)) = required_server_version(ir) {
-        check_server_version(pool_name, tx_id, required, feature).await?;
-    }
-    Ok(())
 }
 
 fn relations_for(ir: &QueryIR) -> Option<Vec<RelationInfo>> {
@@ -372,7 +346,6 @@ pub(crate) fn execute<'py>(
 
         // Stages 1-2: Deserialize and validate IR
         let ir = decode_ir(&ir_data)?;
-        check_ir_server_version(&pool_name, None, &ir).await?;
 
         // Stage 3: Get backend/dialect
         let backend = driver_pool_backend(&pool_name)
@@ -429,9 +402,15 @@ pub(crate) fn execute<'py>(
             oxyde_codec::Operation::Insert => {
                 // Routing is decided by IR intent + dialect, never by SQL text.
                 if emits_returning(&ir, dialect) {
-                    execute_mutation_returning(&pool_name, &sql, &params, ir.column_types.as_ref())
-                        .await
-                        .map_err(|e| crate::errors::driver_err(&e))?
+                    execute_mutation_returning(
+                        &pool_name,
+                        &sql,
+                        &params,
+                        ir.column_types.as_ref(),
+                        required_server_version(&ir),
+                    )
+                    .await
+                    .map_err(|e| crate::errors::driver_err(&e))?
                 } else if let Some(pk_column) = ir.pk_column.as_deref() {
                     let ids = execute_insert_returning(&pool_name, &sql, &params, pk_column)
                         .await
@@ -462,6 +441,7 @@ pub(crate) fn execute<'py>(
                         &sql,
                         &params,
                         ir.column_types.as_ref(),
+                        None,
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?;
@@ -512,7 +492,6 @@ pub(crate) fn execute_in_transaction<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let ir = decode_ir(&ir_data)?;
-        check_ir_server_version(&pool_name, Some(tx_id), &ir).await?;
 
         let backend = driver_pool_backend(&pool_name)
             .await
@@ -561,6 +540,7 @@ pub(crate) fn execute_in_transaction<'py>(
                         &sql,
                         &params,
                         ir.column_types.as_ref(),
+                        required_server_version(&ir),
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
@@ -586,6 +566,7 @@ pub(crate) fn execute_in_transaction<'py>(
                         &sql,
                         &params,
                         ir.column_types.as_ref(),
+                        None,
                     )
                     .await
                     .map_err(|e| crate::errors::driver_err(&e))?
@@ -696,7 +677,6 @@ pub(crate) fn explain<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let ir = decode_ir(&ir_data)?;
         explain_options.validate().map_err(PyValueError::new_err)?;
-        check_ir_server_version(&pool_name, None, &ir).await?;
 
         let backend = driver_pool_backend(&pool_name)
             .await
@@ -706,9 +686,15 @@ pub(crate) fn explain<'py>(
         let (sql, params) =
             build_sql(&ir, dialect).map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
 
-        let plan = explain_query(&pool_name, &sql, &params, explain_options)
-            .await
-            .map_err(|e| crate::errors::driver_err(&e))?;
+        let plan = explain_query(
+            &pool_name,
+            &sql,
+            &params,
+            explain_options,
+            required_server_version(&ir),
+        )
+        .await
+        .map_err(|e| crate::errors::driver_err(&e))?;
 
         Python::attach(|py| json_to_py(py, &plan))
     })

@@ -6,9 +6,14 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::debug;
 
-use crate::convert::encoder::{RelationInfo, ResultOptions};
+use crate::bind::bind_postgres;
+use crate::convert::encoder::{encode_stream_mutation_returning, RelationInfo, ResultOptions};
+use crate::convert::postgres::PgEncoder;
 use crate::error::{DriverError, Result};
 use crate::execute::traits::{ConnExec, PoolExec};
+use crate::pool::DbPool;
+use crate::transaction::DbTx;
+use crate::version::check_connection_version;
 use crate::{registry, transaction_registry};
 
 /// Check if profiling is enabled via OXYDE_PROFILE env var
@@ -76,11 +81,15 @@ pub async fn execute_query_columnar_dedup<'a>(
 }
 
 /// Execute a mutation with RETURNING clause, return pre-encoded msgpack map.
+///
+/// `required_version` is checked on the connection that runs the statement,
+/// so a pool that reconnected to another server cannot bypass it.
 pub async fn execute_mutation_returning(
     pool_name: &str,
     sql: &str,
     params: &[Value],
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    required_version: Option<(i32, &'static str)>,
 ) -> Result<Vec<u8>> {
     debug!(
         "Executing mutation+returning on '{}': {} ({} params)",
@@ -91,7 +100,21 @@ pub async fn execute_mutation_returning(
 
     let handle = registry().get(pool_name).await?;
     let pool = handle.clone_pool();
-    pool.query_mutation_returning(sql, params, col_types).await
+    let Some(required) = required_version else {
+        return pool.query_mutation_returning(sql, params, col_types).await;
+    };
+    match pool {
+        DbPool::Postgres(pool) => {
+            let mut conn = pool.acquire().await.map_err(|e| {
+                DriverError::ConnectionError(format!("Failed to acquire connection: {e}"))
+            })?;
+            check_connection_version(&mut conn, &[required]).await?;
+            let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
+            encode_stream_mutation_returning::<PgEncoder, _>(query.fetch(&mut *conn), col_types)
+                .await
+                .map_err(|e| DriverError::db("Query failed", e))
+        }
+    }
 }
 
 /// Execute a statement (INSERT/UPDATE/DELETE without RETURNING) and return affected row count.
@@ -172,11 +195,15 @@ pub async fn execute_query_columnar_dedup_in_transaction<'a>(
 }
 
 /// Execute mutation+RETURNING in transaction, return pre-encoded msgpack map.
+///
+/// `required_version` is checked on the transaction's connection before any
+/// SQL is sent, so a failed check leaves the transaction usable.
 pub async fn execute_mutation_returning_in_transaction(
     tx_id: u64,
     sql: &str,
     params: &[Value],
     col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    required_version: Option<(i32, &'static str)>,
 ) -> Result<Vec<u8>> {
     let registry = transaction_registry();
     let arc = registry
@@ -193,6 +220,11 @@ pub async fn execute_mutation_returning_in_transaction(
         .tx
         .as_mut()
         .ok_or(DriverError::TransactionClosed(tx_id))?;
+    if let Some(required) = required_version {
+        match conn {
+            DbTx::Postgres(pg) => check_connection_version(pg, &[required]).await?,
+        }
+    }
     conn.query_mutation_returning(sql, params, col_types).await
 }
 

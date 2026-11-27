@@ -16,7 +16,6 @@ pub async fn begin_transaction(pool_name: &str) -> Result<u64> {
 
     let tx_inner = TransactionInner {
         pool_name: pool_name.to_string(),
-        server_version_num: handle.server_version_num,
         tx: Some(tx),
         created_at: now,
         last_activity: now,
@@ -28,19 +27,6 @@ pub async fn begin_transaction(pool_name: &str) -> Result<u64> {
     ensure_cleanup_task();
 
     Ok(tx_id)
-}
-
-/// Get the server version of the pool that supplied the transaction's connection.
-pub async fn transaction_server_version(tx_id: u64) -> Result<i32> {
-    let arc = transaction_registry()
-        .get(tx_id)
-        .await
-        .ok_or(DriverError::TransactionNotFound(tx_id))?;
-    let inner = arc.lock().await;
-    if !inner.is_active() {
-        return Err(DriverError::TransactionClosed(tx_id));
-    }
-    Ok(inner.server_version_num)
 }
 
 /// Commit a transaction and release the connection back to the pool.
