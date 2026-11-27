@@ -1,6 +1,6 @@
-"""Dynamic import of _oxyde_core Rust extension with ABI version checking.
+"""Dynamic import of the oxyde._oxyde_core extension with ABI version checking.
 
-This module handles the import of the Rust PyO3 extension module (_oxyde_core)
+This module loads the Rust PyO3 extension bundled with oxyde-postgres
 and provides stub functions if the module is not available or incompatible.
 
 ABI Version:
@@ -8,7 +8,7 @@ ABI Version:
     If mismatch, ImportError is raised prompting rebuild.
 
 Import Strategy:
-    1. Try to import _oxyde_core
+    1. Try to load oxyde._oxyde_core
     2. Check ABI version
     3. Export available functions with hasattr() checks for backwards compat
     4. If import fails, create stub functions that raise RuntimeError
@@ -47,6 +47,7 @@ Functions Exported:
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import sys
 from collections.abc import Callable
@@ -55,8 +56,12 @@ from typing import Any
 # Expected ABI version - must match __abi_version__ in Rust module
 EXPECTED_ABI_VERSION = 2
 
+_REINSTALL_CORE = (
+    "Reinstall oxyde-postgres, or run make build-core-dev in a source checkout."
+)
+
 # Function registry: (rust_name, export_name, is_async, is_noop_fallback)
-# - rust_name: name in _oxyde_core module
+# - rust_name: name in the oxyde._oxyde_core module
 # - export_name: name to export (usually same, but explain -> explain_query)
 # - is_async: True for async functions
 # - is_noop_fallback: True if stub should be no-op instead of raising
@@ -112,10 +117,7 @@ def _make_stub(name: str, is_async: bool, is_noop: bool) -> Callable[..., Any]:
         noop_stub.__doc__ = f"No-op stub for {name} (Rust module not available)"
         return noop_stub
 
-    error_msg = (
-        f"Rust core module not available or missing '{name}'. "
-        "Please rebuild with: maturin develop --release"
-    )
+    error_msg = f"Rust core module not available or missing '{name}'. {_REINSTALL_CORE}"
 
     if is_async:
 
@@ -140,28 +142,31 @@ def _load_functions() -> dict[str, Callable[..., Any]]:
     exports: dict[str, Callable[..., Any]] = {}
 
     try:
-        import _oxyde_core  # type: ignore[import-untyped, import-not-found, unused-ignore]
+        core = importlib.import_module("oxyde._oxyde_core")
 
         # ABI version check
-        abi_version = getattr(_oxyde_core, "__abi_version__", None)
+        abi_version = getattr(core, "__abi_version__", None)
         if abi_version is None:
             raise ImportError("Rust core module does not expose __abi_version__")
         if abi_version != EXPECTED_ABI_VERSION:
             raise ImportError(
                 f"ABI version mismatch: expected {EXPECTED_ABI_VERSION}, "
-                f"got {abi_version}. Please install oxyde-postgres-core>=0.4.1."
+                f"got {abi_version}"
             )
 
         # Load each function from registry
         for rust_name, export_name, is_async, is_noop in _FUNCTION_REGISTRY:
-            if hasattr(_oxyde_core, rust_name):
-                exports[export_name] = getattr(_oxyde_core, rust_name)
+            if hasattr(core, rust_name):
+                exports[export_name] = getattr(core, rust_name)
             else:
                 # Function missing in Rust module (older version?)
                 exports[export_name] = _make_stub(export_name, is_async, is_noop)
 
     except ImportError as e:
-        print(f"Warning: Failed to import Rust core module: {e}", file=sys.stderr)
+        print(
+            f"Warning: Failed to import Rust core module: {e}. {_REINSTALL_CORE}",
+            file=sys.stderr,
+        )
         print("Oxyde ORM will not be fully functional.", file=sys.stderr)
 
         # Create all stubs
@@ -201,9 +206,7 @@ serialize_column_values = _exports["serialize_column_values"]
 
 
 _EXPLAIN_IO_UNSUPPORTED = (
-    "explain(io=True) requires an oxyde-postgres-core build with EXPLAIN IO "
-    "support; the installed native core does not accept 'io'. Upgrade "
-    "oxyde-postgres-core to the release matching oxyde-postgres."
+    f"The installed Rust core does not support explain(io=True). {_REINSTALL_CORE}"
 )
 
 
@@ -244,7 +247,7 @@ async def explain_query(
 # (sqlx ErrorKind), never by matching error message text. Stubs keep
 # isinstance() checks working when the extension is unavailable.
 try:
-    from _oxyde_core import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
+    from oxyde._oxyde_core import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
         CheckViolationError,
         DatabaseError,
         ForeignKeyViolationError,
@@ -274,7 +277,7 @@ except ImportError:  # pragma: no cover - extension missing
 
 
 try:
-    from _oxyde_core import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
+    from oxyde._oxyde_core import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
         UnsupportedServerVersionError,
     )
 except ImportError:  # pragma: no cover - extension missing or older

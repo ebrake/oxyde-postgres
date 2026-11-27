@@ -20,7 +20,6 @@ SPEC.loader.exec_module(checker)
 class ReleaseArtifactTests(unittest.TestCase):
     def artifact(
         self,
-        package="oxyde-postgres-core",
         *,
         source=False,
         omit=None,
@@ -29,22 +28,23 @@ class ReleaseArtifactTests(unittest.TestCase):
         windows_newlines=False,
         description="",
         requires_python=">=3.15",
+        requires_dist=None,
     ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / ("package.tar.gz" if source else "package.whl")
-        metadata = (
-            f"Name: {package}\nVersion: {version}\nRequires-Python: {requires_python}\n"
-        )
+        metadata = f"Name: {checker.PACKAGE}\nVersion: {version}\nRequires-Python: {requires_python}\n"
         if author:
             metadata += "Author-email: Nikita Ryzhenkov <nikita.ryzhenkoff@gmail.com>\n"
+        if requires_dist:
+            metadata += f"Requires-Dist: {requires_dist}\n"
         metadata += "\n" + description
         files = {
             "package/PKG-INFO"
             if source
             else "package.dist-info/METADATA": metadata.encode()
         }
-        for label, contents in checker.expected_licenses(package).items():
+        for label, contents in checker.expected_licenses().items():
             if label != omit:
                 if windows_newlines:
                     contents = contents.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
@@ -62,12 +62,11 @@ class ReleaseArtifactTests(unittest.TestCase):
         return path
 
     def test_all_package_formats_preserve_licenses(self):
-        for package in ("oxyde-postgres", "oxyde-postgres-core"):
-            for source in (False, True):
-                with self.subTest(package=package, source=source):
-                    checker.validate_artifact(
-                        self.artifact(package, source=source), package, "0.1.0"
-                    )
+        for source in (False, True):
+            with self.subTest(source=source):
+                checker.validate_artifact(
+                    self.artifact(source=source), checker.PACKAGE, "0.1.0"
+                )
 
     def test_missing_upstream_license_fails(self):
         for source in (False, True):
@@ -77,7 +76,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             ):
                 checker.validate_artifact(
                     self.artifact(source=source, omit="Oxyde MIT"),
-                    "oxyde-postgres-core",
+                    checker.PACKAGE,
                     "0.1.0",
                 )
 
@@ -94,7 +93,7 @@ class ReleaseArtifactTests(unittest.TestCase):
                 ):
                     checker.validate_artifact(
                         self.artifact(source=source, description=f"[Guide]({target})"),
-                        "oxyde-postgres-core",
+                        checker.PACKAGE,
                         "0.1.0",
                     )
 
@@ -103,51 +102,63 @@ class ReleaseArtifactTests(unittest.TestCase):
             self.artifact(
                 description="[Oxyde for PostgreSQL](https://github.com/ebrake/oxyde-postgres)"
             ),
-            "oxyde-postgres-core",
+            checker.PACKAGE,
             "0.1.0",
         )
 
     def test_windows_line_endings_preserve_complete_license_text(self):
-        for package in ("oxyde-postgres", "oxyde-postgres-core"):
-            for source in (False, True):
-                with self.subTest(package=package, source=source):
-                    checker.validate_artifact(
-                        self.artifact(package, source=source, windows_newlines=True),
-                        package,
-                        "0.1.0",
-                    )
+        for source in (False, True):
+            with self.subTest(source=source):
+                checker.validate_artifact(
+                    self.artifact(source=source, windows_newlines=True),
+                    checker.PACKAGE,
+                    "0.1.0",
+                )
 
     def test_each_vendored_notice_is_required(self):
         for label in ("SQLx LICENSE-MIT", "SQLx LICENSE-APACHE"):
             with self.subTest(label=label), self.assertRaisesRegex(ValueError, "SQLx"):
                 checker.validate_artifact(
-                    self.artifact(omit=label), "oxyde-postgres-core", "0.1.0"
+                    self.artifact(omit=label), checker.PACKAGE, "0.1.0"
                 )
 
     def test_wrong_version_fails(self):
         with self.assertRaisesRegex(ValueError, "name or version"):
             checker.validate_artifact(
-                self.artifact(version="0.2.0"), "oxyde-postgres-core", "0.1.0"
+                self.artifact(version="0.2.0"), checker.PACKAGE, "0.1.0"
             )
 
     def test_missing_author_fails(self):
         with self.assertRaisesRegex(ValueError, "author credit"):
             checker.validate_artifact(
-                self.artifact(author=False), "oxyde-postgres-core", "0.1.0"
+                self.artifact(author=False), checker.PACKAGE, "0.1.0"
             )
 
     def test_wrong_python_requirement_fails(self):
-        for package in ("oxyde-postgres", "oxyde-postgres-core"):
-            for source in (False, True):
-                with (
-                    self.subTest(package=package, source=source),
-                    self.assertRaisesRegex(ValueError, "Python requirement"),
-                ):
-                    checker.validate_artifact(
-                        self.artifact(package, source=source, requires_python=">=3.10"),
-                        package,
-                        "0.1.0",
-                    )
+        for source in (False, True):
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(ValueError, "Python requirement"),
+            ):
+                checker.validate_artifact(
+                    self.artifact(source=source, requires_python=">=3.10"),
+                    checker.PACKAGE,
+                    "0.1.0",
+                )
+
+    def test_dependency_on_separate_core_fails(self):
+        for source in (False, True):
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(ValueError, "separate core package"),
+            ):
+                checker.validate_artifact(
+                    self.artifact(
+                        source=source, requires_dist="Oxyde.Postgres_Core>=0.4.1"
+                    ),
+                    checker.PACKAGE,
+                    "0.1.0",
+                )
 
 
 if __name__ == "__main__":

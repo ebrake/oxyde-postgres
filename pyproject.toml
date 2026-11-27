@@ -3,10 +3,10 @@ requires = ["maturin>=1.16.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "oxyde-postgres-core"
+name = "oxyde-postgres"
 version = "0.4.1"
-description = "PostgreSQL 18+ Rust core for Oxyde for PostgreSQL"
-readme = "crates/oxyde-core-py/README.md"
+description = "Type-safe asynchronous ORM for PostgreSQL 18+ with a Rust core"
+readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "vendor/sqlx-postgres/LICENSE-MIT", "vendor/sqlx-postgres/LICENSE-APACHE"]
 requires-python = ">=3.15"
@@ -14,27 +14,132 @@ authors = [
     {name = "E Brake", email = "ebrake123@icloud.com"},
     {name = "Nikita Ryzhenkov", email = "nikita.ryzhenkoff@gmail.com"}
 ]
-keywords = ["orm", "rust", "database", "async", "performance"]
+keywords = ["orm", "async", "database", "postgresql", "pydantic"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Framework :: AsyncIO",
     "Topic :: Database",
+    "Typing :: Typed",
 ]
+dependencies = [
+    "pydantic>=2.14.3",
+    "msgpack>=1.2.4",
+    "typer>=0.29.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.4",
+    "pre-commit>=4.7.0",
+    "mypy==2.4.1",
+    "pyright[nodejs]==1.1.414",
+    "ty==0.0.100",
+    "testcontainers[postgres]>=4.15.0",
+    "psycopg2-binary>=2.9.13",
+]
+docs = [
+    "mkdocs>=1.6.1,<2",
+    "mkdocs-material>=9.8.1",
+    "pymdown-extensions>=13.0",
+    "mike>=2.2.0",
+]
+
+[project.scripts]
+oxyde = "oxyde.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/ebrake/oxyde-postgres"
-Documentation = "https://github.com/ebrake/oxyde-postgres#readme"
+Documentation = "https://github.com/ebrake/oxyde-postgres/tree/main/docs"
 Repository = "https://github.com/ebrake/oxyde-postgres"
 Issues = "https://github.com/ebrake/oxyde-postgres/issues"
 
 [tool.maturin]
 manifest-path = "crates/oxyde-core-py/Cargo.toml"
-module-name = "_oxyde_core"
+python-source = "python"
+module-name = "oxyde._oxyde_core"
 features = ["pyo3/extension-module"]
 
 # Keep the patched driver and its licenses in source releases.
 include = [{ path = "vendor/sqlx-postgres/**/*", format = "sdist" }]
+exclude = [{ path = "python/oxyde/tests/**", format = "wheel" }]
+
+# Ruff configuration (replaces black, isort, flake8)
+[tool.ruff]
+line-length = 88
+target-version = "py315"
+exclude = [
+    ".git",
+    ".venv",
+    "build",
+    "dist",
+    ".eggs",
+    "python/oxyde/tests",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+]
+ignore = [
+    # Preserve explicit Generic variance and runtime type metadata.
+    "UP046",
+    "UP047",
+    "E203",   # whitespace before ':' (conflicts with black-style)
+    "E501",   # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["oxyde"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# pytest configuration
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["python/oxyde/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "requires_pg19: requires PostgreSQL 19 or newer",
+    "requires_pre_pg19: requires PostgreSQL earlier than 19",
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["python/oxyde"]
+omit = ["python/oxyde/tests/*"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+show_missing = true
+
+# mypy configuration
+[tool.mypy]
+python_version = "3.15"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+exclude = ["^python/oxyde/tests/", "^build/"]

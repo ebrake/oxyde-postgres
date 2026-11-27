@@ -8,11 +8,11 @@ repos:
     rev: v0.17.4
     hooks:
       - id: ruff
-        args: ["--fix", "--config", "python/pyproject.toml"]
+        args: ["--fix", "--config", "pyproject.toml"]
         files: ^python/oxyde/
         exclude: ^python/oxyde/tests/
       - id: ruff-format
-        args: ["--config", "python/pyproject.toml"]
+        args: ["--config", "pyproject.toml"]
         files: ^python/oxyde/
         exclude: ^python/oxyde/tests/
 
@@ -21,7 +21,7 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: mypy python/oxyde --config-file python/pyproject.toml
+        entry: mypy python/oxyde --config-file pyproject.toml
         language: system
         files: ^python/oxyde/
         exclude: ^python/oxyde/tests/

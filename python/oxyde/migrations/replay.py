@@ -33,8 +33,8 @@ class SchemaState:
 
         if not isinstance(SchemaReplay, type):
             raise RuntimeError(
-                "oxyde-postgres 0.3 requires oxyde-postgres-core>=0.3.0; "
-                "installed core lacks SchemaReplay"
+                "The installed Rust core lacks SchemaReplay. Reinstall oxyde-postgres, "
+                "or run make build-core-dev in a source checkout."
             )
         self._replay = SchemaReplay()
         self._legacy: dict[tuple[str, str], dict[str, Any]] = {}

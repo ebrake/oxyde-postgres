@@ -27,7 +27,7 @@ The fork also includes [typed array and JSON containment](https://github.com/ebr
 pip install oxyde-postgres
 ```
 
-The distribution names are `oxyde-postgres` and `oxyde-postgres-core`. Python imports remain `oxyde`, the native module remains `_oxyde_core`, and the CLI remains `oxyde`. Use a separate virtual environment from upstream Oxyde because the packages share these import names.
+`oxyde-postgres` includes the Python ORM and its Rust extension, `oxyde._oxyde_core`. The ORM import and CLI are both `oxyde`. Use a separate virtual environment from upstream Oxyde because both distributions provide the `oxyde` package.
 
 To build this checkout:
 
@@ -35,8 +35,7 @@ To build this checkout:
 uv venv --python 3.15
 source .venv/bin/activate
 uv pip install maturin
-maturin develop --manifest-path crates/oxyde-core-py/Cargo.toml
-uv pip install -e './python[dev]'
+make build-core-dev
 ```
 
 ## Quick start

@@ -12,12 +12,10 @@
 pip install oxyde-postgres
 ```
 
-This installs both `oxyde-postgres` and its native dependency
-`oxyde-postgres-core`. Version 0.4.1 requires core `>=0.4.1,<0.5.0` for
-inserts into models without primary keys. Imports are `oxyde` and `_oxyde_core`,
-and the CLI is `oxyde`.
-Use a separate environment from upstream `oxyde` / `oxyde-core`, which share
-these module names.
+`oxyde-postgres` installs the Python ORM and its Rust extension together.
+Import the ORM as `oxyde` and the extension as `oxyde._oxyde_core`. The CLI
+command is `oxyde`. Use a separate virtual environment from upstream Oxyde
+because both distributions provide the `oxyde` package.
 
 Native wheel builds cover CPython 3.15 and free-threaded CPython 3.15 on
 Linux (glibc and musl, x86_64 and ARM64), macOS (Apple Silicon), and
@@ -44,25 +42,19 @@ source .venv/bin/activate  # Linux/macOS
 .venv\Scripts\activate     # Windows
 ```
 
-### 3. Build Rust Core
+### 3. Build and Install the Package
 
 ```bash
 # Run from the repository root. rust-toolchain.toml pins the Rust toolchain.
 pip install maturin
-maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
-```
-
-### 4. Install Python Package
-
-```bash
-pip install -e ./python
+maturin develop --release
 ```
 
 ## Verify Installation
 
 ```python
 import oxyde
-import _oxyde_core
+import oxyde._oxyde_core
 print(oxyde.__version__)
 ```
 

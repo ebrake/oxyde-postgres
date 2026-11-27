@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `oxyde-postgres` now bundles the Rust core as `oxyde._oxyde_core` so the
+  extension and Python code always ship together. After upgrading, run
+  `pip uninstall oxyde-postgres-core` to remove the retired distribution.
+  Native exceptions now report `oxyde._oxyde_core` as their module.
 - CI tests PostgreSQL 18 and 19.
 - PostgreSQL `oid` and `oid8` results, including array elements, decode as
   Python integers and preserve their full unsigned range.
@@ -13,8 +17,7 @@
   bytes, dates and times, UUIDs, and decimals directly. Expressions,
   containers, enums, subclasses, and types whose `TYPE_REGISTRY` serializer an
   application replaced still go through the Python serializer, so stored
-  values are unchanged. Upgrade both packages together, because writes need
-  the matching core.
+  values are unchanged.
 
     Client-side time per operation with the previous write path (Before) and
     the Rust core (After), median of seven runs, using a stub client that

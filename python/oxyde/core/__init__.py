@@ -1,4 +1,4 @@
-"""Python bindings to the Rust core (_oxyde_core extension module).
+"""Python bindings to the Rust core (oxyde._oxyde_core extension module).
 
 This module re-exports functions from the Rust PyO3 extension module and
 provides the ir submodule for building query intermediate representations.

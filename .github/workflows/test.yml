@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'jj-stack/**']
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,6 +34,7 @@ jobs:
               - '.github/workflows/test.yml'
             python:
               - 'python/**'
+              - 'pyproject.toml'
               - '.github/workflows/test.yml'
 
   # Run pre-commit hooks (linting for both Rust and Python)
@@ -163,12 +164,11 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2.9.1
 
-      - name: Build and install packages
+      - name: Build and install oxyde-postgres
         run: |
           uv venv --python 3.15
           uv pip install maturin
-          uv run --no-project maturin develop --release --manifest-path crates/oxyde-core-py/Cargo.toml
-          uv pip install -e "./python[dev]"
+          uv run --no-project maturin develop --uv --release -E dev
 
       - name: Run tests
         run: uv run --no-project pytest python -v

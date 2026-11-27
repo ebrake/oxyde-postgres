@@ -1,13 +1,13 @@
 //! PyO3 Python extension module exposing Rust core to Python.
 //!
-//! This crate builds the `_oxyde_core` Python module that provides the bridge
+//! This crate builds the `oxyde._oxyde_core` Python module that provides the bridge
 //! between Python's ORM layer and Rust's database execution layer.
 //!
 //! # Module Name
 //!
 //! Compiled as `_oxyde_core.cpython-*.so` and imported as:
 //! ```python
-//! import _oxyde_core
+//! import oxyde._oxyde_core
 //! ```
 //!
 //! # Architecture

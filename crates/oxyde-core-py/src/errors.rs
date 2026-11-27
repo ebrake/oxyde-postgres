@@ -10,43 +10,43 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::PyErr;
 
 pyo3::create_exception!(
-    _oxyde_core,
+    oxyde._oxyde_core,
     DatabaseError,
     PyRuntimeError,
     "A database call failed."
 );
 pyo3::create_exception!(
-    _oxyde_core,
+    oxyde._oxyde_core,
     UnsupportedServerVersionError,
     DatabaseError,
     "The PostgreSQL server version does not support the requested feature."
 );
 pyo3::create_exception!(
-    _oxyde_core,
+    oxyde._oxyde_core,
     IntegrityError,
     DatabaseError,
     "A database constraint was violated."
 );
 pyo3::create_exception!(
-    _oxyde_core,
+    oxyde._oxyde_core,
     UniqueViolationError,
     IntegrityError,
     "A UNIQUE constraint was violated."
 );
 pyo3::create_exception!(
-    _oxyde_core,
+    oxyde._oxyde_core,
     ForeignKeyViolationError,
     IntegrityError,
     "A FOREIGN KEY constraint was violated."
 );
 pyo3::create_exception!(
-    _oxyde_core,
+    oxyde._oxyde_core,
     NotNullViolationError,
     IntegrityError,
     "A NOT NULL constraint was violated."
 );
 pyo3::create_exception!(
-    _oxyde_core,
+    oxyde._oxyde_core,
     CheckViolationError,
     IntegrityError,
     "A CHECK constraint was violated."
