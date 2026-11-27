@@ -695,8 +695,8 @@ class TestM2MPrefetchExecution:
     """Test M2M prefetch execution (not just metadata)."""
 
     @pytest.mark.asyncio
-    async def test_m2m_prefetch_populates_relation(self):
-        """Test that prefetch properly populates M2M relation."""
+    async def test_m2m_prefetch_deduplicates_target_ids_in_first_seen_order(self):
+        """Shared targets are fetched once and attached to each linked post."""
 
         class Tag(Model):
             id: int | None = Field(default=None, db_pk=True)
@@ -727,22 +727,21 @@ class TestM2MPrefetchExecution:
         registered_tables()
 
         # Responses: 1) main posts, 2) through table links, 3) target tags
-        post_rows = [(["id", "title"], [[1, "Post 1"]])]
+        post_rows = [(["id", "title"], [[1, "Post 1"], [2, "Post 2"]])]
         # Through table returns FK column values (post_id, tag_id)
         link_rows = [
-            (["id", "post_id", "tag_id"], [[1, 1, 10], [2, 1, 20]])
+            (["id", "post_id", "tag_id"], [[1, 1, 20], [2, 1, 10], [3, 2, 20]])
         ]
-        tag_rows = [
-            (["id", "name"], [[10, "python"], [20, "rust"]])
-        ]
+        tag_rows = [(["id", "name"], [[10, "python"], [20, "rust"]])]
 
         stub = StubExecuteClient(post_rows + link_rows + tag_rows)
         posts = await Post.objects.prefetch("tags").fetch_models(stub)
 
-        assert len(posts) == 1
-        assert len(posts[0].tags) == 2
-        tag_names = {t.name for t in posts[0].tags}
-        assert tag_names == {"python", "rust"}
+        assert stub.calls[2]["filter_tree"]["value"] == [20, 10]
+        assert {post.id: [tag.name for tag in post.tags] for post in posts} == {
+            1: ["rust", "python"],
+            2: ["rust"],
+        }
 
 
 class TestNestedJoinHydration:
