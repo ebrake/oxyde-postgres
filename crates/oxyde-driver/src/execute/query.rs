@@ -105,9 +105,10 @@ pub async fn execute_mutation_returning(
     };
     match pool {
         DbPool::Postgres(pool) => {
-            let mut conn = pool.acquire().await.map_err(|e| {
-                DriverError::ConnectionError(format!("Failed to acquire connection: {e}"))
-            })?;
+            let mut conn = pool
+                .acquire()
+                .await
+                .map_err(|e| DriverError::db("Failed to acquire connection", e))?;
             check_connection_version(&mut conn, &[required]).await?;
             let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
             encode_stream_mutation_returning::<PgEncoder, _>(query.fetch(&mut *conn), col_types)

@@ -73,6 +73,7 @@ PostgreSQL-focused fork of [Oxyde](https://github.com/mr-fatalyst/oxyde), requir
 - **[Typed containment](guide/filtering.md#array-lookups)** — `contains`, `contained_by`, and `overlap` for arrays and JSON arrays
 - **[NULL-aware uniqueness](guide/models.md#unique-indexes-and-nulls)** — `NULLS NOT DISTINCT` for unique fields and indexes
 - **Transactions** — `transaction.atomic()` context manager with savepoints
+- **[PostgreSQL notifications](guide/connections.md#postgresql-notifications)** — `db.listen()` subscribes on a dedicated connection
 - **[Migrations](guide/migrations.md#schema-replay)** — Rust schema replay, advisory locking, and Django-style migration commands
 - **[Generated stubs](guide/models.md#generated-type-stubs)** — Typed query methods with mypy, pyright, and ty coverage
 - **[Transaction depth](guide/transactions.md#inspecting-transaction-depth)** — Inspect the current task's nested `atomic()` blocks

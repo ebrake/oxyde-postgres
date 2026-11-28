@@ -23,6 +23,12 @@ pub enum DriverError {
     #[error("Pool '{0}' not found")]
     PoolNotFound(String),
 
+    #[error("Invalid listener channels: {0}")]
+    InvalidListenerChannels(String),
+
+    #[error("{0}")]
+    ListenerFailed(String),
+
     #[error("Invalid pool settings: {0}")]
     InvalidPoolSettings(String),
 
@@ -66,6 +72,24 @@ impl DriverError {
         }
     }
 
+    /// Whether the error came from a connection or pool failure outside the server.
+    #[must_use]
+    pub fn is_connection_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectionError(_)
+                | Self::Db {
+                    source: sqlx::Error::Io(_)
+                        | sqlx::Error::Tls(_)
+                        | sqlx::Error::Protocol(_)
+                        | sqlx::Error::PoolTimedOut
+                        | sqlx::Error::PoolClosed
+                        | sqlx::Error::WorkerCrashed,
+                    ..
+                }
+        )
+    }
+
     /// Constraint classification of the underlying database error, if any.
     #[must_use]
     pub fn db_kind(&self) -> Option<DbErrorKind> {
@@ -103,4 +127,33 @@ pub fn require_server_version(actual: i32, required: i32, feature: &'static str)
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DriverError;
+
+    #[test]
+    fn classifies_connection_and_pool_failures() {
+        for source in [
+            sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+            sqlx::Error::Tls("TLS error".into()),
+            sqlx::Error::Protocol("protocol error".into()),
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::WorkerCrashed,
+        ] {
+            assert!(DriverError::db("query", source).is_connection_failure());
+        }
+        assert!(DriverError::ConnectionError("connection failed".into()).is_connection_failure());
+
+        for source in [
+            sqlx::Error::Encode("bad value".into()),
+            sqlx::Error::Decode("bad value".into()),
+            sqlx::Error::Configuration("invalid setting".into()),
+        ] {
+            assert!(!DriverError::db("query", source).is_connection_failure());
+        }
+        assert!(!DriverError::PoolNotFound("default".into()).is_connection_failure());
+    }
 }

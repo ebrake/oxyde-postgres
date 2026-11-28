@@ -6,7 +6,7 @@
 //! hierarchy in `oxyde.exceptions`.
 
 use oxyde_driver::{DbErrorKind, DriverError};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::PyErr;
 
 pyo3::create_exception!(
@@ -15,6 +15,7 @@ pyo3::create_exception!(
     PyRuntimeError,
     "A database call failed."
 );
+pyo3::create_exception!(oxyde._oxyde_core, _ListenerFailed, PyRuntimeError);
 pyo3::create_exception!(
     oxyde._oxyde_core,
     UnsupportedServerVersionError,
@@ -58,12 +59,25 @@ pub(crate) fn driver_err(e: &DriverError) -> PyErr {
     if matches!(e, DriverError::UnsupportedServerVersion { .. }) {
         return UnsupportedServerVersionError::new_err(message);
     }
+    if matches!(e, DriverError::InvalidListenerChannels(_)) {
+        return PyValueError::new_err(message);
+    }
     match e.db_kind() {
         Some(DbErrorKind::UniqueViolation) => UniqueViolationError::new_err(message),
         Some(DbErrorKind::ForeignKeyViolation) => ForeignKeyViolationError::new_err(message),
         Some(DbErrorKind::NotNullViolation) => NotNullViolationError::new_err(message),
         Some(DbErrorKind::CheckViolation) => CheckViolationError::new_err(message),
         Some(DbErrorKind::Other) => DatabaseError::new_err(message),
+        None if e.is_connection_failure() => DatabaseError::new_err(message),
         None => PyErr::new::<PyRuntimeError, _>(message),
+    }
+}
+
+/// Map listener database errors and distinguish a previously recorded terminal failure.
+pub(crate) fn listener_err(e: &DriverError) -> PyErr {
+    match e {
+        DriverError::Db { .. } => DatabaseError::new_err(e.to_string()),
+        DriverError::ListenerFailed(message) => _ListenerFailed::new_err(message.clone()),
+        _ => driver_err(e),
     }
 }

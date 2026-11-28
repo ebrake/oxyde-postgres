@@ -69,15 +69,16 @@ async fn fetch_explain_rows(
     let handle = registry().get(pool_name).await?;
     match handle.clone_pool() {
         DbPool::Postgres(pool) => {
-            let mut conn = pool.acquire().await.map_err(|e| {
-                DriverError::ConnectionError(format!("Failed to acquire connection: {e}"))
-            })?;
+            let mut conn = pool
+                .acquire()
+                .await
+                .map_err(|e| DriverError::db("Failed to acquire connection", e))?;
             check_connection_version(&mut conn, required_versions).await?;
             let query = bind_postgres(sqlx::query(sqlx::AssertSqlSafe(sql)), params)?;
             let rows = query
                 .fetch_all(&mut *conn)
                 .await
-                .map_err(|e| DriverError::ExecutionError(format!("EXPLAIN failed: {e}")))?;
+                .map_err(|e| DriverError::db("EXPLAIN failed", e))?;
             Ok(rows.iter().map(row_to_map).collect())
         }
     }

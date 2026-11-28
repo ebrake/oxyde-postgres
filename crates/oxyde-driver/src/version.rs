@@ -21,9 +21,7 @@ async fn connection_server_version(conn: &mut PgConnection) -> Result<i32> {
     sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int4")
         .fetch_one(conn)
         .await
-        .map_err(|e| {
-            DriverError::ExecutionError(format!("Cannot determine PostgreSQL server version: {e}"))
-        })
+        .map_err(|e| DriverError::db("Cannot determine PostgreSQL server version", e))
 }
 
 /// Check each `(server_version_num, feature)` requirement against this connection.

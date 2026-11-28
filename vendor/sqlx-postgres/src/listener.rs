@@ -1,11 +1,13 @@
 use std::fmt::{self, Debug};
 use std::str::from_utf8;
+use std::time::{Duration, Instant};
 
 use futures_channel::mpsc;
 use futures_core::future::BoxFuture;
 use futures_core::stream::{BoxStream, Stream};
 use futures_util::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use sqlx_core::acquire::Acquire;
+use sqlx_core::rt;
 use sqlx_core::sql_str::{AssertSqlSafe, SqlStr};
 use sqlx_core::transaction::Transaction;
 use sqlx_core::Either;
@@ -32,6 +34,19 @@ pub struct PgListener {
     channels: Vec<String>,
     ignore_close_event: bool,
     eager_reconnect: bool,
+    discard_connection_on_drop: bool,
+}
+
+// oxyde patch: Discard the connection if re-subscribing fails or is interrupted.
+struct PendingListenerConnection(Option<PoolConnection<Postgres>>);
+
+impl Drop for PendingListenerConnection {
+    fn drop(&mut self) {
+        if let Some(mut connection) = self.0.take() {
+            connection.inner.stream.notifications = None;
+            drop(connection.detach());
+        }
+    }
 }
 
 /// An asynchronous notification from Postgres.
@@ -72,6 +87,7 @@ impl PgListener {
             channels: Vec::new(),
             ignore_close_event: false,
             eager_reconnect: true,
+            discard_connection_on_drop: false,
         })
     }
 
@@ -109,6 +125,12 @@ impl PgListener {
     /// have been.
     pub fn eager_reconnect(&mut self, val: bool) {
         self.eager_reconnect = val;
+    }
+
+    /// Close the connection immediately when lost or when the listener is dropped.
+    /// Defaults to `false`, which lets the listener clean up in the background.
+    pub fn discard_connection_on_drop(&mut self, val: bool) {
+        self.discard_connection_on_drop = val;
     }
 
     /// Starts listening for notifications on a channel.
@@ -175,17 +197,48 @@ impl PgListener {
     #[inline]
     async fn connect_if_needed(&mut self) -> Result<(), Error> {
         if self.connection.is_none() {
-            let mut connection = self.pool.acquire().await?;
-            connection.inner.stream.notifications = self.buffer_tx.take();
+            let mut pending = PendingListenerConnection(Some(self.pool.acquire().await?));
+            let connection = pending.0.as_mut().unwrap();
+            // Keep the sender across failed or cancelled LISTEN attempts.
+            connection.inner.stream.notifications = self.buffer_tx.clone();
 
             connection
                 .execute(AssertSqlSafe(build_listen_all_query(&self.channels)))
                 .await?;
 
-            self.connection = Some(connection);
+            self.connection = pending.0.take();
+            self.buffer_tx = None;
         }
 
         Ok(())
+    }
+
+    async fn reconnect(&mut self) -> Result<(), Error> {
+        // oxyde patch (upstream candidate): pace I/O retries and share one
+        // deadline across acquires, LISTEN statements, and backoff.
+        let budget = self.pool.options().get_acquire_timeout();
+        let started = Instant::now();
+        let max_backoff = Duration::from_secs(1).min(budget / 5);
+        let mut backoff = Duration::from_millis(10).min(max_backoff);
+        let mut last_io = None;
+
+        let result = rt::timeout(budget, async {
+            while started.elapsed() < budget {
+                match self.connect_if_needed().await {
+                    Err(Error::Io(error)) => last_io = Some(error),
+                    result => return Some(result),
+                }
+                rt::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+            }
+            None
+        })
+        .await;
+
+        match result {
+            Ok(Some(result)) => result,
+            Ok(None) | Err(_) => Err(last_io.map_or(Error::PoolTimedOut, Error::Io)),
+        }
     }
 
     #[inline]
@@ -257,6 +310,19 @@ impl PgListener {
     ///
     /// [`eager_reconnect`]: PgListener::eager_reconnect
     pub async fn try_recv(&mut self) -> Result<Option<PgNotification>, Error> {
+        // Flush the buffer first. It only fills when the listener is used as a connection.
+        if let Some(notification) = self.next_buffered() {
+            return Ok(Some(notification));
+        }
+
+        if self.eager_reconnect && self.connection.is_none() {
+            self.reconnect().await?;
+            // oxyde patch: LISTEN can buffer notifications before ReadyForQuery.
+            if let Some(notification) = self.next_buffered() {
+                return Ok(Some(notification));
+            }
+        }
+
         match self.recv_without_recovery().await {
             Ok(notification) => Ok(Some(notification)),
 
@@ -265,22 +331,15 @@ impl PgListener {
             Err(Error::Io(_)) => {
                 if let Some(mut conn) = self.connection.take() {
                     self.buffer_tx = conn.inner.stream.notifications.take();
-                    // Close the connection in a background task, so we can continue.
-                    conn.close_on_drop();
+                    if self.discard_connection_on_drop {
+                        drop(conn.detach());
+                    } else {
+                        conn.close_on_drop();
+                    }
                 }
 
                 if self.eager_reconnect {
-                    // If reconnecting fails due to an IO error - retry
-                    // if the pool is unable to get a new working connection
-                    // it will eventually error out with Error::PoolTimedOut and
-                    // end this loop
-                    loop {
-                        match self.connection().await {
-                            Ok(_) => break,
-                            Err(Error::Io(_)) => continue,
-                            Err(e) => return Err(e),
-                        }
-                    }
+                    self.reconnect().await?;
                 }
 
                 // lost connection
@@ -291,10 +350,11 @@ impl PgListener {
     }
 
     async fn recv_without_recovery(&mut self) -> Result<PgNotification, Error> {
-        // Flush the buffer first, if anything
-        // This would only fill up if this listener is used as a connection
-        if let Some(notification) = self.next_buffered() {
-            return Ok(notification);
+        if self.connection.is_none() {
+            self.connect_if_needed().await?;
+            if let Some(notification) = self.next_buffered() {
+                return Ok(notification);
+            }
         }
 
         // Fetch our `CloseEvent` listener, if applicable.
@@ -361,6 +421,12 @@ impl PgListener {
 impl Drop for PgListener {
     fn drop(&mut self) {
         if let Some(mut conn) = self.connection.take() {
+            if self.discard_connection_on_drop {
+                conn.inner.stream.notifications = None;
+                drop(conn.detach());
+                return;
+            }
+
             let fut = async move {
                 let _ = conn.execute("UNLISTEN *").await;
 
