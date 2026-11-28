@@ -294,6 +294,44 @@ from oxyde import disconnect_all
 await disconnect_all()  # Close all registered connections
 ```
 
+## PostgreSQL Notifications
+
+`db.listen()` subscribes before entering the context. Publish from another task or database session.
+
+```python
+from oxyde import db, execute_raw
+
+async def watch():
+    async with db.listen("run_changed", using="default") as listener:
+        async for notification in listener:
+            print(notification.channel, notification.payload, notification.pid)
+
+async def publish():
+    await execute_raw("SELECT pg_notify($1, $2)", ["run_changed", "run-123"])
+```
+
+Each immutable `db.Notification` has a `channel` and `payload` (strings) and the publisher's backend `pid` (an integer).
+Use `recv()` or async iteration, with one pending receive per listener. Calling `close()` or
+closing or replacing the named pool ends iteration and causes `recv()` to raise `db.ListenerClosedError`.
+
+The listener reconnects automatically after a lost connection, backing off between attempts.
+If it cannot reconnect within the pool's acquire timeout, `recv()` raises `DatabaseError`,
+the listener stays open, and the next receive retries. Other transient errors, such as a server
+shutdown or a read-only standby rejecting `LISTEN`, have the same behavior.
+A terminal receive error also raises `DatabaseError` and closes the listener.
+Later calls to `recv()` or async iteration raise `db.ListenerClosedError` with the original error message.
+
+Each listener uses one extra connection outside the named pool's limit. It inherits the URL, TLS, and
+connection settings and runs independently of `atomic()`.
+`LISTEN` requires a direct PostgreSQL URL or a PgBouncer session-mode URL. Channel names are case-sensitive like `pg_notify()`.
+Pass at least one unique name of 1–63 UTF-8 bytes with no NUL. Invalid names raise `ValueError`.
+
+!!! note
+    Notifications are wake-up hints. Notifications sent while the listener is reconnecting are lost.
+    Subscribe before reading state and reconcile periodically. For periodic timeouts, keep one
+    pending receive task and wait with `asyncio.wait()`. Cancelling a receive can drop a notification.
+    See [the runnable example](https://github.com/ebrake/oxyde-postgres/blob/main/examples/listen_notify.py).
+
 ## Error Handling
 
 ```python

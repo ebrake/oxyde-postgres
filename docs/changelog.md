@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- `db.listen()` subscribes to PostgreSQL notifications with one dedicated connection
+  outside the named pool's limit. See [upstream PR #48](https://github.com/mr-fatalyst/oxyde/pull/48).
+- Connection and pool failures, including acquire timeouts, now raise `DatabaseError`,
+  a subclass of `RuntimeError`.
+- Listener reconnect attempts back off and stop at the named pool's acquire timeout.
+- Initial listener subscriptions are bounded by the named pool's acquire timeout.
+- Closing a listener releases its dedicated connection immediately.
+- Listeners stay open when a receive raises a transient connection error, including when
+  a read-only standby rejects `LISTEN`. A terminal receive error raises `DatabaseError` and
+  closes the listener. Later receives and iteration raise `db.ListenerClosedError` with
+  the original error message. The listener example keeps one pending receive across
+  periodic timeouts.
+
 ## 0.5.0 — Bundled Rust core and PostgreSQL 19 features
 
 - `oxyde-postgres` now bundles the Rust core as `oxyde._oxyde_core` so the

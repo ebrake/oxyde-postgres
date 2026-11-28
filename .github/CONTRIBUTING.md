@@ -82,7 +82,7 @@ python/oxyde/
   warnings CI does not (or vice versa) — always build through rustup.
 - **Python** 3.15+
 - **uv** and **maturin** for editable builds
-- **Docker** — database tests start PostgreSQL 18 by default via testcontainers. CI tests PostgreSQL 18 and 19. Set `OXYDE_TEST_POSTGRES_IMAGE=postgres:19-alpine` to test PostgreSQL 19 locally, or set `OXYDE_TEST_POSTGRES_URL` to a disposable PostgreSQL 18+ database. Tests create and drop isolated schemas. Database tests fail if the server cannot start.
+- **Docker** — database tests start PostgreSQL 18 by default via testcontainers. CI tests PostgreSQL 18 and 19. Set `OXYDE_TEST_POSTGRES_IMAGE=postgres:19-alpine` to test PostgreSQL 19 locally, or set `OXYDE_TEST_POSTGRES_URL` to a disposable PostgreSQL 18+ database. Tests create and drop isolated schemas. Database tests fail if the server cannot start. Listener reconnect-failure tests skip without `CREATEROLE` or superuser privileges, and proxy tests that inspect protocol frames skip if the server requires encrypted connections.
 
 ## Development Setup
 

@@ -26,6 +26,9 @@
 //! - `close_pool(name)` → Coroutine
 //! - `close_all_pools()` → Coroutine
 //!
+//! ## Notifications
+//! - `listen(pool_name, channels)` → Coroutine[ListenerHandle]
+//!
 //! ## Query Execution
 //! - `execute(pool_name, ir_bytes)` → Coroutine[bytes]
 //! - `execute_in_transaction(pool_name, tx_id, ir_bytes)` → Coroutine[bytes]
@@ -79,6 +82,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod convert;
 mod errors;
 mod execute;
+mod listener;
 mod migration;
 mod pool;
 mod serialize;
@@ -98,6 +102,7 @@ fn oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pool::init_pool_overwrite, m)?)?;
     m.add_function(wrap_pyfunction!(pool::close_pool, m)?)?;
     m.add_function(wrap_pyfunction!(pool::close_all_pools, m)?)?;
+    m.add_function(wrap_pyfunction!(listener::listen, m)?)?;
     m.add_function(wrap_pyfunction!(execute::execute, m)?)?;
     m.add_function(wrap_pyfunction!(serialize::serialize_column_values, m)?)?;
     m.add_function(wrap_pyfunction!(pool::begin_transaction, m)?)?;
@@ -125,6 +130,10 @@ fn oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Exception classes (constraint classification comes from the driver)
     m.add("DatabaseError", m.py().get_type::<errors::DatabaseError>())?;
+    m.add(
+        "_ListenerFailed",
+        m.py().get_type::<errors::_ListenerFailed>(),
+    )?;
     m.add(
         "UnsupportedServerVersionError",
         m.py().get_type::<errors::UnsupportedServerVersionError>(),

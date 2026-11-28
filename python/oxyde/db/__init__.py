@@ -20,6 +20,9 @@ High-Level Functions:
         FastAPI/Starlette lifespan context manager.
         Example: app = FastAPI(lifespan=db.lifespan(default="..."))
 
+    listen(*channels, using="default"):
+        Subscribe to PostgreSQL notifications on a dedicated connection.
+
 Classes:
     AsyncDatabase: Connection pool wrapper with execute() method.
     AsyncTransaction: Transaction wrapper with execute() method.
@@ -56,6 +59,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
 
 from . import transaction
+from .listener import ListenerClosedError, Notification, NotificationListener, listen
 from .pool import AsyncDatabase, PoolSettings
 from .registry import (
     disconnect_all,
@@ -210,11 +214,15 @@ __all__ = [
     "close",
     "connect",
     "lifespan",
+    "listen",
     "get_connection",
     # Classes
     "AsyncDatabase",
     "AsyncTransaction",
     "PoolSettings",
+    "Notification",
+    "NotificationListener",
+    "ListenerClosedError",
     "TransactionTimeoutError",
     # Transactions (Django-style: transaction.atomic())
     "transaction",

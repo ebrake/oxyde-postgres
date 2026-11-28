@@ -52,6 +52,16 @@ Transaction management:
 
 **Best for:** Understanding ACID guarantees and transaction patterns.
 
+### 4. listen_notify.py - PostgreSQL Notifications
+
+Subscribe before reading state and reconcile periodically when a hint may have been missed.
+
+```bash
+DATABASE_URL=postgresql://user:pass@localhost:5432/mydb python examples/listen_notify.py
+```
+
+From another database session, publish a hint with `SELECT pg_notify('run_changed', 'run-123');`.
+
 ## Database Support
 
 Examples require PostgreSQL 18 or newer:

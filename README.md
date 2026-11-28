@@ -11,6 +11,7 @@ Oxyde for PostgreSQL is a PostgreSQL-focused fork of [Oxyde ORM](https://github.
 - Native PostgreSQL arrays, JSONB, enums, UUIDs, decimals, `RETURNING`, and row locks.
 - Array and JSON lookups: `contains`, `contained_by`, and `overlap`.
 - Async transactions with nested savepoints and public transaction-depth reporting.
+- PostgreSQL `LISTEN`/`NOTIFY` subscriptions on dedicated connections with `db.listen()`.
 - Schema migrations with PostgreSQL advisory locking and transactional DDL.
 - Rust SQL generation, connection pooling, and execution.
 - Cache-disabled unnamed statements for PostgreSQL/PgBouncer, including cold custom-type decoding without replaying queries.

@@ -7,7 +7,8 @@ import uuid
 import pytest
 import pytest_asyncio
 
-from oxyde import AsyncDatabase, PoolSettings, disconnect_all
+from oxyde import AsyncDatabase, PoolSettings, db, disconnect_all
+from oxyde.core.wrapper import DatabaseError
 from oxyde.queries.raw import execute_raw
 
 from .conftest import _DIALECTS
@@ -60,8 +61,6 @@ class TestPoolSettings:
         )
         assert rows[0]["application_name"] == "oxyde-test"
 
-
-
     @pytest.mark.asyncio
     async def test_test_before_acquire(self, pool_db):
         pool_db.settings = PoolSettings(test_before_acquire=True)
@@ -71,3 +70,15 @@ class TestPoolSettings:
         # connections. Verify the pool is functional.
         rows = await execute_raw("SELECT 1 AS ok", using=pool_db.name)
         assert rows[0]["ok"] == 1
+
+
+@pytest.mark.asyncio
+async def test_query_pool_acquire_timeout_raises_database_error(postgres_url):
+    name = f"timeout_{uuid.uuid4().hex}"
+    settings = PoolSettings(max_connections=1, acquire_timeout=0.5)
+    async with db.connect(postgres_url, name=name, settings=settings) as database:
+        async with db.atomic(using=name):
+            # An explicit database client bypasses the transaction and needs a pool slot.
+            with pytest.raises(DatabaseError, match="pool timed out") as error:
+                await execute_raw("SELECT 1", client=database)
+            assert isinstance(error.value, RuntimeError)

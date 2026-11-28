@@ -24,6 +24,9 @@ Functions Exported:
     Pool management:
         init_pool, init_pool_overwrite, close_pool, close_all_pools
 
+    Notifications:
+        listen
+
     Query execution:
         execute, execute_in_transaction
 
@@ -71,6 +74,8 @@ _FUNCTION_REGISTRY: list[tuple[str, str, bool, bool]] = [
     ("init_pool_overwrite", "init_pool_overwrite", True, False),
     ("close_pool", "close_pool", True, False),
     ("close_all_pools", "close_all_pools", True, False),
+    # Notifications
+    ("listen", "listen", True, False),
     # Query execution
     ("execute", "execute", True, False),
     ("execute_in_transaction", "execute_in_transaction", True, False),
@@ -181,6 +186,7 @@ _exports = _load_functions()
 
 # Export individual functions for IDE support and type checking
 execute = _exports["execute"]
+listen = _exports["listen"]
 execute_in_transaction = _exports["execute_in_transaction"]
 init_pool = _exports["init_pool"]
 init_pool_overwrite = _exports["init_pool_overwrite"]
@@ -287,6 +293,7 @@ except ImportError:  # pragma: no cover - extension missing or older
 
 
 __all__ = [
+    "listen",
     "execute",
     "execute_in_transaction",
     "serialize_column_values",
