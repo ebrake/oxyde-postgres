@@ -5,7 +5,10 @@ use sqlx::postgres::PgRow;
 use tracing::debug;
 
 use crate::bind::bind_postgres;
-use crate::convert::{encoder::CellEncoder, postgres::PgEncoder};
+use crate::convert::{
+    encoder::{write_cell, CellEncoder},
+    postgres::PgEncoder,
+};
 use crate::error::{DriverError, Result};
 use crate::pool::DbPool;
 use crate::transaction::DbTx;
@@ -30,7 +33,7 @@ fn extract_pks(rows: &[PgRow], pk_col: &str) -> Vec<rmpv::Value> {
     rows.iter()
         .map(|row| {
             buffer.clear();
-            PgEncoder::encode_cell(&mut buffer, row, index, column);
+            write_cell(&mut buffer, &PgEncoder::decode_cell(row, index, column).0);
             rmpv::decode::read_value(&mut buffer.as_slice()).unwrap_or(rmpv::Value::Nil)
         })
         .collect()

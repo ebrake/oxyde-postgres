@@ -1,14 +1,14 @@
 //! CellEncoder trait and generic columnar encoding.
 //!
-//! Encodes database rows directly to msgpack bytes without intermediate
-//! serde_json::Value. Each backend implements CellEncoder with its
-//! own type-specific decoding; the generic functions handle the
-//! columnar structure.
+//! Writes decoded cells to MessagePack one at a time. Backend-specific
+//! decoding and the columnar result layout are kept separate.
 
 use std::collections::{HashMap, HashSet};
 
 use oxyde_codec::ColumnTypeSpec;
 use sqlx::{Column, Database, Row};
+
+use super::cell::{ArrayItem, Cell};
 
 /// Column metadata for encoding.
 #[derive(Debug, Clone)]
@@ -48,10 +48,7 @@ impl From<bool> for ResultOptions<'_> {
     }
 }
 
-/// Backend-specific cell encoder.
-///
-/// Implementations decode a single cell from an sqlx Row and write
-/// it directly to a msgpack buffer via `rmp::encode::write_*`.
+/// Backend-specific result cell decoding.
 pub trait CellEncoder {
     type Row: sqlx::Row;
 
@@ -78,37 +75,11 @@ pub trait CellEncoder {
             .collect()
     }
 
-    /// Try to encode a cell using the typed column spec.
-    /// Returns `true` if the spec was recognized and encoded;
-    /// `false` (for `Unknown`) falls through to the db_type path.
-    fn try_encode_by_spec(
-        buf: &mut Vec<u8>,
-        row: &Self::Row,
-        idx: usize,
-        spec: &ColumnTypeSpec,
-    ) -> bool;
-
-    /// Encode a cell using the database column type (fallback).
-    fn encode_by_db_type(buf: &mut Vec<u8>, row: &Self::Row, idx: usize, db_type: &str);
-
     /// Name the Python conversion for a column whose MessagePack type is lossy.
     fn result_kind(col: &ColumnMeta) -> Option<&'static str>;
 
-    /// Encode a cell and report any conversion kind discovered from its value.
-    fn encode_cell(
-        buf: &mut Vec<u8>,
-        row: &Self::Row,
-        idx: usize,
-        col: &ColumnMeta,
-    ) -> Option<&'static str> {
-        if let Some(spec) = &col.spec {
-            if Self::try_encode_by_spec(buf, row, idx, spec) {
-                return None;
-            }
-        }
-        Self::encode_by_db_type(buf, row, idx, &col.db_type);
-        None
-    }
+    /// Decode one cell and report any conversion kind discovered from its value.
+    fn decode_cell(row: &Self::Row, idx: usize, col: &ColumnMeta) -> (Cell, Option<&'static str>);
 }
 
 // ── msgpack write helpers ──────────────────────────────────────────────
@@ -157,6 +128,46 @@ pub fn write_array_len(buf: &mut Vec<u8>, len: u32) {
 #[inline]
 pub fn write_map_len(buf: &mut Vec<u8>, len: u32) {
     rmp::encode::write_map_len(buf, len).unwrap();
+}
+
+/// Write a decoded cell using the legacy MessagePack representation.
+#[inline]
+pub fn write_cell(buf: &mut Vec<u8>, cell: &Cell) {
+    match cell {
+        Cell::Null => write_nil(buf),
+        Cell::Bool(v) => write_bool(buf, *v),
+        Cell::Int(v) => write_i64(buf, *v),
+        Cell::UInt(v) => write_u64(buf, *v),
+        Cell::Float(v) => write_f64(buf, *v),
+        Cell::Str(v) => write_str(buf, v),
+        Cell::DecimalText(v) => write_str(buf, v),
+        Cell::Bytes(v) => write_bin(buf, v),
+        Cell::Duration(micros) => write_f64(buf, *micros as f64 / 1_000_000.0),
+        Cell::Json(value) => write_json_value(buf, value),
+        Cell::Array(values) => {
+            write_array_len(buf, values.len() as u32);
+            values.for_each(|item| match item {
+                ArrayItem::Cell(value) => write_cell(buf, value),
+                ArrayItem::Str(value) => write_str(buf, value),
+                ArrayItem::Bytes(value) => write_bin(buf, value),
+                ArrayItem::Json(value) => write_json_value(buf, value),
+            });
+        }
+        Cell::Uuid(v) => write_str(
+            buf,
+            v.hyphenated()
+                .encode_lower(&mut uuid::Uuid::encode_buffer()),
+        ),
+        Cell::Decimal(_)
+        | Cell::DateTime(_)
+        | Cell::DateTimeTz(_)
+        | Cell::Date(_)
+        | Cell::Time(_)
+        | Cell::TimeTz(_, _)
+        | Cell::DurationAggregate(_) => {
+            write_str(buf, &cell.wire_text().expect("typed string cell"));
+        }
+    }
 }
 
 /// Write a serde_json::Value as msgpack (for JSON columns).
@@ -250,10 +261,6 @@ pub struct RelationInfo {
     pub text_columns: HashSet<usize>,
 }
 
-/// Msgpack nil byte (0xc0) — used to detect NULL PKs from LEFT JOINs.
-const MSGPACK_NIL: u8 = 0xc0;
-
-/// Encode a single cell into a small buffer (for PK extraction).
 struct RelGroup<'a> {
     prefix: &'a str,
     pk_col_idx: usize,
@@ -265,10 +272,14 @@ struct RelGroup<'a> {
     refs_buf: Vec<u8>,
 }
 
-fn encode_pk_cell<E: CellEncoder>(row: &E::Row, col_idx: usize, col_meta: &ColumnMeta) -> Vec<u8> {
-    let mut pk_buf = Vec::with_capacity(16);
-    let _ = E::encode_cell(&mut pk_buf, row, col_idx, col_meta);
-    pk_buf
+fn encode_primary_key(cell: &Cell) -> Option<Vec<u8>> {
+    if matches!(cell, Cell::Null) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(16);
+    write_cell(&mut bytes, cell);
+    // A JSON null primary key also encodes as nil in the bytes protocol.
+    (bytes.as_slice() != [0xc0]).then_some(bytes)
 }
 
 fn write_kinds(buf: &mut Vec<u8>, kinds: impl Iterator<Item = Option<&'static str>>) {
@@ -420,32 +431,35 @@ where
         write_array_len(&mut main_rows_buf, main_indices.len() as u32);
         for (pos, &idx) in main_indices.iter().enumerate() {
             let (col, kind) = &mut main_columns[pos];
-            if let Some(value_kind) = E::encode_cell(&mut main_rows_buf, row, idx, col) {
-                *kind = Some(value_kind);
+            let (cell, value_kind) = E::decode_cell(row, idx, col);
+            write_cell(&mut main_rows_buf, &cell);
+            if value_kind.is_some() {
+                *kind = value_kind;
             }
         }
 
         if has_rels {
             for group in &mut rel_groups {
                 let pk_pos = group.pk_col_idx - group.col_indices[0];
-                let pk_bytes = encode_pk_cell::<E>(row, group.pk_col_idx, &group.col_metas[pk_pos]);
-
-                if pk_bytes.len() == 1 && pk_bytes[0] == MSGPACK_NIL {
+                let (pk, _) = E::decode_cell(row, group.pk_col_idx, &group.col_metas[pk_pos]);
+                let Some(pk_bytes) = encode_primary_key(&pk) else {
                     write_nil(&mut group.refs_buf);
-                } else {
-                    if group.seen.insert(pk_bytes.clone()) {
-                        group.data_buf.extend_from_slice(&pk_bytes);
-                        write_array_len(&mut group.data_buf, group.col_indices.len() as u32);
-                        for (pos, &idx) in group.col_indices.iter().enumerate() {
-                            let _ = E::encode_cell(
-                                &mut group.data_buf,
-                                row,
-                                idx,
-                                &group.col_metas[pos],
-                            );
+                    continue;
+                };
+                let pk_start = group.refs_buf.len();
+                group.refs_buf.extend_from_slice(&pk_bytes);
+                if group.seen.insert(pk_bytes) {
+                    let key = &group.refs_buf[pk_start..];
+                    group.data_buf.extend_from_slice(key);
+                    write_array_len(&mut group.data_buf, group.col_indices.len() as u32);
+                    for (pos, &idx) in group.col_indices.iter().enumerate() {
+                        if pos == pk_pos {
+                            group.data_buf.extend_from_slice(key);
+                        } else {
+                            let (cell, _) = E::decode_cell(row, idx, &group.col_metas[pos]);
+                            write_cell(&mut group.data_buf, &cell);
                         }
                     }
-                    group.refs_buf.extend_from_slice(&pk_bytes);
                 }
             }
         }
@@ -544,7 +558,7 @@ where
     let mut rows_buf = Vec::new();
     write_array_len(&mut rows_buf, columns.len() as u32);
     for (i, col) in columns.iter().enumerate() {
-        let _ = E::encode_cell(&mut rows_buf, &first_row, i, col);
+        write_cell(&mut rows_buf, &E::decode_cell(&first_row, i, col).0);
     }
 
     while let Some(row_res) = stream.next().await {
@@ -552,7 +566,7 @@ where
         num_rows += 1;
         write_array_len(&mut rows_buf, columns.len() as u32);
         for (i, col) in columns.iter().enumerate() {
-            let _ = E::encode_cell(&mut rows_buf, &row, i, col);
+            write_cell(&mut rows_buf, &E::decode_cell(&row, i, col).0);
         }
     }
 
@@ -572,4 +586,201 @@ where
     buf.extend_from_slice(&rows_buf);
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ArrayValues;
+    use chrono::{FixedOffset, NaiveDate, NaiveTime, TimeZone};
+    use rust_decimal::Decimal;
+    use std::borrow::Cow;
+    use uuid::Uuid;
+
+    #[test]
+    fn temporal_wire_formats_match_chrono_strftime() {
+        for year in [-12345, -1, 0, 1, 2026, 9999, 10000, 12345] {
+            let date = NaiveDate::from_ymd_opt(year, 11, 26).unwrap();
+            assert_eq!(
+                Cell::Date(date).wire_text().unwrap().as_str(),
+                date.format("%Y-%m-%d").to_string(),
+            );
+            for fraction in [0, 10, 100, 1000, 123_456_000, 123_456_789] {
+                let time = NaiveTime::from_hms_nano_opt(13, 4, 5, fraction).unwrap();
+                let stamp = date.and_time(time);
+                assert_eq!(
+                    Cell::Time(time).wire_text().unwrap().as_str(),
+                    time.format("%H:%M:%S%.f").to_string(),
+                );
+                assert_eq!(
+                    Cell::DateTime(stamp).wire_text().unwrap().as_str(),
+                    stamp.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_nil_primary_keys_are_missing() {
+        assert!(encode_primary_key(&Cell::Null).is_none());
+        assert!(encode_primary_key(&Cell::Json(serde_json::Value::Null)).is_none());
+        assert_eq!(encode_primary_key(&Cell::Int(1)), Some(vec![1]));
+    }
+
+    #[test]
+    fn decoded_cells_keep_the_legacy_messagepack_bytes() {
+        let date = NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
+        let time = NaiveTime::from_hms_micro_opt(13, 4, 5, 6).unwrap();
+        let stamp = date.and_time(time);
+        let offset = FixedOffset::east_opt(2 * 3600).unwrap();
+        let cells = [
+            (Cell::Null, rmpv::Value::Nil),
+            (Cell::Bool(true), true.into()),
+            (Cell::Int(-200), (-200).into()),
+            (Cell::UInt(u64::MAX), u64::MAX.into()),
+            (Cell::Float(1.5), rmpv::Value::F64(1.5)),
+            (Cell::Str("text".into()), "text".into()),
+            (Cell::Bytes(vec![0, 255]), rmpv::Value::Binary(vec![0, 255])),
+            (
+                Cell::Uuid(Uuid::nil()),
+                "00000000-0000-0000-0000-000000000000".into(),
+            ),
+            (Cell::Decimal(Decimal::new(12300, 4)), "1.2300".into()),
+            (Cell::DecimalText(Cow::Borrowed("NaN")), "NaN".into()),
+            (Cell::DateTime(stamp), "2026-11-26T13:04:05.000006".into()),
+            (
+                Cell::DateTimeTz(offset.from_local_datetime(&stamp).unwrap()),
+                "2026-11-26T13:04:05.000006+02:00".into(),
+            ),
+            (Cell::Date(date), "2026-11-26".into()),
+            (Cell::Time(time), "13:04:05.000006".into()),
+            (Cell::TimeTz(time, offset), "13:04:05.000006+02:00".into()),
+            (Cell::Duration(-1_500_000), rmpv::Value::F64(-1.5)),
+            (Cell::DurationAggregate(1_500_001), "P0DT1.500001S".into()),
+            (
+                Cell::Array(Box::new(ArrayValues::Bool(vec![Some(false), None]))),
+                rmpv::Value::Array(vec![false.into(), rmpv::Value::Nil]),
+            ),
+            (
+                Cell::Array(Box::new(ArrayValues::Cells(vec![
+                    Cell::Null,
+                    Cell::Json(serde_json::json!({"a": [1, true]})),
+                ]))),
+                rmpv::Value::Array(vec![
+                    rmpv::Value::Nil,
+                    rmpv::Value::Map(vec![(
+                        "a".into(),
+                        rmpv::Value::Array(vec![1.into(), true.into()]),
+                    )]),
+                ]),
+            ),
+        ];
+        for (cell, value) in cells {
+            let mut actual = Vec::new();
+            write_cell(&mut actual, &cell);
+            let expected = rmp_serde::to_vec(&value).unwrap();
+            assert_eq!(actual, expected, "{cell:?}");
+        }
+    }
+
+    #[test]
+    fn typed_arrays_match_cell_array_messagepack_bytes() {
+        use chrono::{FixedOffset, NaiveDate};
+        use rust_decimal::Decimal;
+
+        use crate::{PgNumeric, PgTemporal};
+
+        let uuid = Uuid::from_u128(42);
+        let decimal = Decimal::new(1234, 2);
+        let date = NaiveDate::from_ymd_opt(2026, 11, 28).unwrap();
+        let datetime = date.and_hms_micro_opt(13, 4, 5, 123).unwrap();
+        let utc = datetime.and_utc();
+        let time = datetime.time();
+        let offset = FixedOffset::east_opt(3600).unwrap();
+        let timetz = sqlx::postgres::types::PgTimeTz { time, offset };
+        let json = serde_json::json!({"items": [true, null, 1]});
+        let cases = [
+            (ArrayValues::Bool(vec![Some(true), None]), Cell::Bool(true)),
+            (ArrayValues::I16(vec![Some(-2), None]), Cell::Int(-2)),
+            (
+                ArrayValues::I32(vec![Some(40_000), None]),
+                Cell::Int(40_000),
+            ),
+            (
+                ArrayValues::I64(vec![Some(i64::MAX), None]),
+                Cell::Int(i64::MAX),
+            ),
+            (
+                ArrayValues::F32(vec![Some(0.1), None]),
+                Cell::Float(f64::from(0.1_f32)),
+            ),
+            (ArrayValues::F64(vec![Some(0.1), None]), Cell::Float(0.1)),
+            (
+                ArrayValues::Duration(vec![Some(-1_500_000), None]),
+                Cell::Duration(-1_500_000),
+            ),
+            (ArrayValues::Uuid(vec![Some(uuid), None]), Cell::Uuid(uuid)),
+            (
+                ArrayValues::U32(vec![Some(u32::MAX), None]),
+                Cell::UInt(u64::from(u32::MAX)),
+            ),
+            (
+                ArrayValues::U64(vec![Some(u64::MAX), None]),
+                Cell::UInt(u64::MAX),
+            ),
+            (
+                ArrayValues::Str(vec![Some("ready".into()), None]),
+                Cell::Str("ready".into()),
+            ),
+            (
+                ArrayValues::Bytes(vec![Some(vec![0, 255]), None]),
+                Cell::Bytes(vec![0, 255]),
+            ),
+            (
+                ArrayValues::Json(vec![Some(json.clone()), None]),
+                Cell::Json(json),
+            ),
+            (
+                ArrayValues::Decimal(vec![Some(PgNumeric::Finite(decimal)), None]),
+                Cell::Decimal(decimal),
+            ),
+            (
+                ArrayValues::Decimal(vec![Some(PgNumeric::Special("NaN")), None]),
+                Cell::DecimalText("NaN".into()),
+            ),
+            (
+                ArrayValues::DateTime(vec![Some(PgTemporal::Native(datetime)), None]),
+                Cell::DateTime(datetime),
+            ),
+            (
+                ArrayValues::DateTimeUtc(vec![Some(PgTemporal::Native(utc)), None]),
+                Cell::DateTimeTz(utc.fixed_offset()),
+            ),
+            (
+                ArrayValues::Date(vec![Some(PgTemporal::Native(date)), None]),
+                Cell::Date(date),
+            ),
+            (
+                ArrayValues::Time(vec![Some(PgTemporal::Native(time)), None]),
+                Cell::Time(time),
+            ),
+            (
+                ArrayValues::TimeTz(vec![Some(PgTemporal::Native(timetz)), None]),
+                Cell::TimeTz(time, offset),
+            ),
+            (
+                ArrayValues::Date(vec![Some(PgTemporal::Text("infinity".into())), None]),
+                Cell::Str("infinity".into()),
+            ),
+        ];
+        for (typed, value) in cases {
+            let typed = Cell::Array(Box::new(typed));
+            let cells = Cell::Array(Box::new(ArrayValues::Cells(vec![value, Cell::Null])));
+            let mut actual = Vec::new();
+            let mut expected = Vec::new();
+            write_cell(&mut actual, &typed);
+            write_cell(&mut expected, &cells);
+            assert_eq!(actual, expected, "{typed:?}");
+        }
+    }
 }

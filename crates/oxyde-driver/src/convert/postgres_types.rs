@@ -1,21 +1,16 @@
 //! PostgreSQL values whose wire range exceeds the corresponding Rust type.
 
-use std::marker::PhantomData;
-
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::{
     error::BoxDynError,
-    postgres::{
-        types::{Oid, PgTimeTz},
-        PgHasArrayType, PgTypeInfo, PgValueFormat, PgValueRef, Postgres,
-    },
+    postgres::{types::Oid, PgHasArrayType, PgTypeInfo, PgValueFormat, PgValueRef, Postgres},
     Decode, Type,
 };
 
+use super::cell::{PgChronoTimeTz, PgNumeric, PgTemporal};
+
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
-
-pub(super) type PgChronoTimeTz = PgTimeTz<NaiveTime, FixedOffset>;
 
 // Built-in catalog OIDs from PostgreSQL's `pg_type.dat`. SQLx names types it
 // does not know (such as `oid8`) via `regtype::text`, which qualifies the name
@@ -26,6 +21,7 @@ pub(super) const OID8: Oid = Oid(6437);
 pub(super) const OID8_ARRAY: Oid = Oid(6442);
 
 #[derive(Clone, Copy)]
+#[repr(transparent)]
 pub(super) struct PgOid8(pub u64);
 
 impl Type<Postgres> for PgOid8 {
@@ -57,8 +53,6 @@ impl Decode<'_, Postgres> for PgOid8 {
     }
 }
 
-pub(super) struct PgTemporal<T>(pub String, PhantomData<T>);
-
 impl<T: Type<Postgres>> Type<Postgres> for PgTemporal<T> {
     fn type_info() -> PgTypeInfo {
         T::type_info()
@@ -71,29 +65,25 @@ impl<T: PgHasArrayType> PgHasArrayType for PgTemporal<T> {
     }
 }
 
-impl<'r, T: Decode<'r, Postgres> + TemporalWire> Decode<'r, Postgres> for PgTemporal<T> {
+impl<'r, T: Decode<'r, Postgres> + TemporalFallback> Decode<'r, Postgres> for PgTemporal<T> {
     fn decode(value: PgValueRef<'r>) -> Result<Self, BoxDynError> {
         // SQLx 0.9.1 checks chrono's bounds. Preserve the PostgreSQL spelling
         // when the ordinary decoder rejects a valid value outside those bounds.
-        let text = match T::decode(value.clone()) {
-            Ok(value) => value.wire_text(),
-            Err(_) if value.format() == PgValueFormat::Text => value.as_str()?.to_owned(),
-            Err(error) => T::binary_fallback(value.as_bytes()?)?.ok_or(error)?,
-        };
-        Ok(Self(text, PhantomData))
+        Ok(match T::decode(value.clone()) {
+            Ok(value) => Self::Native(value),
+            Err(_) if value.format() == PgValueFormat::Text => {
+                Self::Text(value.as_str()?.to_owned())
+            }
+            Err(error) => Self::Text(T::binary_fallback(value.as_bytes()?)?.ok_or(error)?),
+        })
     }
 }
 
-trait TemporalWire {
-    fn wire_text(self) -> String;
+pub(super) trait TemporalFallback {
     fn binary_fallback(bytes: &[u8]) -> Result<Option<String>, BoxDynError>;
 }
 
-impl TemporalWire for NaiveDateTime {
-    fn wire_text(self) -> String {
-        self.format("%Y-%m-%dT%H:%M:%S%.f").to_string()
-    }
-
+impl TemporalFallback for NaiveDateTime {
     fn binary_fallback(bytes: &[u8]) -> Result<Option<String>, BoxDynError> {
         Ok(Some(timestamp_fallback(
             i64::from_be_bytes(bytes.try_into()?),
@@ -102,11 +92,7 @@ impl TemporalWire for NaiveDateTime {
     }
 }
 
-impl TemporalWire for DateTime<Utc> {
-    fn wire_text(self) -> String {
-        self.to_rfc3339()
-    }
-
+impl TemporalFallback for DateTime<Utc> {
     fn binary_fallback(bytes: &[u8]) -> Result<Option<String>, BoxDynError> {
         Ok(Some(timestamp_fallback(
             i64::from_be_bytes(bytes.try_into()?),
@@ -115,11 +101,7 @@ impl TemporalWire for DateTime<Utc> {
     }
 }
 
-impl TemporalWire for NaiveDate {
-    fn wire_text(self) -> String {
-        self.format("%Y-%m-%d").to_string()
-    }
-
+impl TemporalFallback for NaiveDate {
     fn binary_fallback(bytes: &[u8]) -> Result<Option<String>, BoxDynError> {
         let days = i32::from_be_bytes(bytes.try_into()?);
         Ok(Some(match days {
@@ -133,21 +115,13 @@ impl TemporalWire for NaiveDate {
     }
 }
 
-impl TemporalWire for NaiveTime {
-    fn wire_text(self) -> String {
-        self.format("%H:%M:%S%.f").to_string()
-    }
-
+impl TemporalFallback for NaiveTime {
     fn binary_fallback(bytes: &[u8]) -> Result<Option<String>, BoxDynError> {
         Ok((i64::from_be_bytes(bytes.try_into()?) == MICROS_PER_DAY).then(|| "24:00:00".into()))
     }
 }
 
-impl TemporalWire for PgChronoTimeTz {
-    fn wire_text(self) -> String {
-        format!("{}{}", self.time.wire_text(), self.offset)
-    }
-
+impl TemporalFallback for PgChronoTimeTz {
     fn binary_fallback(bytes: &[u8]) -> Result<Option<String>, BoxDynError> {
         let Some((micros, offset)) = bytes.split_first_chunk::<8>() else {
             return Ok(None);
@@ -205,11 +179,6 @@ fn format_pg_date(days: i64) -> (String, &'static str) {
     } else {
         (format!("{:04}-{month:02}-{day:02}", 1 - year), " BC")
     }
-}
-
-pub(super) enum PgNumeric<T> {
-    Finite(T),
-    Special(&'static str),
 }
 
 impl<T: Type<Postgres>> Type<Postgres> for PgNumeric<T> {
