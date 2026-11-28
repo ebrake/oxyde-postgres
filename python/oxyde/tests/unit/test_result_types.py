@@ -7,6 +7,7 @@ from uuid import UUID
 
 import msgpack
 import pytest
+from pydantic import Json
 
 from oxyde import Avg, Coalesce, F, Field, Greatest, Max, Min, Model, RawSQL, Sum
 from oxyde.models.registry import register_table
@@ -323,8 +324,35 @@ async def test_untagged_values_stay_raw_and_legacy_terminal_sum_converts(kinds_t
     assert await ResultRecord.objects.sum("duration", client=stub) == total
 
 
+def test_json_validated_numeric_fields_request_wire_text():
+    class JsonRecord(Model):
+        amount: Json[Decimal] = Field(db_type="NUMERIC(10,4)")
+        optional_amount: Json[Decimal] | None = Field(db_type="NUMERIC(10,4)")
+        annotated_amount: Annotated[Json[Decimal], Field()] = Field(
+            db_type="NUMERIC(10,4)"
+        )
+        amounts: list[Json[Decimal]] = Field(db_type="NUMERIC(10,4)[]")
+        bare: Json = Field(db_type="NUMERIC(10,4)")
+        native_amount: Decimal = Field(db_type="NUMERIC(10,4)")
+
+        class Meta:
+            is_table = True
+            table_name = "json_result_record"
+
+    register_table(JsonRecord, overwrite=True)
+
+    assert JsonRecord._db_meta.model_wire_columns == {
+        "amount",
+        "optional_amount",
+        "annotated_amount",
+        "amounts",
+        "bare",
+    }
+    assert not JsonRecord._db_meta.text_columns
+
+
 @pytest.mark.asyncio
-async def test_raw_model_count_and_exists_do_not_request_kinds():
+async def test_only_model_reads_request_kinds_for_their_wire_columns():
     payload = [["id", "external_uuid", "duration"], [[UUID_TEXT, UUID_TEXT, 2.5]]]
     stub = StubExecuteClient(
         [payload, payload, [["_count"], [[1]]], [["exists"], [[True]]]]
@@ -335,9 +363,16 @@ async def test_raw_model_count_and_exists_do_not_request_kinds():
     assert model.id == UUID_VALUE
     assert await query.count(client=stub) == 1
     assert await query.exists(client=stub) is True
-    assert all(
-        "result_kinds" not in call and "text_columns" not in call for call in stub.calls
+    assert stub.calls[1]["result_kinds"] is True
+    assert stub.calls[1]["text_columns"] == sorted(
+        ResultRecord._db_meta.model_wire_columns
     )
+    assert "external_uuid" in stub.calls[1]["text_columns"]
+    assert "id" not in stub.calls[1]["text_columns"]
+    assert "duration" not in stub.calls[1]["text_columns"]
+    for call in (stub.calls[0], *stub.calls[2:]):
+        assert "result_kinds" not in call
+        assert "text_columns" not in call
 
 
 @pytest.mark.asyncio

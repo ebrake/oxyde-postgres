@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+import weakref
 from datetime import datetime, timezone
 from enum import Enum
 from types import SimpleNamespace
@@ -23,7 +25,9 @@ from oxyde.exceptions import (
 )
 from oxyde.models.registry import clear_registry, registered_tables
 from oxyde.queries import Count, F
+from oxyde.queries._result_set import MsgpackResultSet
 from oxyde.queries.insert import InsertQuery
+from oxyde.queries.mixins import execution
 from oxyde.tests.helpers import StubExecuteClient
 
 
@@ -89,6 +93,31 @@ class User(Model):
 
     class Meta:
         is_table = True
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_releases_unjoined_result_before_validation(monkeypatch):
+    result_ref = None
+    fetch_result = execution.fetch_result
+    validate_rows = execution._validate_db_rows
+
+    async def track_result(client, ir):
+        nonlocal result_ref
+        result = await fetch_result(client, ir)
+        assert isinstance(result, MsgpackResultSet)
+        result_ref = weakref.ref(result)
+        return result
+
+    def validate_after_release(*args, **kwargs):
+        gc.collect()
+        assert result_ref is not None and result_ref() is None
+        return validate_rows(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "fetch_result", track_result)
+    monkeypatch.setattr(execution, "_validate_db_rows", validate_after_release)
+    stub = StubExecuteClient([[["email"], [["ada@example.com"]]]])
+    (user,) = await User.objects.query().select("email").fetch_models(stub)
+    assert user.email == "ada@example.com"
 
 
 def test_queryset_filter_uses_field_helper() -> None:

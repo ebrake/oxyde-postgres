@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import AsyncMock
 
 import msgpack
 import pytest
@@ -15,6 +16,7 @@ from oxyde.db.transaction import (
     AsyncTransaction,
     get_active_transaction,
 )
+from oxyde.queries._result_set import MsgpackResultSet, fetch_result
 
 
 @pytest.fixture
@@ -181,6 +183,33 @@ class TestAtomicContext:
 
         assert ("begin", "default") in mock_tx.calls
         assert ("commit", 1) in mock_tx.calls
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("override_execute", [False, True])
+    async def test_fetch_result_respects_wrapped_execute(
+        self, mock_tx, mock_get_connection, monkeypatch, override_execute
+    ):
+        ir = {"op": "select"}
+        native_rows = MsgpackResultSet([["id"], [[1]]])
+        execute_rows = AsyncMock(return_value=native_rows)
+        execute = AsyncMock(return_value=msgpack.packb([["id"], [[2]]]))
+        monkeypatch.setattr(
+            "oxyde.db.transaction._execute_rows_in_transaction", execute_rows
+        )
+
+        async with atomic() as ctx:
+            if override_execute:
+                monkeypatch.setattr(ctx.transaction, "execute", execute)
+            rows = await fetch_result(ctx, ir)
+
+        if override_execute:
+            assert rows.column(0) == [2]
+            execute.assert_awaited_once_with(ir)
+            execute_rows.assert_not_called()
+        else:
+            assert rows is native_rows
+            execute_rows.assert_awaited_once_with("default", 1, msgpack.packb(ir))
+        assert ("execute", ("default", 1)) not in mock_tx.calls
 
     @pytest.mark.asyncio
     async def test_atomic_rollback_on_exception(self, mock_tx, mock_get_connection):

@@ -261,15 +261,124 @@ pub struct RelationInfo {
     pub text_columns: HashSet<usize>,
 }
 
-struct RelGroup<'a> {
+struct RelationLayout<'a> {
     prefix: &'a str,
-    pk_col_idx: usize,
-    col_indices: Vec<usize>,
-    col_metas: Vec<ColumnMeta>,
+    start: usize,
+    pk_index: usize,
+    columns: Vec<ColumnMeta>,
     field_names: &'a [String],
-    seen: std::collections::HashSet<Vec<u8>>,
-    data_buf: Vec<u8>,
-    refs_buf: Vec<u8>,
+}
+
+impl RelationLayout<'_> {
+    fn primary_key<E: CellEncoder>(&self, row: &E::Row) -> Option<(Cell, Vec<u8>)> {
+        let (pk, _) = E::decode_cell(
+            row,
+            self.start + self.pk_index,
+            &self.columns[self.pk_index],
+        );
+        let bytes = encode_primary_key(&pk)?;
+        Some((pk, bytes))
+    }
+
+    fn other_cells<'a, E: CellEncoder>(
+        &'a self,
+        row: &'a E::Row,
+    ) -> impl Iterator<Item = Cell> + 'a {
+        self.columns
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| *position != self.pk_index)
+            .map(|(position, column)| E::decode_cell(row, self.start + position, column).0)
+    }
+}
+
+struct ResultLayout<'a> {
+    columns: Vec<ColumnMeta>,
+    relations: Vec<RelationLayout<'a>>,
+}
+
+fn result_layout<'a, E: CellEncoder>(
+    row: &E::Row,
+    col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    relations: &'a [RelationInfo],
+    encodings: Option<&HashMap<String, ResultEncoding>>,
+) -> Result<ResultLayout<'a>, sqlx::Error>
+where
+    <<E::Row as Row>::Database as Database>::Column: Column,
+{
+    let mut columns = E::extract_columns(row, col_types);
+    let relation_width: usize = relations.iter().map(|r| r.column_types.len()).sum();
+    let Some(main_width) = columns.len().checked_sub(relation_width) else {
+        return Err(sqlx::Error::Decode(
+            format!(
+                "joined result has {} columns, fewer than the {relation_width} its relations project",
+                columns.len()
+            )
+            .into(),
+        ));
+    };
+
+    let mut joined_columns = columns.drain(main_width..);
+    let mut layouts = Vec::with_capacity(relations.len());
+    let mut start = main_width;
+    for relation in relations {
+        let width = relation.column_types.len();
+        if relation.pk_index >= width {
+            return Err(sqlx::Error::ColumnNotFound(format!(
+                "{}__<primary key>",
+                relation.prefix
+            )));
+        }
+        if relation.field_names.len() != width {
+            return Err(sqlx::Error::Decode(
+                format!(
+                    "relation '{}' has {} field names for its {width} columns",
+                    relation.prefix,
+                    relation.field_names.len()
+                )
+                .into(),
+            ));
+        }
+        let columns = joined_columns
+            .by_ref()
+            .take(width)
+            .zip(&relation.column_types)
+            .enumerate()
+            .map(|(position, (mut column, spec))| {
+                column.spec.clone_from(spec);
+                column.result_encoding = relation
+                    .text_columns
+                    .contains(&position)
+                    .then_some(ResultEncoding::Wire);
+                column
+            })
+            .collect();
+        layouts.push(RelationLayout {
+            prefix: &relation.prefix,
+            start,
+            pk_index: relation.pk_index,
+            columns,
+            field_names: &relation.field_names,
+        });
+        start += width;
+    }
+    drop(joined_columns);
+    if let Some(encodings) = encodings {
+        for column in &mut columns {
+            column.result_encoding = encodings.get(&column.name).copied();
+        }
+    }
+    Ok(ResultLayout {
+        columns,
+        relations: layouts,
+    })
+}
+
+#[derive(Default)]
+struct EncodedRelation {
+    seen: HashSet<Vec<u8>>,
+    data: Vec<u8>,
+    refs: Vec<u8>,
 }
 
 fn encode_primary_key(cell: &Cell) -> Option<Vec<u8>> {
@@ -342,95 +451,21 @@ where
         }
     };
 
-    let mut all_columns = E::extract_columns(&first_row, col_types);
-    if let Some(encodings) = encodings {
-        for column in &mut all_columns {
-            column.result_encoding = encodings.get(&column.name).copied();
-        }
-    }
-    let mut main_indices: Vec<usize> = Vec::new();
-    let mut main_columns = Vec::new();
-
-    let mut rel_groups: Vec<RelGroup<'_>> = Vec::new();
-
-    if has_rels {
-        let relation_width: usize = rels.iter().map(|r| r.column_types.len()).sum();
-        let Some(main_width) = all_columns.len().checked_sub(relation_width) else {
-            return Err(sqlx::Error::Decode(
-                format!(
-                    "joined result has {} columns, fewer than the {relation_width} its relations project",
-                    all_columns.len()
-                )
-                .into(),
-            ));
-        };
-        for (idx, col) in all_columns.iter().enumerate().take(main_width) {
-            main_indices.push(idx);
-            main_columns.push((col, None));
-        }
-
-        let mut start = main_width;
-        for ri in rels {
-            let width = ri.column_types.len();
-            if ri.pk_index >= width {
-                return Err(sqlx::Error::ColumnNotFound(format!(
-                    "{}__<primary key>",
-                    ri.prefix
-                )));
-            }
-            if ri.field_names.len() != width {
-                return Err(sqlx::Error::Decode(
-                    format!(
-                        "relation '{}' has {} field names for its {width} columns",
-                        ri.prefix,
-                        ri.field_names.len()
-                    )
-                    .into(),
-                ));
-            }
-            let col_indices: Vec<usize> = (start..start + width).collect();
-            let col_metas = col_indices
-                .iter()
-                .zip(&ri.column_types)
-                .enumerate()
-                .map(|(pos, (&idx, spec))| ColumnMeta {
-                    name: all_columns[idx].name.clone(),
-                    db_type: all_columns[idx].db_type.clone(),
-                    spec: spec.clone(),
-                    result_encoding: ri
-                        .text_columns
-                        .contains(&pos)
-                        .then_some(ResultEncoding::Wire),
-                })
-                .collect();
-            rel_groups.push(RelGroup {
-                prefix: &ri.prefix,
-                pk_col_idx: start + ri.pk_index,
-                col_indices,
-                col_metas,
-                field_names: &ri.field_names,
-                seen: std::collections::HashSet::new(),
-                data_buf: Vec::new(),
-                refs_buf: Vec::new(),
-            });
-            start += width;
-        }
-    } else {
-        for (idx, col) in all_columns.iter().enumerate() {
-            main_indices.push(idx);
-            main_columns.push((col, None));
-        }
-    }
-
+    let ResultLayout { columns, relations } =
+        result_layout::<E>(&first_row, col_types, rels, encodings)?;
+    let mut kinds = vec![None; columns.len()];
+    let mut encoded_relations: Vec<_> = relations
+        .iter()
+        .map(|_| EncodedRelation::default())
+        .collect();
     let mut main_rows_buf = Vec::new();
     let mut num_rows = 0;
 
     let mut process_row = |row: &E::Row, num_rows: &mut usize| {
         *num_rows += 1;
 
-        write_array_len(&mut main_rows_buf, main_indices.len() as u32);
-        for (pos, &idx) in main_indices.iter().enumerate() {
-            let (col, kind) = &mut main_columns[pos];
+        write_array_len(&mut main_rows_buf, columns.len() as u32);
+        for (idx, (col, kind)) in columns.iter().zip(&mut kinds).enumerate() {
             let (cell, value_kind) = E::decode_cell(row, idx, col);
             write_cell(&mut main_rows_buf, &cell);
             if value_kind.is_some() {
@@ -438,27 +473,23 @@ where
             }
         }
 
-        if has_rels {
-            for group in &mut rel_groups {
-                let pk_pos = group.pk_col_idx - group.col_indices[0];
-                let (pk, _) = E::decode_cell(row, group.pk_col_idx, &group.col_metas[pk_pos]);
-                let Some(pk_bytes) = encode_primary_key(&pk) else {
-                    write_nil(&mut group.refs_buf);
-                    continue;
-                };
-                let pk_start = group.refs_buf.len();
-                group.refs_buf.extend_from_slice(&pk_bytes);
-                if group.seen.insert(pk_bytes) {
-                    let key = &group.refs_buf[pk_start..];
-                    group.data_buf.extend_from_slice(key);
-                    write_array_len(&mut group.data_buf, group.col_indices.len() as u32);
-                    for (pos, &idx) in group.col_indices.iter().enumerate() {
-                        if pos == pk_pos {
-                            group.data_buf.extend_from_slice(key);
-                        } else {
-                            let (cell, _) = E::decode_cell(row, idx, &group.col_metas[pos]);
-                            write_cell(&mut group.data_buf, &cell);
-                        }
+        for (relation, encoded) in relations.iter().zip(&mut encoded_relations) {
+            let Some((_, pk)) = relation.primary_key::<E>(row) else {
+                write_nil(&mut encoded.refs);
+                continue;
+            };
+            let pk_start = encoded.refs.len();
+            encoded.refs.extend_from_slice(&pk);
+            if encoded.seen.insert(pk) {
+                let key = &encoded.refs[pk_start..];
+                encoded.data.extend_from_slice(key);
+                write_array_len(&mut encoded.data, relation.columns.len() as u32);
+                let mut cells = relation.other_cells::<E>(row);
+                for position in 0..relation.columns.len() {
+                    if position == relation.pk_index {
+                        encoded.data.extend_from_slice(key);
+                    } else {
+                        write_cell(&mut encoded.data, &cells.next().expect("related column"));
                     }
                 }
             }
@@ -475,8 +506,8 @@ where
     let mut buf = Vec::with_capacity(main_rows_buf.len() + 1024);
     write_array_len(&mut buf, result_len);
 
-    write_array_len(&mut buf, main_columns.len() as u32);
-    for (col, _) in &main_columns {
+    write_array_len(&mut buf, columns.len() as u32);
+    for col in &columns {
         write_str(&mut buf, &col.name);
     }
 
@@ -484,28 +515,28 @@ where
     buf.extend_from_slice(&main_rows_buf);
 
     if has_rels {
-        write_map_len(&mut buf, rel_groups.len() as u32);
-        for group in rel_groups {
-            write_str(&mut buf, group.prefix);
+        write_map_len(&mut buf, relations.len() as u32);
+        for (relation, encoded) in relations.iter().zip(encoded_relations) {
+            write_str(&mut buf, relation.prefix);
             write_map_len(&mut buf, 3 + u32::from(emit_kinds));
 
             write_str(&mut buf, "columns");
-            write_array_len(&mut buf, group.field_names.len() as u32);
-            for name in group.field_names {
+            write_array_len(&mut buf, relation.field_names.len() as u32);
+            for name in relation.field_names {
                 write_str(&mut buf, name);
             }
 
             write_str(&mut buf, "data");
-            write_map_len(&mut buf, group.seen.len() as u32);
-            buf.extend_from_slice(&group.data_buf);
+            write_map_len(&mut buf, encoded.seen.len() as u32);
+            buf.extend_from_slice(&encoded.data);
 
             write_str(&mut buf, "refs");
             write_array_len(&mut buf, num_rows as u32);
-            buf.extend_from_slice(&group.refs_buf);
+            buf.extend_from_slice(&encoded.refs);
 
             if emit_kinds {
                 write_str(&mut buf, "kinds");
-                write_kinds(&mut buf, group.col_metas.iter().map(E::result_kind));
+                write_kinds(&mut buf, relation.columns.iter().map(E::result_kind));
             }
         }
     } else if emit_kinds {
@@ -514,13 +545,107 @@ where
     if emit_kinds {
         write_kinds(
             &mut buf,
-            main_columns
+            columns
                 .iter()
+                .zip(kinds)
                 .map(|(col, kind)| kind.or_else(|| E::result_kind(col))),
         );
     }
 
     Ok((buf, num_rows))
+}
+
+/// SELECT rows in SQL projection order, with joined rows stored once per key.
+#[derive(Default)]
+pub struct RowSet {
+    pub columns: Vec<String>,
+    pub kinds: Vec<Option<&'static str>>,
+    pub rows: Vec<Vec<Cell>>,
+    pub relations: Vec<RelationRows>,
+}
+
+pub struct RelationRows {
+    pub prefix: String,
+    pub columns: Vec<String>,
+    pub kinds: Vec<Option<&'static str>>,
+    pub rows: Vec<Vec<Cell>>,
+    pub refs: Vec<Option<u32>>,
+}
+
+pub(crate) async fn collect_rows<E, S>(
+    mut stream: S,
+    col_types: Option<&HashMap<String, ColumnTypeSpec>>,
+    relations: &[RelationInfo],
+    options: ResultOptions<'_>,
+) -> Result<RowSet, sqlx::Error>
+where
+    E: CellEncoder,
+    S: futures::Stream<Item = Result<E::Row, sqlx::Error>> + Unpin,
+    <<E::Row as Row>::Database as Database>::Column: Column,
+{
+    let Some(first) = stream.next().await.transpose()? else {
+        return Ok(RowSet::default());
+    };
+    let layout = result_layout::<E>(&first, col_types, relations, options.encodings)?;
+    let result_kind = |col: &ColumnMeta| options.emit_kinds.then(|| E::result_kind(col)).flatten();
+    let mut kinds: Vec<_> = layout.columns.iter().map(result_kind).collect();
+    let mut result_relations: Vec<_> = layout
+        .relations
+        .iter()
+        .map(|relation| RelationRows {
+            prefix: relation.prefix.to_owned(),
+            columns: relation.field_names.to_vec(),
+            kinds: relation.columns.iter().map(result_kind).collect(),
+            rows: Vec::new(),
+            refs: Vec::new(),
+        })
+        .collect();
+    let mut keys: Vec<HashMap<Vec<u8>, u32>> =
+        layout.relations.iter().map(|_| HashMap::new()).collect();
+    let mut rows = Vec::new();
+    let mut next = Some(first);
+    while let Some(row) = next {
+        rows.push(
+            layout
+                .columns
+                .iter()
+                .zip(&mut kinds)
+                .enumerate()
+                .map(|(idx, (col, kind))| {
+                    let (value, discovered) = E::decode_cell(&row, idx, col);
+                    if options.emit_kinds && discovered.is_some() {
+                        *kind = discovered;
+                    }
+                    value
+                })
+                .collect(),
+        );
+
+        for ((relation, output), keys) in layout
+            .relations
+            .iter()
+            .zip(&mut result_relations)
+            .zip(&mut keys)
+        {
+            let reference = relation.primary_key::<E>(&row).map(|(pk, bytes)| {
+                *keys.entry(bytes).or_insert_with(|| {
+                    let index = output.rows.len() as u32;
+                    let mut cells: Vec<_> = relation.other_cells::<E>(&row).collect();
+                    cells.insert(relation.pk_index, pk);
+                    output.rows.push(cells);
+                    index
+                })
+            });
+            output.refs.push(reference);
+        }
+        next = stream.next().await.transpose()?;
+    }
+    Ok(RowSet {
+        columns: layout.columns.into_iter().map(|col| col.name).collect(),
+        kinds,
+        rows,
+        relations: result_relations,
+    })
 }
 
 /// Encode rows from a stream as a mutation-with-returning result:

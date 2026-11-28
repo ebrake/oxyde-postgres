@@ -8,7 +8,6 @@ Model.model_config - no sanitization needed.
 from __future__ import annotations
 
 from collections.abc import Coroutine, Sequence
-from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from oxyde._msgpack import msgpack
@@ -17,7 +16,7 @@ from oxyde.exceptions import FieldLookupError, MultipleObjectsReturned, NotFound
 from oxyde.models.db_schema import _validate_db_row, _validate_db_rows
 from oxyde.models.registry import registered_tables
 from oxyde.models.utils import _AggregateFieldsSet, _LoadedFieldsSet
-from oxyde.queries._result_types import convert_column, convert_rows
+from oxyde.queries._result_set import MsgpackResultSet, ResultSet, fetch_result
 from oxyde.queries.base import (
     SupportsExecute,
     _collect_model_columns,
@@ -35,23 +34,6 @@ if TYPE_CHECKING:
 TModel = TypeVar("TModel", bound="Model")
 
 
-def _unpack_result(
-    data: Any,
-) -> (
-    tuple[list[str], list[list[Any]], dict[str, Any] | None, list[str | None] | None]
-    | None
-):
-    """Read the columnar format, including its older two- and three-item forms."""
-    if not isinstance(data, (list, tuple)) or len(data) not in (2, 3, 4):
-        return None
-    columns, rows = data[:2]
-    if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
-        return None
-    relations = data[2] if len(data) >= 3 and isinstance(data[2], dict) else None
-    kinds = data[3] if len(data) == 4 else None
-    return columns, rows, relations, kinds
-
-
 def _remap_columns(columns: list[str], model_class: type[Model]) -> list[str]:
     """Remap db_column names to field names using cached reverse_column_map."""
     rmap = model_class._db_meta.reverse_column_map
@@ -61,18 +43,22 @@ def _remap_columns(columns: list[str], model_class: type[Model]) -> list[str]:
 
 
 def _merge_relation_columns(
-    rows: list[dict[str, Any]],
-    relations_map: dict[str, Any],
+    rows: list[dict[str, Any]], result: ResultSet, prefixes: list[str]
 ) -> None:
-    """Flatten Rust's dedup relation encoding back into ``rows`` in place."""
-    for prefix, rel in relations_map.items():
-        columns, data, refs = rel["columns"], rel["data"], rel["refs"]
-        if (kinds := rel.get("kinds")) is not None and data:
-            convert_rows(list(data.values()), kinds)
+    """Flatten deduplicated relations into projected dictionaries."""
+    for prefix in prefixes:
+        relation = result.relation(prefix)
+        if relation is None:
+            continue
+        columns, related_rows, refs = relation
+        keys = [f"{prefix}__{column}" for column in columns]
+        missing = dict.fromkeys(keys)
         for row, ref in zip(rows, refs):
-            values = data.get(ref) if ref is not None else None
-            for column, value in zip(columns, values or [None] * len(columns)):
-                row[f"{prefix}__{column}"] = value
+            if ref is None:
+                row.update(missing)
+            else:
+                related = related_rows[ref]
+                row.update(zip(keys, (related.get(column) for column in columns)))
 
 
 class ExecutionMixin(Generic[TModel]):
@@ -145,17 +131,6 @@ class ExecutionMixin(Generic[TModel]):
             return [restored.get(column, column) for column in columns]
         return _remap_columns(columns, self.model_class)
 
-    def _columnar_rows(
-        self,
-        columns: list[str],
-        values: list[list[Any]],
-        kinds: list[str | None] | None = None,
-    ) -> tuple[list[str], list[dict[str, Any]]]:
-        columns = self._result_columns(columns)
-        if kinds is not None and values:
-            convert_rows(values, kinds)
-        return columns, [dict(zip(columns, row)) for row in values]
-
     def limit(self, value: int) -> Self:
         """Must be implemented by PaginationMixin."""
         raise NotImplementedError
@@ -201,40 +176,6 @@ class ExecutionMixin(Generic[TModel]):
             client, list_mode=self._result_mode == "list"
         )
 
-    def _list_rows(
-        self,
-        columns: list[str],
-        values: list[list[Any]],
-        kinds: list[str | None] | None,
-    ) -> list[Any]:
-        if not values:
-            return []
-        columns = self._result_columns(columns)
-        # Like dict(zip(...)), duplicate names take the last value and retain
-        # the position where the name first appeared.
-        by_name = {column: index for index, column in enumerate(columns)}
-        indices = [by_name.get(field) for field in (self._selected_fields or by_name)]
-        if self._values_flat:
-            if len(indices) != 1:
-                raise ValueError("values_list(flat=True) requires exactly one field")
-            index = indices[0]
-            if index is None:
-                return [None] * len(values)
-            # This column is the final output, so it needs no write-back.
-            result = [row[index] for row in values]
-            if kinds is not None and (kind := kinds[index]) is not None:
-                result = convert_column(kind, result)
-            return result
-        if kinds is not None:
-            convert_rows(values, kinds)
-        if len(indices) > 1 and None not in indices:
-            get = itemgetter(*indices)
-            return [get(row) for row in values]
-        return [
-            tuple(row[index] if index is not None else None for index in indices)
-            for row in values
-        ]
-
     async def _fetch_by_mode(self, client: SupportsExecute) -> list[Any]:
         """Fetch results honoring the values()/values_list() result mode.
 
@@ -267,24 +208,33 @@ class ExecutionMixin(Generic[TModel]):
         self, client: SupportsExecute, *, list_mode: bool
     ) -> list[Any]:
         self._check_flat_relation_columns()
-        result_bytes = await client.execute(
-            self._build_ir(for_models=False, result_kinds=True)
+        result = await fetch_result(
+            client, self._build_ir(for_models=False, result_kinds=True)
         )
-        # Deduplicated joins can have integer primary keys in the relation map.
-        data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
-        del result_bytes
-        result = _unpack_result(data)
-        if result is not None:
-            columns, values, relations, kinds = result
-            merge_relations = relations if self._selected_fields is None else None
-            if list_mode and not merge_relations:
-                return self._list_rows(columns, values, kinds)
+        if not result:
+            return []
+        prefixes = result.relation_prefixes if self._selected_fields is None else []
+        columns = self._result_columns(result.columns)
+        legacy = isinstance(result, MsgpackResultSet) and result.legacy_rows is not None
+        if list_mode and not prefixes and not legacy:
+            # Duplicate labels take the last value and keep the original position.
+            by_name = {column: index for index, column in enumerate(columns)}
+            indices = [
+                by_name.get(field) for field in (self._selected_fields or by_name)
+            ]
+            if self._values_flat:
+                if len(indices) != 1:
+                    raise ValueError(
+                        "values_list(flat=True) requires exactly one field"
+                    )
+                index = indices[0]
+                return (
+                    result.column(index) if index is not None else [None] * len(result)
+                )
+            return result.tuples(indices)
 
-            _, rows = self._columnar_rows(columns, values, kinds)
-            if merge_relations:
-                _merge_relation_columns(rows, merge_relations)
-        else:
-            rows = data if isinstance(data, list) else []
+        rows = result.dicts(columns)
+        _merge_relation_columns(rows, result, prefixes)
         if not list_mode or not rows:
             return rows
         fields = self._selected_fields or list(rows[0])
@@ -295,10 +245,7 @@ class ExecutionMixin(Generic[TModel]):
         return [tuple(row.get(field) for field in fields) for row in rows]
 
     async def fetch_models(self, client: SupportsExecute) -> list[TModel]:
-        """Execute query and return results as model instances.
-
-        JOIN relations use Rust-side dedup encoding (3-element msgpack array).
-        """
+        """Execute query and hydrate models and their deduplicated joins."""
         if any(_is_scalar_annotation(obj) for obj in self._annotations.values()):
             raise TypeError(
                 "Scalar expression annotations (Coalesce, Greatest, Value, F) "
@@ -316,34 +263,12 @@ class ExecutionMixin(Generic[TModel]):
         model_class = self.model_class
         join_specs = self._planned_join_specs()
 
-        result_bytes = await client.execute(self._build_ir(for_models=True))
-        data = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
-        del result_bytes
-
-        columns: list[str] | None = None
-        relations_map: dict[str, Any] | None = None
-        if (
-            isinstance(data, (list, tuple))
-            and len(data) == 3
-            and join_specs
-            and isinstance(data[2], dict)
-        ):
-            # Dedup format: [main_columns, main_rows, relations_map]
-            main_columns, main_rows, relations_map = data
-            columns, rows = self._columnar_rows(main_columns, main_rows)
-            del main_rows, data
-        elif (
-            isinstance(data, (list, tuple))
-            and len(data) == 2
-            and isinstance(data[0], list)
-            and (not data[0] or isinstance(data[0][0], str))
-        ):
-            # Columnar format: [columns, rows] (columns may be empty for 0 rows)
-            raw_columns, row_values = data
-            columns, rows = self._columnar_rows(raw_columns, row_values)
-            del row_values, data
-        else:
-            rows = data if isinstance(data, list) else []
+        result = await fetch_result(
+            client, self._build_ir(for_models=True, result_kinds=True)
+        )
+        columns = self._result_columns(result.columns)
+        rows = result.dicts(columns)
+        legacy = isinstance(result, MsgpackResultSet) and result.legacy_rows is not None
 
         loaded_fields: list[_LoadedFieldsSet] | None = None
         has_aggregates = self._has_aggregate_annotations()
@@ -353,7 +278,7 @@ class ExecutionMixin(Generic[TModel]):
                 _AggregateFieldsSet if has_aggregates else _LoadedFieldsSet
             )
             model_fields = model_class.model_fields.keys()
-            if columns is None:
+            if legacy:
                 loaded_fields = [
                     fields_set_type(model_fields & row.keys()) for row in rows
                 ]
@@ -361,6 +286,8 @@ class ExecutionMixin(Generic[TModel]):
                 loaded = model_fields & columns
                 loaded_fields = [fields_set_type(loaded) for _ in rows]
 
+        hydrate_from = result if join_specs else None
+        del result
         if loaded_fields is not None or has_aggregates:
             models, built_by_id = _validate_db_rows(model_class, rows, owned=True)
         else:
@@ -380,8 +307,9 @@ class ExecutionMixin(Generic[TModel]):
                         _AggregateFieldsSet(model.model_fields_set),
                     )
 
-        if relations_map is not None:
-            self._hydrate_from_dedup(models, relations_map, list(join_specs.values()))
+        if hydrate_from is not None:
+            self._hydrate_from_dedup(models, hydrate_from, list(join_specs.values()))
+        del hydrate_from
         if self._prefetch_paths:
             await self._run_prefetch(models, client)
         return models
@@ -595,55 +523,28 @@ class ExecutionMixin(Generic[TModel]):
     def _hydrate_from_dedup(
         self,
         models: Sequence[Model],
-        relations_map: dict[str, Any],
+        result: ResultSet,
         join_specs: Sequence[_JoinDescriptor],
     ) -> None:
-        """Hydrate joined relations from Rust dedup format.
-
-        Args:
-            models: Main model instances (already validated)
-            relations_map: {prefix: {columns, data, refs}} from Rust encoder
-            join_specs: The joins the query ran, including implicit ones
-        """
+        """Hydrate each unique joined row once, then attach it by index."""
         if not models or not join_specs:
             return
 
-        # Sort specs by depth (shallow first) for nested joins
-        ordered_specs = sorted(
-            join_specs,
-            key=lambda spec: spec.path.count("__"),
-        )
-
-        # Build lookup: result_prefix → spec
-        spec_by_prefix: dict[str, _JoinDescriptor] = {
-            spec.result_prefix: spec for spec in ordered_specs
-        }
-
-        for prefix, rel_data in relations_map.items():
-            spec = spec_by_prefix.get(prefix)
-            if spec is None:
+        # Parents must be attached before children.
+        for spec in sorted(join_specs, key=lambda spec: spec.path.count("__")):
+            relation = result.relation(spec.result_prefix)
+            if relation is None:
                 continue
-
-            # The SQL builder aliases JOIN columns with the target field names.
-            columns = rel_data["columns"]
-            data = rel_data["data"]
-            refs = rel_data["refs"]
-
-            # Build pk → related instance cache
-            instance_cache: dict[Any, Model] = {}
-            for pk_val, row_values in data.items():
-                related_dict = dict(zip(columns, row_values))
-                instance_cache[pk_val] = _validate_db_row(
-                    spec.target_model, related_dict
-                )
-
-            # Assign to each model via refs
-            for model, ref_pk in zip(models, refs):
+            _, rows, refs = relation
+            instances = [_validate_db_row(spec.target_model, row) for row in rows]
+            for model, ref in zip(models, refs):
                 parent = self._resolve_join_parent(model, spec.parent_path)
                 if parent is None:
                     continue
                 # JOINs populate the relation without assigning its FK column.
-                parent.__dict__[spec.attr_name] = instance_cache.get(ref_pk)
+                parent.__dict__[spec.attr_name] = (
+                    instances[ref] if ref is not None else None
+                )
                 parent.__pydantic_fields_set__.add(spec.attr_name)
 
     def _resolve_join_parent(

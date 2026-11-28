@@ -76,6 +76,7 @@ Rust Integration:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -86,12 +87,14 @@ from oxyde.db.registry import get_connection
 
 if TYPE_CHECKING:
     from oxyde.db.pool import AsyncDatabase
+    from oxyde.queries._result_set import ResultSet
 
 try:
     from oxyde.core import begin_transaction as _begin_transaction
     from oxyde.core import commit_transaction as _commit_transaction
     from oxyde.core import create_savepoint as _create_savepoint
     from oxyde.core import execute_in_transaction as _execute_in_transaction
+    from oxyde.core import execute_rows_in_transaction as _execute_rows_in_transaction
     from oxyde.core import release_savepoint as _release_savepoint
     from oxyde.core import rollback_to_savepoint as _rollback_to_savepoint
     from oxyde.core import rollback_transaction as _rollback_transaction
@@ -100,6 +103,14 @@ except ImportError:
     async def _execute_in_transaction(
         pool_name: str, tx_id: int, ir_bytes: bytes
     ) -> bytes:
+        raise RuntimeError(
+            "Rust core module not available. Reinstall oxyde-postgres, "
+            "or run make build-core-dev in a source checkout."
+        )
+
+    async def _execute_rows_in_transaction(
+        pool_name: str, tx_id: int, ir_bytes: bytes
+    ) -> ResultSet:
         raise RuntimeError(
             "Rust core module not available. Reinstall oxyde-postgres, "
             "or run make build-core-dev in a source checkout."
@@ -191,31 +202,39 @@ class AsyncTransaction:
         return self._deadline - loop.time()
 
     async def execute(self, ir: dict[str, Any]) -> bytes:
-        if self._tx_id is None:
-            raise RuntimeError("Transaction not started")
+        return await self._run(_execute_in_transaction, ir)
+
+    async def execute_rows(self, ir: dict[str, Any]) -> ResultSet:
+        """Execute a SELECT on this transaction and return its decoded rows."""
+        return await self._run(_execute_rows_in_transaction, ir)
+
+    async def _run[T](
+        self,
+        execute: Callable[[str, int, bytes], Awaitable[T]],
+        ir: dict[str, Any],
+    ) -> T:
+        tx_id = self.id
         if self._timed_out:
             raise TransactionTimeoutError(
                 "Transaction can no longer be used because its timeout elapsed"
             )
 
         ir_bytes = msgpack.packb(ir, default=_msgpack_encoder)
-        coro = _execute_in_transaction(self._database.name, self._tx_id, ir_bytes)
-
         remaining = self._remaining_timeout()
-        if remaining is not None:
-            if remaining <= 0:
-                self._timed_out = True
-                msg = f"Transaction {self._tx_id} exceeded timeout"
-                raise TransactionTimeoutError(msg)
-            try:
-                return await asyncio.wait_for(coro, remaining)
-            except TimeoutError as exc:
-                self._timed_out = True
-                msg = f"Transaction {self._tx_id} exceeded timeout"
-                raise TransactionTimeoutError(msg) from exc
+        if remaining is None:
+            return await execute(self._database.name, tx_id, ir_bytes)
 
-        result: bytes = await coro
-        return result
+        msg = f"Transaction {tx_id} exceeded timeout"
+        if remaining <= 0:
+            self._timed_out = True
+            raise TransactionTimeoutError(msg)
+        try:
+            return await asyncio.wait_for(
+                execute(self._database.name, tx_id, ir_bytes), remaining
+            )
+        except TimeoutError as exc:
+            self._timed_out = True
+            raise TransactionTimeoutError(msg) from exc
 
     async def __aenter__(self) -> AsyncTransaction:
         await self._database.ensure_connected()
@@ -352,6 +371,11 @@ class AtomicTransactionContext:
 
     async def execute(self, ir: dict[str, Any]) -> bytes:
         return await self.transaction.execute(ir)
+
+    async def execute_rows(self, ir: dict[str, Any]) -> ResultSet:
+        from oxyde.queries._result_set import fetch_result
+
+        return await fetch_result(self.transaction, ir)
 
     def __getattr__(self, item: str) -> Any:
         return getattr(self.transaction, item)

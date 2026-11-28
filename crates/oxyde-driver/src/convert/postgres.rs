@@ -92,48 +92,49 @@ impl CellEncoder for PgEncoder {
 
 #[inline]
 fn decode_by_spec(row: &PgRow, idx: usize, spec: &ColumnTypeSpec) -> Option<Cell> {
-    Some(match spec {
+    match spec {
         ColumnTypeSpec::BigInteger => decode_pg_int(row, idx),
-        ColumnTypeSpec::Text | ColumnTypeSpec::String { .. } => fallback_str(row, idx),
-        ColumnTypeSpec::Enum { .. } => {
-            try_cell(row, idx, |v: PgEnumText| Cell::Str(v.0)).unwrap_or(Cell::Null)
-        }
-        ColumnTypeSpec::Double => decode_or_text(row, idx, Cell::Float),
-        ColumnTypeSpec::Boolean => decode_or_text(row, idx, Cell::Bool),
-        ColumnTypeSpec::Blob => decode_or_text(row, idx, Cell::Bytes),
+        ColumnTypeSpec::Text | ColumnTypeSpec::String { .. } => decode_spec(row, idx, Cell::Str),
+        ColumnTypeSpec::Enum { .. } => decode_spec(row, idx, |v: PgEnumText| Cell::Str(v.0)),
+        ColumnTypeSpec::Double => decode_spec(row, idx, Cell::Float),
+        ColumnTypeSpec::Boolean => decode_spec(row, idx, Cell::Bool),
+        ColumnTypeSpec::Blob => decode_spec(row, idx, Cell::Bytes),
         ColumnTypeSpec::DateTime if row.columns()[idx].type_info().name() != "TIMESTAMPTZ" => {
-            decode_or_text::<PgTemporal<NaiveDateTime>>(row, idx, Cell::from)
+            decode_spec::<PgTemporal<NaiveDateTime>>(row, idx, Cell::from)
         }
         ColumnTypeSpec::DateTime | ColumnTypeSpec::DateTimeUtc => {
-            decode_or_text::<PgTemporal<DateTime<Utc>>>(row, idx, Cell::from)
+            decode_spec::<PgTemporal<DateTime<Utc>>>(row, idx, Cell::from)
         }
-        ColumnTypeSpec::Date => decode_or_text::<PgTemporal<NaiveDate>>(row, idx, Cell::from),
+        ColumnTypeSpec::Date => decode_spec::<PgTemporal<NaiveDate>>(row, idx, Cell::from),
         ColumnTypeSpec::Time => {
             decode_pg_time(row, idx, row.columns()[idx].type_info().name() == "TIMETZ")
         }
-        ColumnTypeSpec::Uuid => decode_or_text(row, idx, Cell::Uuid),
-        ColumnTypeSpec::Decimal { .. } => decode_or_text(row, idx, |value| numeric_cell(&value)),
-        ColumnTypeSpec::Timedelta => try_cell(row, idx, Cell::Duration).unwrap_or(Cell::Null),
-        ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => decode_or_text(row, idx, Cell::Json),
+        ColumnTypeSpec::Uuid => decode_spec(row, idx, Cell::Uuid),
+        ColumnTypeSpec::Decimal { .. } => decode_spec(row, idx, |value| numeric_cell(&value)),
+        ColumnTypeSpec::Timedelta => decode_spec(row, idx, Cell::Duration),
+        ColumnTypeSpec::Json | ColumnTypeSpec::JsonBinary => decode_spec(row, idx, Cell::Json),
         ColumnTypeSpec::Array { item } => decode_pg_array(row, idx, item),
-        ColumnTypeSpec::Unknown => return None,
-    })
+        ColumnTypeSpec::Unknown => None,
+    }
 }
 
 fn decode_by_db_type(row: &PgRow, idx: usize, db_type: &str) -> Cell {
     // oid8's display name depends on search_path; dispatch it by catalog OID.
     match row.columns()[idx].type_info().oid() {
-        Some(OID8) => return decode_pg_int(row, idx),
-        Some(OID8_ARRAY) => return decode_pg_array(row, idx, &ColumnTypeSpec::BigInteger),
+        Some(OID8) => return decode_pg_int(row, idx).unwrap_or_else(|| fallback_str(row, idx)),
+        Some(OID8_ARRAY) => {
+            return decode_pg_array(row, idx, &ColumnTypeSpec::BigInteger).unwrap_or(Cell::Null);
+        }
         _ => {}
     }
     if let Some(item) = pg_array_item(db_type) {
-        return decode_pg_array(row, idx, &item);
+        return decode_pg_array(row, idx, &item).unwrap_or(Cell::Null);
     }
     match db_type {
         "BOOL" | "BOOLEAN" => decode_or_text(row, idx, Cell::Bool),
-        "OID" => decode_pg_int(row, idx),
-        name if name.contains("INT") => decode_pg_int(row, idx),
+        name if name == "OID" || name.contains("INT") => {
+            decode_pg_int(row, idx).unwrap_or_else(|| fallback_str(row, idx))
+        }
         "FLOAT4" => decode_or_text(row, idx, |v: f32| Cell::Float(f64::from(v))),
         name if name.contains("FLOAT") || name.contains("DOUBLE") || name.contains("REAL") => {
             decode_or_text(row, idx, Cell::Float)
@@ -144,7 +145,9 @@ fn decode_by_db_type(row: &PgRow, idx: usize, db_type: &str) -> Cell {
         "TIMESTAMPTZ" => decode_or_text::<PgTemporal<DateTime<Utc>>>(row, idx, Cell::from),
         "TIMESTAMP" => decode_or_text::<PgTemporal<NaiveDateTime>>(row, idx, Cell::from),
         "DATE" => decode_or_text::<PgTemporal<NaiveDate>>(row, idx, Cell::from),
-        "TIME" | "TIMETZ" => decode_pg_time(row, idx, db_type == "TIMETZ"),
+        "TIME" | "TIMETZ" => {
+            decode_pg_time(row, idx, db_type == "TIMETZ").unwrap_or_else(|| fallback_str(row, idx))
+        }
         "BYTEA" => decode_or_text(row, idx, Cell::Bytes),
         _ => fallback_str(row, idx),
     }
@@ -212,11 +215,11 @@ fn pg_array_kind(item: &ColumnTypeSpec, db_type: &str) -> Option<&'static str> {
     }
 }
 
-fn decode_pg_time(row: &PgRow, idx: usize, with_offset: bool) -> Cell {
+fn decode_pg_time(row: &PgRow, idx: usize, with_offset: bool) -> Option<Cell> {
     if with_offset {
-        decode_or_text::<PgTemporal<PgChronoTimeTz>>(row, idx, Cell::from)
+        decode_spec::<PgTemporal<PgChronoTimeTz>>(row, idx, Cell::from)
     } else {
-        decode_or_text::<PgTemporal<NaiveTime>>(row, idx, Cell::from)
+        decode_spec::<PgTemporal<NaiveTime>>(row, idx, Cell::from)
     }
 }
 
@@ -260,17 +263,16 @@ fn decode_aggregate_numeric(
     (cell, None)
 }
 
-fn decode_pg_int(row: &PgRow, idx: usize) -> Cell {
+fn decode_pg_int(row: &PgRow, idx: usize) -> Option<Cell> {
     match row.columns()[idx].type_info().oid() {
-        Some(OID) => decode_or_text(row, idx, |oid: Oid| Cell::UInt(u64::from(oid.0))),
-        Some(OID8) => decode_or_text(row, idx, |oid: PgOid8| Cell::UInt(oid.0)),
-        Some(INT2) => decode_or_text(row, idx, |v: i16| Cell::Int(i64::from(v))),
-        Some(INT4) => decode_or_text(row, idx, |v: i32| Cell::Int(i64::from(v))),
-        Some(INT8) => decode_or_text(row, idx, Cell::Int),
-        _ => try_cell(row, idx, Cell::Int)
-            .or_else(|_| try_cell(row, idx, |v: i32| Cell::Int(i64::from(v))))
-            .or_else(|_| try_cell(row, idx, |v: i16| Cell::Int(i64::from(v))))
-            .unwrap_or_else(|_| fallback_str(row, idx)),
+        Some(OID) => decode_spec(row, idx, |oid: Oid| Cell::UInt(u64::from(oid.0))),
+        Some(OID8) => decode_spec(row, idx, |oid: PgOid8| Cell::UInt(oid.0)),
+        Some(INT2) => decode_spec(row, idx, |v: i16| Cell::Int(i64::from(v))),
+        Some(INT4) => decode_spec(row, idx, |v: i32| Cell::Int(i64::from(v))),
+        Some(INT8) => decode_spec(row, idx, Cell::Int),
+        _ => decode_spec(row, idx, Cell::Int)
+            .or_else(|| decode_spec(row, idx, |v: i32| Cell::Int(i64::from(v))))
+            .or_else(|| decode_spec(row, idx, |v: i16| Cell::Int(i64::from(v)))),
     }
 }
 
@@ -287,6 +289,21 @@ where
         .map(|value| value.map_or(Cell::Null, into_cell))
 }
 
+/// Return no cell when the spec's decoder cannot read the actual PostgreSQL type.
+#[inline]
+fn decode_spec<T>(row: &PgRow, idx: usize, into_cell: impl FnOnce(T) -> Cell) -> Option<Cell>
+where
+    T: Type<Postgres> + for<'r> Decode<'r, Postgres>,
+{
+    match try_cell(row, idx, into_cell) {
+        Ok(cell) => Some(cell),
+        Err(_) if <Option<T> as Type<Postgres>>::compatible(row.columns()[idx].type_info()) => {
+            Some(fallback_str(row, idx))
+        }
+        Err(_) => None,
+    }
+}
+
 #[inline]
 fn decode_or_text<T>(row: &PgRow, idx: usize, into_cell: impl FnOnce(T) -> Cell) -> Cell
 where
@@ -300,8 +317,8 @@ fn fallback_str(row: &PgRow, idx: usize) -> Cell {
 }
 
 /// Decode a PostgreSQL array, retaining NULL elements.
-fn decode_pg_array(row: &PgRow, idx: usize, item: &ColumnTypeSpec) -> Cell {
-    let typed = match item {
+fn decode_pg_array(row: &PgRow, idx: usize, item: &ColumnTypeSpec) -> Option<Cell> {
+    match item {
         ColumnTypeSpec::BigInteger => match row.columns()[idx].type_info().oid() {
             Some(OID_ARRAY) => typed_array(row, idx, |values| {
                 ArrayValues::U32(map_array(values, |v: Oid| v.0))
@@ -310,12 +327,12 @@ fn decode_pg_array(row: &PgRow, idx: usize, item: &ColumnTypeSpec) -> Cell {
                 ArrayValues::U64(map_array(values, |v: PgOid8| v.0))
             }),
             _ => typed_array(row, idx, ArrayValues::I64)
-                .or_else(|_| typed_array(row, idx, ArrayValues::I32))
-                .or_else(|_| typed_array(row, idx, ArrayValues::I16)),
+                .or_else(|| typed_array(row, idx, ArrayValues::I32))
+                .or_else(|| typed_array(row, idx, ArrayValues::I16)),
         },
         ColumnTypeSpec::Timedelta => typed_array(row, idx, ArrayValues::Duration),
         ColumnTypeSpec::Double => typed_array(row, idx, ArrayValues::F64)
-            .or_else(|_| typed_array(row, idx, ArrayValues::F32)),
+            .or_else(|| typed_array(row, idx, ArrayValues::F32)),
         ColumnTypeSpec::Boolean => typed_array(row, idx, ArrayValues::Bool),
         ColumnTypeSpec::Text | ColumnTypeSpec::String { .. } => {
             typed_array(row, idx, ArrayValues::Str)
@@ -341,22 +358,19 @@ fn decode_pg_array(row: &PgRow, idx: usize, item: &ColumnTypeSpec) -> Cell {
         }
         ColumnTypeSpec::Blob => typed_array(row, idx, ArrayValues::Bytes),
         // Unknown / nested element types use the JSON fallback.
-        ColumnTypeSpec::Unknown | ColumnTypeSpec::Array { .. } => {
-            return decode_or_text(row, idx, Cell::Json);
-        }
-    };
-    typed.unwrap_or(Cell::Null)
+        ColumnTypeSpec::Unknown | ColumnTypeSpec::Array { .. } => decode_spec(row, idx, Cell::Json),
+    }
 }
 
 fn typed_array<T>(
     row: &PgRow,
     idx: usize,
     into_values: impl FnOnce(Vec<Option<T>>) -> ArrayValues,
-) -> Result<Cell, sqlx::Error>
+) -> Option<Cell>
 where
     Vec<Option<T>>: Type<Postgres> + for<'r> Decode<'r, Postgres>,
 {
-    try_cell(row, idx, |values| {
+    decode_spec(row, idx, |values| {
         Cell::Array(Box::new(into_values(values)))
     })
 }
@@ -689,6 +703,74 @@ mod tests {
                 column.name
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OXYDE_TEST_POSTGRES_URL"]
+    async fn postgres_widened_union_columns_keep_wire_encoding() {
+        use ColumnTypeSpec as Spec;
+
+        let url = std::env::var("OXYDE_TEST_POSTGRES_URL").unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let rows = sqlx::query(
+            "SELECT DATE '2024-01-02' AS d, ARRAY[DATE '2024-01-02', NULL] AS dates
+             UNION ALL
+             SELECT TIMESTAMP '2024-01-03 04:05:06', ARRAY[TIMESTAMP '2024-01-03 04:05:06', NULL]
+             ORDER BY d",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let specs = HashMap::from([
+            ("d".into(), Spec::Date),
+            (
+                "dates".into(),
+                Spec::Array {
+                    item: Box::new(Spec::Date),
+                },
+            ),
+        ]);
+        assert_eq!(rows.len(), 2);
+        let mut columns = PgEncoder::extract_columns(&rows[0], Some(&specs));
+        for column in &mut columns {
+            column.result_encoding = Some(ResultEncoding::Wire);
+            assert_eq!(PgEncoder::result_kind(column), None);
+        }
+        for (row, expected) in rows
+            .iter()
+            .zip(["2024-01-02T00:00:00", "2024-01-03T04:05:06"])
+        {
+            let (cell, kind) = PgEncoder::decode_cell(row, 0, &columns[0]);
+            assert_eq!(kind, None);
+            assert!(matches!(cell, Cell::DateTime(_)), "{cell:?}");
+            let mut bytes = Vec::new();
+            write_cell(&mut bytes, &cell);
+            assert_eq!(
+                rmp_serde::from_slice::<Value>(&bytes).unwrap(),
+                Value::from(expected)
+            );
+
+            let (cell, kind) = PgEncoder::decode_cell(row, 1, &columns[1]);
+            assert_eq!(kind, None);
+            assert!(
+                matches!(&cell, Cell::Array(values) if matches!(values.as_ref(), ArrayValues::DateTime(_))),
+                "{cell:?}"
+            );
+            bytes.clear();
+            write_cell(&mut bytes, &cell);
+            assert_eq!(
+                rmp_serde::from_slice::<Value>(&bytes).unwrap(),
+                Value::Array(vec![Value::from(expected), Value::Nil])
+            );
+        }
+
+        let row = sqlx::query("SELECT 'infinity'::date AS d")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let column = &PgEncoder::extract_columns(&row, Some(&specs))[0];
+        let (cell, _) = PgEncoder::decode_cell(&row, 0, column);
+        assert!(matches!(cell, Cell::Str(text) if text == "infinity"));
     }
 
     #[tokio::test]

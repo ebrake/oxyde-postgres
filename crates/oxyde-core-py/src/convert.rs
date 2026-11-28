@@ -1,13 +1,20 @@
 //! Conversion helpers: backend/dialect mapping, pool settings extraction,
 //! and value conversion between Rust types and Python objects.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use oxyde_driver::{DatabaseBackend, PoolSettings as DriverPoolSettings};
+use chrono::{Datelike, FixedOffset, Timelike};
+
+use oxyde_driver::{ArrayItem, Cell, DatabaseBackend, PoolSettings as DriverPoolSettings};
 use oxyde_sql::Dialect;
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{
+    PyBool, PyBytes, PyDateTime, PyDelta, PyDict, PyList, PyString, PyTime, PyTuple, PyType,
+    PyTzInfo,
+};
+use pyo3::IntoPyObjectExt;
 use sea_query::Value as QueryValue;
 use serde_json::Value as JsonValue;
 
@@ -253,6 +260,218 @@ fn value_to_py_tagged<'py>(py: Python<'py>, value: &QueryValue) -> PyResult<Boun
     )
 }
 
+pub(crate) static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+pub(crate) static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+#[derive(Default)]
+pub(crate) struct CellConverter<'py> {
+    offsets: HashMap<i32, Bound<'py, PyTzInfo>>,
+}
+
+impl<'py> CellConverter<'py> {
+    fn offset(&mut self, py: Python<'py>, offset: FixedOffset) -> PyResult<&Bound<'py, PyTzInfo>> {
+        use std::collections::hash_map::Entry;
+        match self.offsets.entry(offset.local_minus_utc()) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let tz = if offset.local_minus_utc() == 0 {
+                    PyTzInfo::utc(py)?.to_owned()
+                } else {
+                    offset.into_pyobject(py)?
+                };
+                Ok(entry.insert(tz))
+            }
+        }
+    }
+}
+
+/// Convert a decoded cell to its Python representation. Untagged typed cells
+/// use the same wire representation as MessagePack.
+pub(crate) fn cell_to_py<'py>(
+    py: Python<'py>,
+    converter: &mut CellConverter<'py>,
+    cell: &Cell,
+    native: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match cell {
+        Cell::Null => py.None().into_bound(py),
+        Cell::Bool(value) => PyBool::new(py, *value).to_owned().into_any(),
+        Cell::Int(value) => value.into_bound_py_any(py)?,
+        Cell::UInt(value) => value.into_bound_py_any(py)?,
+        Cell::Float(value) => value.into_bound_py_any(py)?,
+        Cell::Str(value) => PyString::new(py, value).into_any(),
+        Cell::Bytes(value) => PyBytes::new(py, value).into_any(),
+        Cell::Json(value) => json_to_py(py, value)?.into_bound(py),
+        Cell::Array(values) => {
+            let list = PyList::empty(py);
+            values.try_for_each(|item| {
+                list.append(array_item_to_py(py, converter, &item, native)?)
+            })?;
+            list.into_any()
+        }
+        Cell::Uuid(_)
+        | Cell::Decimal(_)
+        | Cell::DecimalText(_)
+        | Cell::DateTime(_)
+        | Cell::DateTimeTz(_)
+        | Cell::Date(_)
+        | Cell::Time(_)
+        | Cell::TimeTz(..)
+        | Cell::Duration(_)
+        | Cell::DurationAggregate(_) => {
+            if native {
+                typed_cell_to_py(py, converter, cell)?
+            } else {
+                typed_cell_to_wire_py(py, cell)?
+            }
+        }
+    })
+}
+
+fn typed_cell_to_wire_py<'py>(py: Python<'py>, cell: &Cell) -> PyResult<Bound<'py, PyAny>> {
+    match cell {
+        Cell::DecimalText(value) => Ok(PyString::new(py, value).into_any()),
+        #[allow(clippy::cast_precision_loss)]
+        Cell::Duration(micros) => (*micros as f64 / 1_000_000.0).into_bound_py_any(py),
+        Cell::Uuid(_)
+        | Cell::Decimal(_)
+        | Cell::DateTime(_)
+        | Cell::DateTimeTz(_)
+        | Cell::Date(_)
+        | Cell::Time(_)
+        | Cell::TimeTz(..)
+        | Cell::DurationAggregate(_) => {
+            let text = cell
+                .wire_text()
+                .ok_or_else(|| PyTypeError::new_err("cell has no wire text"))?;
+            Ok(PyString::new(py, &text).into_any())
+        }
+        Cell::Null
+        | Cell::Bool(_)
+        | Cell::Int(_)
+        | Cell::UInt(_)
+        | Cell::Float(_)
+        | Cell::Str(_)
+        | Cell::Bytes(_)
+        | Cell::Json(_)
+        | Cell::Array(_) => Err(PyTypeError::new_err("expected a typed cell")),
+    }
+}
+
+fn array_item_to_py<'py>(
+    py: Python<'py>,
+    converter: &mut CellConverter<'py>,
+    item: &ArrayItem<'_>,
+    native: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    match item {
+        ArrayItem::Cell(cell) => cell_to_py(py, converter, cell, native),
+        ArrayItem::Str(value) => Ok(PyString::new(py, value).into_any()),
+        ArrayItem::Bytes(value) => Ok(PyBytes::new(py, value).into_any()),
+        ArrayItem::Json(value) => Ok(json_to_py(py, value)?.into_bound(py)),
+    }
+}
+
+fn typed_cell_to_py<'py>(
+    py: Python<'py>,
+    converter: &mut CellConverter<'py>,
+    cell: &Cell,
+) -> PyResult<Bound<'py, PyAny>> {
+    let result = match cell {
+        Cell::Uuid(value) => {
+            let uuid_type = UUID_TYPE.import(py, "uuid", "UUID")?;
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item(pyo3::intern!(py, "int"), value.as_u128())
+                .and_then(|()| uuid_type.call((), Some(&kwargs)))
+        }
+        Cell::Decimal(value) => DECIMAL_TYPE
+            .import(py, "decimal", "Decimal")?
+            .call1((value.to_string(),)),
+        Cell::DecimalText(value) => DECIMAL_TYPE
+            .import(py, "decimal", "Decimal")?
+            .call1((value.as_ref(),)),
+        _ => temporal_cell_to_py(py, converter, cell),
+    };
+    match result {
+        Err(err)
+            if err.is_instance_of::<PyValueError>(py)
+                || err.is_instance_of::<PyOverflowError>(py) =>
+        {
+            typed_cell_to_wire_py(py, cell)
+        }
+        value => value,
+    }
+}
+
+fn temporal_cell_to_py<'py>(
+    py: Python<'py>,
+    converter: &mut CellConverter<'py>,
+    cell: &Cell,
+) -> PyResult<Bound<'py, PyAny>> {
+    match cell {
+        Cell::DateTime(value) => value.into_bound_py_any(py),
+        Cell::DateTimeTz(value) => {
+            let local = value
+                .naive_utc()
+                .checked_add_offset(*value.offset())
+                .ok_or_else(|| PyValueError::new_err("local datetime is outside Chrono's range"))?;
+            let tz = converter.offset(py, *value.offset())?;
+            Ok(PyDateTime::new(
+                py,
+                local.year(),
+                local.month().try_into()?,
+                local.day().try_into()?,
+                local.hour().try_into()?,
+                local.minute().try_into()?,
+                local.second().try_into()?,
+                local.nanosecond() / 1000,
+                Some(tz),
+            )?
+            .into_any())
+        }
+        Cell::Date(value) => value.into_bound_py_any(py),
+        Cell::Time(value) => value.into_bound_py_any(py),
+        Cell::TimeTz(value, offset) => {
+            let tz = converter.offset(py, *offset)?;
+            Ok(PyTime::new(
+                py,
+                value.hour().try_into()?,
+                value.minute().try_into()?,
+                value.second().try_into()?,
+                value.nanosecond() / 1000,
+                Some(tz),
+            )?
+            .into_any())
+        }
+        Cell::Duration(micros) => chrono::TimeDelta::microseconds(*micros).into_bound_py_any(py),
+        Cell::DurationAggregate(micros) => {
+            const DAY: i128 = 86_400_000_000;
+            let within_day = micros.rem_euclid(DAY);
+            Ok(PyDelta::new(
+                py,
+                micros.div_euclid(DAY).try_into()?,
+                (within_day / 1_000_000).try_into()?,
+                (within_day % 1_000_000).try_into()?,
+                false,
+            )?
+            .into_any())
+        }
+        Cell::Null
+        | Cell::Bool(_)
+        | Cell::Int(_)
+        | Cell::UInt(_)
+        | Cell::Float(_)
+        | Cell::Str(_)
+        | Cell::Bytes(_)
+        | Cell::Json(_)
+        | Cell::Array(_)
+        | Cell::Uuid(_)
+        | Cell::Decimal(_)
+        | Cell::DecimalText(_) => Err(PyTypeError::new_err("expected a temporal cell")),
+    }
+}
+
 /// Recursively convert `serde_json::Value` to a Python object.
 pub(crate) fn json_to_py(py: Python<'_>, value: &JsonValue) -> PyResult<Py<PyAny>> {
     Ok(match value {
@@ -403,6 +622,162 @@ fn extract_optional_duration(value: &Bound<'_, PyAny>) -> PyResult<Option<Durati
 mod tests {
     use super::*;
     use pyo3::types::PyDict;
+
+    #[test]
+    fn test_cell_to_py_falls_back_when_local_datetime_exceeds_chrono_range() {
+        Python::initialize();
+        Python::attach(|py| {
+            let offset = FixedOffset::east_opt(3600).unwrap();
+            let cell = Cell::DateTimeTz(chrono::DateTime::from_naive_utc_and_offset(
+                chrono::NaiveDateTime::MAX,
+                offset,
+            ));
+            let mut converter = CellConverter::default();
+            let value = cell_to_py(py, &mut converter, &cell, true).unwrap();
+            assert_eq!(
+                value.extract::<String>().unwrap(),
+                cell.wire_text().unwrap().as_str()
+            );
+        });
+    }
+
+    #[test]
+    fn test_cell_to_py_falls_back_for_native_range_errors() {
+        Python::initialize();
+        Python::attach(|py| {
+            const DAY: i128 = 86_400_000_000;
+            let mut converter = CellConverter::default();
+            for (cell, exception) in [
+                (
+                    Cell::DateTime(
+                        chrono::NaiveDate::from_ymd_opt(10_000, 1, 1)
+                            .unwrap()
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap(),
+                    ),
+                    py.get_type::<PyValueError>(),
+                ),
+                (
+                    Cell::DurationAggregate(1_000_000_000 * DAY),
+                    py.get_type::<PyOverflowError>(),
+                ),
+                (
+                    Cell::DurationAggregate(i128::from(i32::MAX) * DAY + DAY),
+                    py.get_type::<PyValueError>(),
+                ),
+            ] {
+                let err = temporal_cell_to_py(py, &mut converter, &cell).unwrap_err();
+                assert!(err.matches(py, &exception).unwrap());
+                let value = cell_to_py(py, &mut converter, &cell, true).unwrap();
+                assert_eq!(
+                    value.extract::<String>().unwrap(),
+                    cell.wire_text().unwrap().as_str()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_cell_to_py_propagates_non_range_errors() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut converter = CellConverter::default();
+            let cell = Cell::DecimalText("invalid decimal".into());
+            let err = cell_to_py(py, &mut converter, &cell, true).unwrap_err();
+            let invalid_operation = py
+                .import("decimal")
+                .unwrap()
+                .getattr("InvalidOperation")
+                .unwrap();
+            assert!(err.matches(py, &invalid_operation).unwrap());
+        });
+    }
+
+    #[test]
+    fn test_cell_to_py_preserves_special_values_and_numeric_scale() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut converter = CellConverter::default();
+            for wire in ["NaN", "Infinity", "-Infinity", "1.2300"] {
+                let cell = Cell::DecimalText(wire.into());
+                let value = cell_to_py(py, &mut converter, &cell, true).unwrap();
+                assert_eq!(
+                    value.get_type().name().unwrap().to_str().unwrap(),
+                    "Decimal"
+                );
+                assert_eq!(value.str().unwrap().to_str().unwrap(), wire);
+            }
+            let finite = DECIMAL_TYPE.import(py, "decimal", "Decimal").unwrap();
+            let cell = Cell::Decimal("1.2300".parse().unwrap());
+            let value = cell_to_py(py, &mut converter, &cell, true).unwrap();
+            assert!(value.is_exact_instance(finite.as_any()));
+            assert_eq!(value.str().unwrap().to_str().unwrap(), "1.2300");
+
+            for (cell, wire) in [
+                (Cell::Str("infinity".into()), "infinity"),
+                (Cell::Str("24:00:00".into()), "24:00:00"),
+                (
+                    Cell::Date(chrono::NaiveDate::from_ymd_opt(0, 1, 2).unwrap()),
+                    "0000-01-02",
+                ),
+                (
+                    Cell::Date(chrono::NaiveDate::from_ymd_opt(10000, 1, 2).unwrap()),
+                    "+10000-01-02",
+                ),
+            ] {
+                assert_eq!(
+                    cell_to_py(py, &mut converter, &cell, true)
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    wire
+                );
+            }
+            assert!(cell_to_py(py, &mut converter, &Cell::Null, true)
+                .unwrap()
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn test_cell_to_py_preserves_timedelta_and_fixed_offset_precision() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut converter = CellConverter::default();
+            for micros in [(1 << 53) + 1, -((1 << 53) + 1)] {
+                let value = cell_to_py(py, &mut converter, &Cell::Duration(micros), true).unwrap();
+                assert_eq!(
+                    value
+                        .extract::<chrono::TimeDelta>()
+                        .unwrap()
+                        .num_microseconds(),
+                    Some(micros),
+                );
+            }
+            for seconds in [0, 7261, -7261] {
+                let time = chrono::NaiveTime::from_hms_micro_opt(12, 30, 0, 1).unwrap();
+                let offset = FixedOffset::east_opt(seconds).unwrap();
+                let value =
+                    cell_to_py(py, &mut converter, &Cell::TimeTz(time, offset), true).unwrap();
+                let python_offset = value.call_method0("utcoffset").unwrap();
+                assert_eq!(
+                    python_offset
+                        .extract::<chrono::TimeDelta>()
+                        .unwrap()
+                        .num_seconds(),
+                    i64::from(seconds),
+                );
+                let tzinfo = value.getattr("tzinfo").unwrap();
+                assert_eq!(
+                    tzinfo.get_type().name().unwrap().to_str().unwrap(),
+                    "timezone"
+                );
+                if seconds == 0 {
+                    assert!(tzinfo.is(PyTzInfo::utc(py).unwrap()));
+                }
+            }
+        });
+    }
 
     #[test]
     fn test_extract_pool_settings_from_dict() {

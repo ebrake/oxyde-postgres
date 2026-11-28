@@ -25,7 +25,7 @@ Functions Exported:
         init_pool, init_pool_overwrite, close_pool, close_all_pools
 
     Query execution:
-        execute, execute_in_transaction
+        execute, execute_in_transaction, execute_rows, execute_rows_in_transaction
 
     Write-value serialization:
         serialize_column_values
@@ -54,7 +54,7 @@ from collections.abc import Callable
 from typing import Any
 
 # Expected ABI version - must match __abi_version__ in Rust module
-EXPECTED_ABI_VERSION = 2
+EXPECTED_ABI_VERSION = 3
 
 _REINSTALL_CORE = (
     "Reinstall oxyde-postgres, or run make build-core-dev in a source checkout."
@@ -74,6 +74,8 @@ _FUNCTION_REGISTRY: list[tuple[str, str, bool, bool]] = [
     # Query execution
     ("execute", "execute", True, False),
     ("execute_in_transaction", "execute_in_transaction", True, False),
+    ("execute_rows", "execute_rows", True, False),
+    ("execute_rows_in_transaction", "execute_rows_in_transaction", True, False),
     # Write-value serialization
     ("serialize_column_values", "serialize_column_values", False, False),
     # Transactions
@@ -182,6 +184,8 @@ _exports = _load_functions()
 # Export individual functions for IDE support and type checking
 execute = _exports["execute"]
 execute_in_transaction = _exports["execute_in_transaction"]
+execute_rows = _exports["execute_rows"]
+execute_rows_in_transaction = _exports["execute_rows_in_transaction"]
 init_pool = _exports["init_pool"]
 init_pool_overwrite = _exports["init_pool_overwrite"]
 close_pool = _exports["close_pool"]

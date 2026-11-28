@@ -15,7 +15,7 @@
 //! ```text
 //! Python Query → IR dict → msgpack → Rust → SQL → DB
 //!                                         ↓
-//! Python models ← Pydantic ← msgpack ← rows
+//! Python models ← Pydantic ← native rows
 //! ```
 //!
 //! # Exposed Functions
@@ -29,6 +29,8 @@
 //! ## Query Execution
 //! - `execute(pool_name, ir_bytes)` → Coroutine[bytes]
 //! - `execute_in_transaction(pool_name, tx_id, ir_bytes)` → Coroutine[bytes]
+//! - `execute_rows(pool_name, ir_bytes)` → Coroutine[ResultRows]
+//! - `execute_rows_in_transaction(pool_name, tx_id, ir_bytes)` → Coroutine[ResultRows]
 //! - `serialize_column_values(values, columns, fallback, registry, builtins, map_first=True)` → dict
 //!
 //! ## Transactions
@@ -64,7 +66,7 @@
 //!
 //! # ABI Version
 //!
-//! `__abi_version__ = 2` exposed for Python-side compatibility checking.
+//! `__abi_version__ = 3` exposed for Python-side compatibility checking.
 
 // Use mimalloc as global allocator if feature enabled
 #[cfg(feature = "mimalloc")]
@@ -81,13 +83,14 @@ mod errors;
 mod execute;
 mod migration;
 mod pool;
+mod result_rows;
 mod serialize;
 mod types;
 
 use pyo3::prelude::*;
 
 /// ABI version for compatibility checking
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 
 /// Python module definition
 #[pymodule(name = "_oxyde_core", gil_used = false)]
@@ -99,6 +102,9 @@ fn oxyde_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pool::close_pool, m)?)?;
     m.add_function(wrap_pyfunction!(pool::close_all_pools, m)?)?;
     m.add_function(wrap_pyfunction!(execute::execute, m)?)?;
+    m.add_function(wrap_pyfunction!(execute::execute_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(execute::execute_rows_in_transaction, m)?)?;
+    m.add_class::<result_rows::ResultRows>()?;
     m.add_function(wrap_pyfunction!(serialize::serialize_column_values, m)?)?;
     m.add_function(wrap_pyfunction!(pool::begin_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(pool::commit_transaction, m)?)?;

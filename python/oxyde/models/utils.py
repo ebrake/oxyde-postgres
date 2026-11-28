@@ -33,8 +33,9 @@ Functions:
 from __future__ import annotations
 
 from types import NoneType, UnionType
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Annotated, Any, Union, cast, get_args, get_origin
 
+from pydantic import Json
 from pydantic.fields import FieldInfo
 
 
@@ -53,6 +54,25 @@ def _unpack_annotated(hint: Any) -> tuple[Any, tuple[Any, ...]]:
         if args:
             return args[0], tuple(args[1:])
     return hint, ()
+
+
+def _requires_json_text(field_info: FieldInfo) -> bool:
+    """Check for Pydantic Json markers on a field or inside its annotation."""
+
+    # Pydantic exposes Json as an Annotated alias to static type checkers.
+    json_class = cast(type, Json)
+
+    def has_json_marker(annotation: Any) -> bool:
+        # get_args includes the metadata of nested Annotated types.
+        return (
+            annotation is json_class
+            or isinstance(annotation, json_class)
+            or any(has_json_marker(arg) for arg in get_args(annotation))
+        )
+
+    return has_json_marker(field_info.annotation) or any(
+        has_json_marker(marker) for marker in field_info.metadata
+    )
 
 
 def _unwrap_optional(hint: Any) -> tuple[Any, bool]:
